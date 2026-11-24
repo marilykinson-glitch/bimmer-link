@@ -17,8 +17,9 @@
 <div class="app-shell">
   <div class="topbar">
     <div>
-      <div class="car-title" id="carTitle">BMW iDrive 7</div>
+      <div class="car-title" id="carTitle">BMW 5 Series · M Sport</div>
       <div class="sub-meta">
+        <span id="paintBadge" class="paint-chip hidden"></span>
         <span id="updatedLabel">Chưa ghép nối xe</span>
       </div>
     </div>
@@ -34,34 +35,7 @@
   <section id="view-home">
     <div class="hero-stage">
       <div class="studio-glow" id="studioGlow"></div>
-      <!-- Sleek BMW G-Series Sedan Studio Silhouette -->
-      <svg class="car-svg" viewBox="0 0 420 150" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="bodyGrad" x1="20" y1="20" x2="390" y2="120" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#64748b"/>
-            <stop offset="45%" stop-color="#cbd5e1"/>
-            <stop offset="100%" stop-color="#1e293b"/>
-          </linearGradient>
-          <linearGradient id="glassGrad" x1="120" y1="25" x2="290" y2="68" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#0f172a"/>
-            <stop offset="100%" stop-color="#1e3a5f"/>
-          </linearGradient>
-        </defs>
-        <ellipse cx="210" cy="126" rx="176" ry="12" fill="rgba(0,0,0,0.65)"/>
-        <path d="M36 96 C40 74, 68 65, 114 60 L158 34 C192 26, 256 26, 294 38 L342 62 C372 67, 392 78, 394 98 L388 112 L34 112 Z" fill="url(#bodyGrad)" stroke="#94a3b8" stroke-width="1.4"/>
-        <path d="M126 59 L163 38 C194 31, 248 31, 284 41 L322 61 Z" fill="url(#glassGrad)" stroke="#475569" stroke-width="1"/>
-        <line x1="218" y1="34" x2="214" y2="60" stroke="#64748b" stroke-width="2"/>
-        <!-- Iconic BMW L-shaped Angel Eyes Headlights & Taillights -->
-        <path id="headlightGlow" d="M40 84 L64 81 L68 88 L42 90 Z" fill="#38bdf8"/>
-        <path d="M366 78 L392 80 L390 88 L364 85 Z" fill="#ef4444"/>
-        <!-- Alloy Wheels -->
-        <circle cx="102" cy="110" r="24" fill="#090d16" stroke="#94a3b8" stroke-width="3"/>
-        <circle cx="102" cy="110" r="14" fill="#1e293b" stroke="#cbd5e1" stroke-width="1.5"/>
-        <circle cx="102" cy="110" r="4" fill="#38bdf8"/>
-        <circle cx="324" cy="110" r="24" fill="#090d16" stroke="#94a3b8" stroke-width="3"/>
-        <circle cx="324" cy="110" r="14" fill="#1e293b" stroke="#cbd5e1" stroke-width="1.5"/>
-        <circle cx="324" cy="110" r="4" fill="#38bdf8"/>
-      </svg>
+      <img id="heroCarImg" class="car-hero-img" src="car-studio.jpg" alt="My BMW">
       <div class="lock-banner" id="securityBanner">ĐÃ KHOÁ AN TOÀN</div>
     </div>
 
@@ -250,8 +224,15 @@
         Quét mã QR trên màn hình <b>MyBMW &amp; 1CR</b> của xe (cả iPhone và Android dùng chung 1 mã đều đồng bộ tức thì).<br>
         • <b>Trên iPhone:</b> Sau khi quét mở trang này trong Safari, bấm nút <b>Chia sẻ → Thêm vào MH chính</b> để dùng full màn hình như App hãng!
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị của xe:</div>
-      <input type="text" id="inpCarName" value="BMW iDrive 7" onchange="saveCarName()">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị tuỳ chỉnh (để trống = tự lấy theo đời xe MGU):</div>
+      <input type="text" id="inpCarName" placeholder="Tự nhận diện từ đầu xe (VD: BMW 5 Series LCI · M Sport)" onchange="saveCarName()">
+      <div class="switch-row" style="margin-top:6px">
+        <span>Ưu tiên hình xe gốc quét trực tiếp từ đầu MGU</span>
+        <input type="checkbox" id="chkUseFactoryHero" checked onchange="toggleHeroPref()">
+      </div>
+      <div class="btn-row">
+        <button class="btn" onclick="sendCmd('refresh_hero')">🔄 Quét lại mẫu xe &amp; màu sơn gốc từ xe</button>
+      </div>
 
       <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Mã ghép nối xe (Pair Code hoặc Link QR):</div>
       <input type="text" id="inpPairCode" placeholder="Dán link hoặc mã ghép nối từ màn hình xe">

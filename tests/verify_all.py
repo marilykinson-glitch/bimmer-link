@@ -14,6 +14,9 @@ JS_FILES = [
     'apps/bimmer_link/ui.js',
     'tools/bimmer-link/bimmer-link.js',
     'tools/bimmer-link/car-link.js',
+    'tools/bimmer-link/car-hero.js',
+    'tools/bimmer-link/carpaint.js',
+    'tools/bimmer-link/wbm.js',
     'tools/bimmer-link/cloud.js',
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
@@ -98,8 +101,8 @@ def check_full_mgu_build():
             [sys.executable, os.path.join(ROOT, 'kit/tools/build.py'), '--language', 'vi', '--plain-version', 'bimmer_link'],
             cwd=ROOT, capture_output=True, text=True, check=True
         )
-        tgz = os.path.join(dist_dir, 'bimmer_link@0.2.0.tgz')
-        mgu_pkg = os.path.join(dist_dir, 'bimmer_link@0.2.0.mgu')
+        tgz = os.path.join(dist_dir, 'bimmer_link@0.3.0.tgz')
+        mgu_pkg = os.path.join(dist_dir, 'bimmer_link@0.3.0.mgu')
         assert os.path.exists(tgz) and os.path.getsize(tgz) > 10000
         assert os.path.exists(mgu_pkg) and os.path.getsize(mgu_pkg) > 10000
         with tarfile.open(tgz, 'r:gz') as tf:
@@ -111,7 +114,7 @@ def check_full_mgu_build():
     finally:
         if created_sdk and os.path.exists(sdk_dir):
             shutil.rmtree(sdk_dir)
-        for p in (os.path.join(dist_dir, 'bimmer_link@0.2.0.tgz'), os.path.join(dist_dir, 'bimmer_link@0.2.0.mgu'), os.path.join(dist_dir, 'bimmer_link')):
+        for p in (os.path.join(dist_dir, 'bimmer_link@0.3.0.tgz'), os.path.join(dist_dir, 'bimmer_link@0.3.0.mgu'), os.path.join(dist_dir, 'bimmer_link')):
             if os.path.isdir(p):
                 shutil.rmtree(p)
             elif os.path.exists(p):

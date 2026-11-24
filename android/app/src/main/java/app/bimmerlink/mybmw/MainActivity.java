@@ -134,6 +134,7 @@ public class MainActivity extends Activity {
         if (p.endsWith(".css")) return "text/css";
         if (p.endsWith(".js")) return "application/javascript";
         if (p.endsWith(".png")) return "image/png";
+        if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
         if (p.endsWith(".webmanifest") || p.endsWith(".json")) return "application/json";
         return "application/octet-stream";
     }

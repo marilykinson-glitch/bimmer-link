@@ -48,6 +48,7 @@ function deriveIdentity(seedBuf) {
         topics: {
             state: 'bl_st_' + topicId,
             photo: 'bl_ph_' + topicId,
+            hero: 'bl_hr_' + topicId,
             cmd: 'bl_cm_' + topicId,
             diag: 'bl_dg_' + topicId,
         },
@@ -207,6 +208,16 @@ class CloudBridge {
         const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, meta);
         for (let i = 0; i < chunks.length; i++) {
             await this._postTopic(this.identity.topics.photo, chunks[i], 15000);
+        }
+        return true;
+    }
+
+    /** Publish the genuine factory-shaded 2D vehicle hero PNG extracted from the head unit. */
+    async publishHero(pngBuf, meta) {
+        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
+        const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, Object.assign({ id: 'hero' }, meta || {}));
+        for (let i = 0; i < chunks.length; i++) {
+            await this._postTopic(this.identity.topics.hero, chunks[i], 15000);
         }
         return true;
     }

@@ -23,8 +23,9 @@ const Snap = require('./snapshot');
 const Tg = require('./telegram');
 const CarLink = require('./car-link');
 const Cloud = require('./cloud');
+const CarHero = require('./car-hero');
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -280,6 +281,26 @@ function createService(customCfg) {
     });
 
     const identity = Cloud.loadOrCreateIdentity(path.join(C.state, 'cloud-identity.json'));
+    let heroData = { detected: false, meta: { chassis: '', modelTitle: 'BMW iDrive 7', series: 'BMW', trimLabel: '', paintLabel: '' }, png: null };
+    let heroPushedSig = '';
+
+    function refreshFactoryHero(forcePush) {
+        try {
+            const scanned = CarHero.scanFactoryVehicle({ procDir: C.proc });
+            if (scanned && scanned.detected) {
+                heroData = scanned;
+                if (scanned.png) {
+                    try { writeAtomic(path.join(C.run, 'hero.png'), scanned.png, 0o644); } catch (e) {}
+                }
+            }
+        } catch (e) {}
+        const sig = JSON.stringify(heroData.meta) + '|' + (heroData.png ? heroData.png.length : 0);
+        if ((forcePush || sig !== heroPushedSig) && heroData.png) {
+            heroPushedSig = sig;
+            cloud.publishHero(heroData.png, { title: heroData.meta.modelTitle, at: Date.now() }).catch(() => {});
+        }
+    }
+
     const cloud = new Cloud.CloudBridge({
         identity,
         upOpts,
@@ -289,6 +310,11 @@ function createService(customCfg) {
         onCommand: async (cmdObj) => {
             const c = String(cmdObj.cmd || '');
             const a = cmdObj.arg || {};
+            if (c === 'refresh_hero') {
+                refreshFactoryHero(true);
+                syncCloudState(true);
+                return;
+            }
             if (c === 'schema') {
                 const rep = await callWorker('schema', {}, 5000);
                 await cloud.publishDiag({
@@ -327,6 +353,8 @@ function createService(customCfg) {
     function cloudSnapshotPayload(extra) {
         return Object.assign({
             version: VERSION,
+            vehicleProfile: heroData.meta,
+            hasFactoryHero: !!heroData.png,
             telemetry: S.telemetry,
             lastTrip: S.lastTrip,
             trips: trips.slice(0, 8),
@@ -618,6 +646,7 @@ function createService(customCfg) {
         const payload = {
             at: Date.now(),
             version: VERSION,
+            vehicleProfile: heroData.meta,
             url,
             cloudUrl: cloud.pairingUrl(),
             pairCode: identity.pairCode,
@@ -877,6 +906,8 @@ function createService(customCfg) {
         }, 1800);
 
         const fwTimer = setInterval(fwCheck, 30000);
+        refreshFactoryHero(false);
+        setTimeout(() => refreshFactoryHero(false), 20000);
         writeStatus();
         setTimeout(() => syncCloudState(true, { event: 'online' }), 2500);
 

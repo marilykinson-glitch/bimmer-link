@@ -9,11 +9,14 @@ const RELAY_HOST = 'ntfy.sh';
 let identity = null;        // { pairCode, cryptoKey, topicId, topics }
 let stateWs = null;
 let photoWs = null;
+let heroWs = null;
 let diagWs = null;
 let vehicleData = loadLocal('mybmw_state') || null;
 let latestSnap = loadLocal('mybmw_snap') || null;   // { dataUrl, at, title }
+let factoryHero = loadLocal('mybmw_hero') || null;  // { dataUrl, at, title }
 let lastSchema = null;
 let photoBuckets = {};
+let heroBuckets = {};
 let diagBuckets = {};
 let arm1crUntil = 0;
 let mapInstance = null, mapMarker = null, mapCircle = null;
@@ -101,6 +104,7 @@ async function buildIdentity(pairCode) {
     topics: {
       state: 'bl_st_' + topicId,
       photo: 'bl_ph_' + topicId,
+      hero: 'bl_hr_' + topicId,
       cmd: 'bl_cm_' + topicId,
       diag: 'bl_dg_' + topicId,
     },
@@ -167,6 +171,7 @@ async function connectCar(code) {
   await Promise.all([
     fetchCachedTopic(id.topics.state, onStatePacket),
     fetchCachedTopic(id.topics.photo, onPhotoPacket),
+    fetchCachedTopic(id.topics.hero, onHeroPacket),
   ]);
   openLiveSockets();
   renderAll();
@@ -174,8 +179,8 @@ async function connectCar(code) {
 }
 
 function closeSockets() {
-  [stateWs, photoWs, diagWs].forEach((ws) => { if (ws) { try { ws.close(); } catch (e) {} } });
-  stateWs = photoWs = diagWs = null;
+  [stateWs, photoWs, heroWs, diagWs].forEach((ws) => { if (ws) { try { ws.close(); } catch (e) {} } });
+  stateWs = photoWs = heroWs = diagWs = null;
 }
 
 async function fetchCachedTopic(topic, handler) {
@@ -213,6 +218,7 @@ function openLiveSockets() {
   };
   stateWs = sub(identity.topics.state, onStatePacket);
   photoWs = sub(identity.topics.photo, onPhotoPacket);
+  heroWs = sub(identity.topics.hero, onHeroPacket);
   diagWs = sub(identity.topics.diag, onDiagPacket);
 }
 
@@ -262,6 +268,24 @@ function onPhotoPacket(pkt) {
       latestSnap = { dataUrl: 'data:image/png;base64,' + fullB64, at: b.at, title: b.title };
       saveLocal('mybmw_snap', latestSnap);
     }
+  }
+}
+
+function onHeroPacket(pkt) {
+  if (!pkt || pkt.t !== 'photo_chunk') return;
+  const hid = pkt.id || 'hero';
+  let b = heroBuckets[hid];
+  if (!b) b = heroBuckets[hid] = { total: pkt.total || 1, parts: {}, got: 0, at: pkt.at || Date.now(), title: pkt.title || '' };
+  if (b.parts[pkt.idx] === undefined) {
+    b.parts[pkt.idx] = pkt.b64 || '';
+    b.got++;
+  }
+  if (b.got >= b.total) {
+    let fullB64 = '';
+    for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
+    delete heroBuckets[hid];
+    factoryHero = { dataUrl: 'data:image/png;base64,' + fullB64, at: b.at, title: b.title };
+    saveLocal('mybmw_hero', factoryHero);
   }
 }
 
@@ -419,9 +443,37 @@ function relTime(ms) {
 }
 
 function renderAll() {
-  const carName = localStorage.getItem('mybmw_car_name') || 'BMW iDrive 7';
-  document.getElementById('carTitle').textContent = carName;
-  document.getElementById('inpCarName').value = carName;
+  const customName = localStorage.getItem('mybmw_car_name') || '';
+  const prof = (vehicleData && vehicleData.vehicleProfile) || {};
+  const autoTitle = prof.modelTitle || 'BMW 5 Series · M Sport';
+  document.getElementById('carTitle').textContent = customName || autoTitle;
+  if (document.activeElement !== document.getElementById('inpCarName')) {
+    document.getElementById('inpCarName').value = customName;
+  }
+
+  const paintChip = document.getElementById('paintBadge');
+  const chipParts = [prof.chassis, prof.paintLabel].filter(Boolean);
+  if (chipParts.length) {
+    paintChip.textContent = chipParts.join(' · ');
+    paintChip.classList.remove('hidden');
+  } else {
+    paintChip.classList.add('hidden');
+  }
+
+  const useFactory = localStorage.getItem('mybmw_use_factory_hero') !== '0';
+  const chkHero = document.getElementById('chkUseFactoryHero');
+  if (chkHero) chkHero.checked = useFactory;
+  const heroEl = document.getElementById('heroCarImg');
+  if (heroEl) {
+    if (useFactory && factoryHero && factoryHero.dataUrl) {
+      if (heroEl.src !== factoryHero.dataUrl) heroEl.src = factoryHero.dataUrl;
+      heroEl.classList.add('factory-png');
+    } else {
+      if (heroEl.src.indexOf('car-studio.jpg') < 0) heroEl.src = 'car-studio.jpg';
+      heroEl.classList.remove('factory-png');
+    }
+  }
+
   if (window.AndroidBridge) document.getElementById('androidDownloadCard').classList.add('hidden');
 
   if (!identity) {
@@ -584,8 +636,14 @@ function fillRaw(iface, kind, name, sample) {
 }
 
 function saveCarName() {
-  const v = document.getElementById('inpCarName').value.trim() || 'BMW iDrive 7';
+  const v = document.getElementById('inpCarName').value.trim();
   localStorage.setItem('mybmw_car_name', v);
+  renderAll();
+}
+
+function toggleHeroPref() {
+  const on = document.getElementById('chkUseFactoryHero').checked;
+  localStorage.setItem('mybmw_use_factory_hero', on ? '1' : '0');
   renderAll();
 }
 

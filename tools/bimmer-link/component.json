@@ -1,9 +1,9 @@
 {
   "id": "bimmer-link",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "title": "Trợ thủ MyBMW & 1CR",
-  "description": "Dịch vụ nền cho ứng dụng MyBMW & 1CR: đồng bộ dữ liệu xe với ứng dụng điện thoại MyBMW (iPhone PWA & Android APK) và Telegram, gửi ảnh trạng thái khi đỗ xe, giám sát chế độ Valet, điều khiển đề nổ làm mát 1CR và hẹn giờ BDC/IHKA.",
+  "description": "Dịch vụ nền cho ứng dụng MyBMW & 1CR: tự động quét đúng dòng xe, gói trang bị (M Sport / Luxury), màu sơn gốc và hình xe chuẩn hãng trên đầu MGU; đồng bộ thời gian thực với ứng dụng điện thoại MyBMW (iPhone PWA & Android APK); gửi ảnh vị trí đỗ hầm, giám sát Valet, điều khiển đề nổ 1CR và hẹn giờ BDC/IHKA.",
   "license": "GPL-3.0-or-later",
   "mguHmi": [
     "ID7"
@@ -19,6 +19,18 @@
     },
     {
       "path": "car-link.js",
+      "mode": "0644"
+    },
+    {
+      "path": "car-hero.js",
+      "mode": "0644"
+    },
+    {
+      "path": "carpaint.js",
+      "mode": "0644"
+    },
+    {
+      "path": "wbm.js",
       "mode": "0644"
     },
     {
