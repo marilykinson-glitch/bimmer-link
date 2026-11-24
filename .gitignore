@@ -9,3 +9,4 @@ android/local.properties
 *.apk
 *.jks
 .DS_Store
+*.idsig
