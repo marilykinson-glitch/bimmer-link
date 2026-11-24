@@ -124,6 +124,17 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
         assert os.path.exists(tgz) and os.path.getsize(tgz) > 10000
         assert os.path.exists(mgu_pkg) and os.path.getsize(mgu_pkg) > 10000
 
+        with tarfile.open(mgu_pkg, 'r:gz') as mf:
+            meta_j = json.loads(mf.extractfile('meta.json').read().decode('utf-8'))
+            man_j = json.loads(mf.extractfile('source/manifest.json').read().decode('utf-8'))
+            assert 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy' in meta_j.get('optional', {})
+            assert man_j['proxies'].get('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy') == '*'
+            assert man_j['proxies'].get('de.bmw.infotainment.climate.ClimateMaster') == '*'
+
+        cloud_src = open(os.path.join(ROOT, 'tools/bimmer-link/cloud.js'), encoding='utf-8').read()
+        m_chunk = re.search(r'const CHUNK_BYTES\s*=\s*(\d+);', cloud_src)
+        assert m_chunk and int(m_chunk.group(1)) <= 1650, 'CHUNK_BYTES must keep encrypted wire payload < 4096B on ntfy.sh'
+
         # Extract exact runtime + baked font atlases from the built .tgz to test REAL car execution!
         extracted_files = {}
         inflated_font_alphas = {}

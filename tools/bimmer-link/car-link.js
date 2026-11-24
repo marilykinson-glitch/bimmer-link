@@ -391,6 +391,16 @@ function buildDirectPayload(meta, wantOn, sample, numericEnum) {
         });
         return out;
     }
+    if (td && td.kind === 'union' && Array.isArray(td.branches) && td.branches.length) {
+        const br = td.branches[0];
+        const inner = buildDirectPayload(br, wantOn, undefined, numericEnum);
+        const uObj = {};
+        if (br && br.name) uObj[br.name] = inner;
+        return uObj;
+    }
+    if (td && /array/i.test(td.kind)) {
+        return [wantOn ? 1 : 0];
+    }
     if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
         const out = {};
         Object.keys(sample).forEach((k) => {
@@ -430,6 +440,16 @@ function buildTimerPayload(meta, hour, minute, enabled, sample, numericEnum) {
             setField(out, f.name, f, cur);
         });
         return out;
+    }
+    if (td && td.kind === 'union' && Array.isArray(td.branches) && td.branches.length) {
+        const br = td.branches[0];
+        const inner = buildTimerPayload(br, h, m, enabled, undefined, numericEnum);
+        const uObj = {};
+        if (br && br.name) uObj[br.name] = inner;
+        return uObj;
+    }
+    if (td && /array/i.test(td.kind)) {
+        return [{ operationHour: h, operationMinute: m, hour: h, minute: m, active: !!enabled }];
     }
     if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
         const out = {};
@@ -1151,18 +1171,21 @@ async function runWorker() {
 
             // Try all discovered direct-operation setters & methods first, then master_candidate switches on ClimateMaster
             let succeeded = null;
+            const attemptedCalls = [];
             const rolePasses = ['direct_write', 'master_candidate'];
             for (let rp = 0; rp < rolePasses.length && !succeeded; rp++) {
                 const targetRole = rolePasses[rp];
                 for (let i = 0; i < climateCatalog.interfaces.length; i++) {
                     const d = climateCatalog.interfaces[i];
-                    if (!climateProxies[d.iface]) continue;
+                    const pStrSetter = (f) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], false);
+                    const pNumSetter = (f) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], true);
                     for (let k = 0; k < d.fields.length; k++) {
                         const f = d.fields[k];
                         if (!f.setter || f.roles.indexOf(targetRole) < 0) continue;
-                        const sample = climateLive[d.iface + '.' + f.name];
+                        attemptedCalls.push({ iface: d.iface, kind: 'setter', name: f.name, payload: pStrSetter(f), altPayload: pNumSetter(f) });
+                        if (!climateProxies[d.iface]) continue;
                         try {
-                            const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, sample, num));
+                            const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], num));
                             trace.push(r);
                             if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
                         } catch (e) {
@@ -1172,14 +1195,17 @@ async function runWorker() {
                     for (let k = 0; k < d.methods.length; k++) {
                         const m = d.methods[k];
                         if (m.roles.indexOf(targetRole) < 0) continue;
-                        try {
-                            const r = await callSmart(d.iface, 'method', m, (num) => {
-                                const argObj = {};
-                                m.inArgs.forEach((a) => {
-                                    if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
-                                });
-                                return argObj;
+                        const makeArgs = (num) => {
+                            const argObj = {};
+                            m.inArgs.forEach((a) => {
+                                if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
                             });
+                            return argObj;
+                        };
+                        attemptedCalls.push({ iface: d.iface, kind: 'method', name: m.name, payload: makeArgs(false), altPayload: makeArgs(true) });
+                        if (!climateProxies[d.iface]) continue;
+                        try {
+                            const r = await callSmart(d.iface, 'method', m, makeArgs);
                             trace.push(r);
                             if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
                         } catch (e) {
@@ -1213,7 +1239,7 @@ async function runWorker() {
                 ? 'Không tìm thấy giao diện Climate trong catalog xe'
                 : ('Đã mở ' + openNames.length + '/' + climateCatalog.interfaces.length + ' cổng (' + openNames.slice(0, 5).join(', ') + ') — mở tab Dò 1CR để bấm thử 1 chạm');
             pushPatch({});
-            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers };
+            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers, candidates: attemptedCalls };
         }
 
         if (action === 'schedule1cr') {

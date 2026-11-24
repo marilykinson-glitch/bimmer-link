@@ -12,6 +12,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Window;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -23,6 +24,7 @@ import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final String VIRTUAL_ORIGIN = "https://mybmw.local";
+    private static final int REQ_QR_SCAN = 201;
     private WebView webView;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -49,7 +51,12 @@ public class MainActivity extends Activity {
         ws.setMediaPlaybackRequiresUserGesture(false);
 
         webView.addJavascriptInterface(new Bridge(), "AndroidBridge");
-        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(() -> request.grant(request.getResources()));
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -104,13 +111,31 @@ public class MainActivity extends Activity {
         deliverIncomingIntent(intent);
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_QR_SCAN && resultCode == RESULT_OK && data != null) {
+            String raw = data.getStringExtra("qr_text");
+            if (raw != null && !raw.trim().isEmpty()) {
+                deliverScannedText(raw.trim());
+            }
+        }
+    }
+
     private void deliverIncomingIntent(Intent intent) {
         if (intent == null || intent.getData() == null) return;
-        String rawUrl = intent.getDataString();
+        deliverScannedText(intent.getDataString());
+    }
+
+    private void deliverScannedText(String rawUrl) {
+        if (rawUrl == null || webView == null) return;
         CryptoHelper.Identity id = CryptoHelper.derive(rawUrl);
-        if (id != null && webView != null) {
+        if (id != null) {
             savePairAndStartMonitor(id.pairCode);
             String js = "window.injectPairCodeFromNative && window.injectPairCodeFromNative(" + JSONObject.quote(id.pairCode) + ");";
+            webView.evaluateJavascript(js, null);
+        } else {
+            String js = "window.injectPairCodeFromNative && window.injectPairCodeFromNative(" + JSONObject.quote(rawUrl) + ");";
             webView.evaluateJavascript(js, null);
         }
     }
@@ -149,6 +174,17 @@ public class MainActivity extends Activity {
     }
 
     public final class Bridge {
+        @JavascriptInterface
+        public void openQrScanner() {
+            runOnUiThread(() -> {
+                try {
+                    Intent scan = new Intent(MainActivity.this, QrScannerActivity.class);
+                    startActivityForResult(scan, REQ_QR_SCAN);
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
         @JavascriptInterface
         public void onPairCodeChanged(String code) {
             if (code != null && !code.trim().isEmpty()) {

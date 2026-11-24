@@ -1,11 +1,25 @@
 {
   "id": "bimmer_link",
   "title": "MyBMW & 1CR",
-  "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp thẻ trạng thái / cam 360 kèm vị trí hầm gửi về Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe rửa xe/garage 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA. Quét mã QR trên màn hình để kết nối điện thoại và dò lệnh 1CR trực tiếp.",
-  "version": "0.4.1",
+  "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp 4 camera 360° / thẻ trạng thái kèm vị trí hầm gửi về App MyBMW & Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA.",
+  "version": "0.4.2",
+  "startType": "autostart",
   "vendor": "custom",
   "loggingId": "OABL",
-  "signals": {},
+  "signals": {
+    "de.bmw.infotainment.video.cameraproxy.ICAM2Proxy": { "_all": true, "_optional": "360 Surround View camera" },
+    "de.bmw.infotainment.video.cameraproxy.CameraProxy": { "_all": true, "_optional": "CameraProxy base" },
+    "de.bmw.dass.XView3D": { "_all": true, "_optional": "XView3D state" },
+    "de.bmw.infotainment.climate.ClimateMaster": { "_all": true, "_optional": "1CR ClimateMaster" },
+    "de.bmw.infotainment.climate.SteeringWheelClimate": { "_all": true, "_optional": "SteeringWheelClimate" },
+    "de.bmw.infotainment.climate.Climate": { "_all": true, "_optional": "Climate" },
+    "de.bmw.infotainment.climate.AirConditioning": { "_all": true, "_optional": "AirConditioning" },
+    "de.bmw.infotainment.climate.IndependentClimateControl": { "_all": true, "_optional": "IndependentClimateControl" },
+    "de.bmw.infotainment.climate.AuxiliaryClimate": { "_all": true, "_optional": "AuxiliaryClimate" },
+    "de.bmw.infotainment.climate.ParkClimatisation": { "_all": true, "_optional": "ParkClimatisation" },
+    "de.bmw.infotainment.climate.PreConditioning": { "_all": true, "_optional": "PreConditioning" },
+    "de.bmw.infotainment.climate.Standklima": { "_all": true, "_optional": "Standklima" }
+  },
   "screens": [
     {
       "name": "MAIN",

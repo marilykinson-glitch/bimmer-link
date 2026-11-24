@@ -305,12 +305,15 @@ def manifest_for(spec):
         inst = fields.pop('_instances', '1') if isinstance(fields, dict) else '1'
         entry = {'instances': inst}
         if isinstance(fields, dict):
-            attrs = {k: v for k, v in fields.items() if not k.startswith('_')}
-            meths = fields.get('_methods')
-            evts = fields.get('_broadcasts')
-            if attrs: entry['attributes'] = attrs
-            if meths: entry['methods'] = meths
-            if evts: entry['broadcasts'] = evts
+            if fields.get('_all'):
+                entry = '*'
+            else:
+                attrs = {k: v for k, v in fields.items() if not k.startswith('_')}
+                meths = fields.get('_methods')
+                evts = fields.get('_broadcasts')
+                if attrs: entry['attributes'] = attrs
+                if meths: entry['methods'] = meths
+                if evts: entry['broadcasts'] = evts
         else:
             entry = '*'
         proxies[iface] = entry

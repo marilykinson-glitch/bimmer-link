@@ -183,6 +183,128 @@ mgu.run({
         ui.onClick('BTN_SNAP', acts.snapNow);
         ui.onClick('BTN_TIMER', acts.cycleTimer);
 
+        /* ---- Official OAP ACL bridge for ICAM2 360 camera wakeup & ClimateMaster 1CR calls ---- */
+        const signals = ctx.signals;
+        const oapProxies = {};
+        let camCookie = null, camBusy = false, lastOapSeq = 0;
+
+        function writeAppFile(name, obj) {
+            const txt = JSON.stringify(obj);
+            const ramFile = path.join(RUN, 'app', name);
+            try {
+                fs.writeFileSync(ramFile + '.tmp', txt);
+                fs.renameSync(ramFile + '.tmp', ramFile);
+                return;
+            } catch (e) {}
+            try {
+                const f = path.join(ctx.dataDir, name);
+                fs.writeFileSync(f + '.tmp', txt);
+                fs.renameSync(f + '.tmp', f);
+            } catch (e) {}
+        }
+
+        async function getOapInstances(iface) {
+            if (!signals || !signals.hasNative || !signals.hasNative()) return [];
+            if (oapProxies[iface]) return oapProxies[iface];
+            let cfg = null;
+            try { cfg = signals.loadConfig(iface); } catch (e) { return []; }
+            const instNames = Object.keys((cfg && cfg.instances) || { '1': 1 }).slice(0, 4);
+            const list = [];
+            for (let i = 0; i < instNames.length; i++) {
+                try {
+                    const px = await signals.proxy(iface, instNames[i]);
+                    list.push({ inst: instNames[i], px });
+                } catch (e) {}
+            }
+            if (list.length) oapProxies[iface] = list;
+            return list;
+        }
+
+        async function syncCamBridge(wantOn) {
+            if (!signals || !signals.hasNative || !signals.hasNative() || camBusy) return;
+            if (!wantOn && camCookie === null) return;
+            if (wantOn && camCookie !== null) return;
+            camBusy = true;
+            try {
+                const icamList = await getOapInstances('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy');
+                const camList = icamList.length ? icamList : await getOapInstances('de.bmw.infotainment.video.cameraproxy.CameraProxy');
+                const icam = icamList[0] && icamList[0].px;
+                const baseCam = (camList[0] && camList[0].px) || icam;
+                if (!wantOn) {
+                    const c = camCookie;
+                    camCookie = null;
+                    if (baseCam && c !== null) {
+                        await signals.call(baseCam, 'clientDetach', { cookie: c }, 3000).catch(() => {});
+                    }
+                } else if (icam && baseCam) {
+                    const xvList = await getOapInstances('de.bmw.dass.XView3D');
+                    const xv = xvList[0] && xvList[0].px;
+                    const xvSt = xv ? await Promise.resolve().then(() => xv.getValue('CurrentState', 1500)).catch(() => null) : null;
+                    const icSt = await Promise.resolve().then(() => icam.getValue('currentState', 1500)).catch(() => null);
+                    const raw = JSON.stringify({ xv: xvSt, ic: icSt });
+                    if (!(/PDC|PARK|RVC|TOP_VIEW/i.test(raw) || (/DR_ACTIVE|"application":51\b/i.test(raw) && /"perspective":7\b/.test(raw)))) {
+                        const att = await signals.call(baseCam, 'clientAttach', { type: 'CLIENT_INDIRECT' }, 3500)
+                            .catch(() => signals.call(baseCam, 'clientAttach', { type: 1 }, 3500));
+                        const ck = (att && typeof att === 'object' && att.cookie !== undefined) ? att.cookie : att;
+                        await signals.call(icam, 'changeState', { cookie: ck, desiredState: { application: 'DR_ACTIVE', mode: 'MODE_MOSAIK', perspective: 7 } }, 3500)
+                            .catch(() => signals.call(icam, 'changeState', { cookie: ck, desiredState: { application: 51, mode: 50, perspective: 7 } }, 3500));
+                        camCookie = ck;
+                        log.info('360 cam attached via OAP cookie=' + ck);
+                    }
+                }
+            } catch (e) {
+                log.warn('cam bridge: ' + (e && e.message || e));
+            }
+            camBusy = false;
+        }
+
+        async function handleOapReq(req) {
+            if (!req || !req.seq || req.seq === lastOapSeq) return;
+            lastOapSeq = req.seq;
+            try {
+                const list = await getOapInstances(req.iface);
+                if (!list.length) {
+                    writeAppFile('oap-reply.json', { seq: req.seq, ok: false, error: 'no OAP config for ' + req.iface });
+                    return;
+                }
+                let lastErr = null;
+                for (let i = 0; i < list.length; i++) {
+                    const it = list[i];
+                    try {
+                        const res = req.kind === 'setter'
+                            ? await signals.set(it.px, req.name, req.payload, 3500)
+                            : await signals.call(it.px, req.name, req.payload, 3500);
+                        writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res || null });
+                        return;
+                    } catch (e) {
+                        lastErr = e;
+                        if (req.altPayload !== undefined) {
+                            try {
+                                const res2 = req.kind === 'setter'
+                                    ? await signals.set(it.px, req.name, req.altPayload, 3500)
+                                    : await signals.call(it.px, req.name, req.altPayload, 3500);
+                                writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res2 || null });
+                                return;
+                            } catch (e2) { lastErr = e2; }
+                        }
+                    }
+                }
+                writeAppFile('oap-reply.json', { seq: req.seq, ok: false, error: String(lastErr && lastErr.message || lastErr || 'call failed') });
+            } catch (e) {
+                writeAppFile('oap-reply.json', { seq: req.seq, ok: false, error: String(e && e.message || e) });
+            }
+        }
+
+        setInterval(() => {
+            const now = Date.now();
+            readStatus(now);
+            const wantCam = !!(status && typeof status.wantCamUntil === 'number' && status.wantCamUntil > now);
+            syncCamBridge(wantCam);
+            if (status && status.oapReq && status.oapReq.seq && Math.abs(now - (status.oapReq.at || now)) < 10000) {
+                handleOapReq(status.oapReq);
+            }
+        }, 350);
+
         await render();
         log.info('bimmer_link ready');
     },

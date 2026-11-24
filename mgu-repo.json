@@ -13,7 +13,7 @@
       "requires": {
         "idrive7-renderd": "2.1.7",
         "mgu-inputgate": "1.0.0",
-        "bimmer-link": "0.4.1"
+        "bimmer-link": "0.4.2"
       },
       "build": {
         "python": "kit/tools/build.py",

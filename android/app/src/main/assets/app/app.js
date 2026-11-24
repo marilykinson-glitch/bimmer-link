@@ -411,6 +411,19 @@ function closeSockets() {
   stateWs = photoWs = heroWs = diagWs = null;
 }
 
+async function resolveEventWire(ev) {
+  if (!ev || ev.event !== 'message') return '';
+  if (ev.message && ev.message.indexOf('BL2:') === 0) return ev.message;
+  if (ev.attachment && ev.attachment.url) {
+    try {
+      const r = await fetch(ev.attachment.url);
+      const t = (await r.text()).trim();
+      if (t.indexOf('BL2:') === 0) return t;
+    } catch (e) {}
+  }
+  return '';
+}
+
 async function fetchCachedTopic(topic, handler) {
   try {
     const r = await fetch('https://' + RELAY_HOST + '/' + topic + '/json?poll=1&since=all');
@@ -419,8 +432,9 @@ async function fetchCachedTopic(topic, handler) {
     for (let i = 0; i < lines.length; i++) {
       let ev = null;
       try { ev = JSON.parse(lines[i]); } catch (e) { continue; }
-      if (ev && ev.event === 'message' && ev.message) {
-        const dec = await decryptJson(ev.message);
+      const wire = await resolveEventWire(ev);
+      if (wire) {
+        const dec = await decryptJson(wire);
         if (dec) handler(dec, ev.time ? ev.time * 1000 : Date.now());
       }
     }
@@ -434,8 +448,9 @@ function openLiveSockets() {
     ws.onmessage = async (e) => {
       let ev = null;
       try { ev = JSON.parse(e.data); } catch (x) { return; }
-      if (ev && ev.event === 'message' && ev.message) {
-        const dec = await decryptJson(ev.message);
+      const wire = await resolveEventWire(ev);
+      if (wire) {
+        const dec = await decryptJson(wire);
         if (dec) {
           handler(dec, Date.now(), true);
           renderAll();
@@ -553,11 +568,26 @@ function onDiagPacket(pkt) {
   if (!pkt) return;
   if (pkt.t === 'diag_chunk') {
     let b = diagBuckets[pkt.id];
-    if (!b) b = diagBuckets[pkt.id] = { total: pkt.total, parts: {}, got: 0 };
-    if (b.parts[pkt.idx] === undefined) { b.parts[pkt.idx] = pkt.part; b.got++; }
+    if (!b) b = diagBuckets[pkt.id] = { total: pkt.total, parts: {}, isB64: !!pkt.b64, got: 0 };
+    const piece = pkt.b64 !== undefined ? pkt.b64 : pkt.part;
+    if (b.parts[pkt.idx] === undefined) { b.parts[pkt.idx] = piece; b.got++; }
     if (b.got >= b.total) {
       let str = '';
-      for (let i = 0; i < b.total; i++) str += (b.parts[i] || '');
+      if (b.isB64) {
+        const chunks = [];
+        let len = 0;
+        for (let i = 0; i < b.total; i++) {
+          const bytes = base64ToBytes(b.parts[i] || '');
+          chunks.push(bytes);
+          len += bytes.length;
+        }
+        const merged = new Uint8Array(len);
+        let off = 0;
+        for (let i = 0; i < chunks.length; i++) { merged.set(chunks[i], off); off += chunks[i].length; }
+        str = new TextDecoder().decode(merged);
+      } else {
+        for (let i = 0; i < b.total; i++) str += (b.parts[i] || '');
+      }
       delete diagBuckets[pkt.id];
       try { onDiagPacket(JSON.parse(str)); } catch (e) {}
     }
@@ -813,10 +843,12 @@ function renderAll() {
   }
 
   if (window.AndroidBridge) document.getElementById('androidDownloadCard').classList.add('hidden');
+  const unp = document.getElementById('unpairedBanner');
+  if (unp) unp.classList.toggle('hidden', !!identity);
 
   if (!identity) {
-    setConnBadge('warn', 'Chưa ghép xe');
-    document.getElementById('updatedLabel').textContent = 'Quét QR trên màn hình xe';
+    setConnBadge('warn', '📷 Bấm quét QR');
+    document.getElementById('updatedLabel').textContent = '📷 Chạm để mở camera quét QR xe';
     return;
   }
 
@@ -1039,16 +1071,97 @@ function copyShareLink() {
   }
 }
 
-window.injectPairCodeFromNative = function (raw) {
-  const code = extractPairCode(raw);
-  if (code) connectCar(code);
+let webQrStream = null, webQrTimer = null;
+
+function handleHeaderPairTap() {
+  if (!identity) {
+    startQrScan();
+  } else {
+    switchView('settings', document.querySelectorAll('.nav-tab')[3]);
+  }
+}
+
+async function startQrScan() {
+  if (window.AndroidBridge && window.AndroidBridge.openQrScanner) {
+    window.AndroidBridge.openQrScanner();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof window.BarcodeDetector === 'undefined') {
+    switchView('settings', document.querySelectorAll('.nav-tab')[3]);
+    showToast('Hãy mở ứng dụng Camera mặc định của điện thoại quét thẳng mã QR trên màn hình xe, hoặc dán link vào ô Mã ghép nối!', '#38bdf8', 7000);
+    return;
+  }
+  try {
+    const modal = document.getElementById('qrWebModal');
+    const vid = document.getElementById('qrVideo');
+    modal.classList.remove('hidden');
+    webQrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    vid.srcObject = webQrStream;
+    await vid.play();
+    const det = new window.BarcodeDetector({ formats: ['qr_code'] });
+    webQrTimer = setInterval(async () => {
+      try {
+        const codes = await det.detect(vid);
+        if (codes && codes.length && codes[0].rawValue) {
+          const val = codes[0].rawValue;
+          stopWebQrScan();
+          window.injectPairCodeFromNative(val);
+        }
+      } catch (e) {}
+    }, 250);
+  } catch (e) {
+    stopWebQrScan();
+    showToast('Không mở được camera: ' + e.message, '#ef4444');
+  }
+}
+
+function stopWebQrScan() {
+  if (webQrTimer) { clearInterval(webQrTimer); webQrTimer = null; }
+  if (webQrStream) {
+    try { webQrStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    webQrStream = null;
+  }
+  const modal = document.getElementById('qrWebModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+window.injectPairCodeFromNative = async function (raw) {
+  const s = String(raw || '').trim();
+  const code = extractPairCode(s);
+  if (code) {
+    const ok = await connectCar(code);
+    if (ok) {
+      showToast('✅ Đã quét mã QR & ghép nối xe thành công!', '#2fd27a', 6000);
+      switchView('home', document.querySelectorAll('.nav-tab')[0]);
+    }
+    return;
+  }
+  // If user scanned the local Wi-Fi portal QR (http://<ip>:8139/?pin=XXXX), auto-fetch pairCode from local car server!
+  if (/^http:\/\/[\d.]+:\d+\/\?pin=\d+/i.test(s)) {
+    try {
+      const apiUrl = s.replace(/\/\?pin=/i, '/api/state?pin=');
+      const r = await fetch(apiUrl);
+      const j = await r.json();
+      if (j && j.pairCode) {
+        const ok = await connectCar(j.pairCode);
+        if (ok) {
+          showToast('✅ Đã ghép nối xe qua Wi-Fi nội bộ thành công!', '#2fd27a', 6000);
+          switchView('home', document.querySelectorAll('.nav-tab')[0]);
+          return;
+        }
+      }
+    } catch (e) {}
+    showToast('Bạn vừa quét QR Wi-Fi nội bộ — hãy chạm vào mã QR trên màn hình xe để chuyển sang QR App MyBMW (màu xanh)!', '#ffb020', 7500);
+    return;
+  }
+  showToast('Mã QR chưa khớp định dạng MyBMW: ' + s.slice(0, 48), '#ffb020', 6000);
 };
 
 /* ---------------- Boot ---------------- */
 (function init() {
   initSwatches();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('./sw.js?v=0.4.1').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=0.4.2').catch(() => {});
   }
   renderAll();
   const initialCode = extractPairCode(location.hash) || extractPairCode(location.search) || localStorage.getItem('mybmw_pair') || '';

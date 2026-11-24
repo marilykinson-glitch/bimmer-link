@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -272,6 +272,9 @@ function createService(customCfg) {
         worker: null,
         pendingReqs: {},
         reqSeq: 1,
+        wantCamUntil: 0,
+        oapReq: null,
+        oapSeq: 1,
         server: null,
     };
 
@@ -389,8 +392,21 @@ function createService(customCfg) {
                 return;
             }
             if (c === 'invoke_raw') {
-                const rep = await callWorker('invoke_raw', a, 6000);
-                await cloud.publishDiag({ t: 'raw_result', reqId: cmdObj.id, result: (rep && rep.result) || rep });
+                let rep = await callWorker('invoke_raw', a, 5000);
+                let res = (rep && rep.result) || rep;
+                if (!res || !res.ok) {
+                    const oapRes = await callOapBridge(a.iface, a.kind, a.name, a.payload, undefined, 4200);
+                    if (oapRes && oapRes.ok) {
+                        res = { ok: true, via: 'OAP-ACL', trace: [oapRes], saved: !!a.saveAsDefault };
+                        if (a.saveAsDefault) {
+                            const profFile = path.join(C.state, '1cr-profile.json');
+                            const cur = readJson(profFile) || {};
+                            cur[a.role || 'start'] = { iface: a.iface, kind: a.kind, name: a.name, payload: a.payload };
+                            writeAtomic(profFile, JSON.stringify(cur, null, 2) + '\n', 0o600);
+                        }
+                    }
+                }
+                await cloud.publishDiag({ t: 'raw_result', reqId: cmdObj.id, result: res });
                 syncCloudState(true);
                 return;
             }
@@ -522,18 +538,53 @@ function createService(customCfg) {
         }
     }
 
+    function callOapBridge(iface, kind, name, payload, altPayload, timeoutMs) {
+        const app = ensureAppRamDir(C.run, C.oap, C.proc);
+        if (!app) return Promise.resolve({ ok: false, error: 'OAP app not installed' });
+        const seq = ++S.oapSeq;
+        S.oapReq = { seq, iface, kind, name, payload, altPayload, at: Date.now() };
+        writeStatus();
+        const deadline = Date.now() + (timeoutMs || 4200);
+        const f1 = path.join(C.run, 'app', 'oap-reply.json');
+        const f2 = path.join(app.root, 'data', 'oap-reply.json');
+        return new Promise((resolve) => {
+            const iv = setInterval(() => {
+                const r = readJson(f1) || readJson(f2);
+                if (r && r.seq === seq) {
+                    clearInterval(iv);
+                    if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
+                    resolve(r);
+                    return;
+                }
+                if (Date.now() >= deadline) {
+                    clearInterval(iv);
+                    if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
+                    resolve({ ok: false, error: 'OAP bridge timeout' });
+                }
+            }, 120);
+        });
+    }
+
     async function tryGrab360(timeoutMs) {
         if (C.noWorker) return null;
+        S.wantCamUntil = Date.now() + (timeoutMs || 3800) + 700;
+        writeStatus();
         try {
             return await Cam360.capture360Frame({
                 runDir: C.run,
                 rawOutFile: path.join(C.run, 'cam4.rgba'),
                 timeoutMs: timeoutMs || 3800,
                 wakeCam: () => callWorker('cam_wake', {}, 4000),
-                releaseCam: () => callWorker('cam_release', {}, 3000),
+                releaseCam: () => {
+                    S.wantCamUntil = 0;
+                    writeStatus();
+                    return callWorker('cam_release', {}, 3000);
+                },
                 log,
             });
         } catch (e) {
+            S.wantCamUntil = 0;
+            writeStatus();
             return null;
         }
     }
@@ -662,6 +713,19 @@ function createService(customCfg) {
                 }
                 return { ok: true, message: plain, detail: resObj };
             }
+            // Retry candidate calls via the OAP App ACL bridge (`apps/bimmer_link`) in case UID 0 was denied by vsomeip ACL!
+            const cands = Array.isArray(resObj.candidates) ? resObj.candidates.slice(0, 6) : [];
+            for (let i = 0; i < cands.length; i++) {
+                const cd = cands[i];
+                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3800);
+                if (oapRes && oapRes.ok) {
+                    S.telemetry.climate1cr.active = wantOn;
+                    const mName = cd.iface.split('.').pop() + '.' + cd.name + ' (OAP-ACL)';
+                    const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + mName;
+                    tell(plain, 'go');
+                    return { ok: true, message: plain, detail: { ok: true, method: mName, oap: oapRes } };
+                }
+            }
             const errText = (resObj && resObj.error) || (rep && rep.error) || 'Chưa nhận được phản hồi từ hộp điều hoà';
             tell('1CR: ' + errText, 'warn');
             if (source === 'Telegram' && config.botToken && config.chatId) {
@@ -759,6 +823,8 @@ function createService(customCfg) {
             activeTrip: S.activeTrip,
             lastTrip: S.lastTrip,
             trips: trips.slice(0, 6),
+            wantCamUntil: S.wantCamUntil || 0,
+            oapReq: S.oapReq || null,
             message: S.message,
             messageKind: S.messageKind,
         };

@@ -23,7 +23,7 @@ const Up = require('./uplink');
 
 const DEFAULT_RELAY_HOST = 'ntfy.sh';
 const DEFAULT_APP_BASE = 'https://marilykinson-glitch.github.io/bimmer-link/app/';
-const CHUNK_BYTES = 2400; // ~3.2 KB base64 per chunk (< 4096-byte inline message cache limit)
+const CHUNK_BYTES = 1500; // Base64 #1 (2000B) + JSON + AES-GCM Base64 #2 (~2880B) -> strictly < ntfy 4096B inline limit!
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -273,20 +273,25 @@ class CloudBridge {
         }
     }
 
-    /** Publish encrypted command ACK, 1CR schema, or diagnostic result to `diag` topic. */
+    /** Publish encrypted command ACK, 1CR schema, or diagnostic result to `diag` topic (strictly < 4096B per packet!). */
     async publishDiag(payload) {
         if (!this.enabled || this.stopped) return false;
-        const compact = JSON.stringify(payload);
-        if (compact.length <= 2600) {
-            await this._postTopic(this.identity.topics.diag, encryptPacket(this.identity.aesKey, compact), 12000);
-            return true;
+        const compactBuf = Buffer.from(JSON.stringify(payload), 'utf8');
+        if (compactBuf.length <= 2200) {
+            const single = encryptPacket(this.identity.aesKey, compactBuf);
+            if (single.length <= 3900) {
+                await this._postTopic(this.identity.topics.diag, single, 12000);
+                return true;
+            }
         }
-        const total = Math.ceil(compact.length / 2200);
+        const sliceLen = 1500;
+        const total = Math.max(1, Math.ceil(compactBuf.length / sliceLen));
         const did = Date.now().toString(36);
         for (let i = 0; i < total; i++) {
-            if (i > 0) await sleep(110);
+            if (i > 0) await sleep(120);
+            const b64 = compactBuf.slice(i * sliceLen, (i + 1) * sliceLen).toString('base64');
             await this._postTopic(this.identity.topics.diag, encryptJson(this.identity.aesKey, {
-                t: 'diag_chunk', id: did, idx: i, total, part: compact.slice(i * 2200, (i + 1) * 2200),
+                t: 'diag_chunk', id: did, idx: i, total, b64,
             }), 12000);
         }
         return true;

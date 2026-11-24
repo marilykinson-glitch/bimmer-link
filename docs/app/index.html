@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.4.1">
+<link rel="stylesheet" href="styles.css?v=0.4.2">
 <title>MyBMW</title>
 </head>
 <body>
@@ -20,10 +20,10 @@
       <div class="car-title" id="carTitle">BMW 5 Series · M Sport</div>
       <div class="sub-meta">
         <button id="paintBadge" class="paint-chip" onclick="toggleEl('paintSheet')">🎨 Chọn màu &amp; dòng xe</button>
-        <span id="updatedLabel">Chưa ghép nối xe</span>
+        <span id="updatedLabel" style="cursor:pointer" onclick="handleHeaderPairTap()">Chưa ghép nối xe</span>
       </div>
     </div>
-    <div class="status-pill">
+    <div class="status-pill" style="cursor:pointer" onclick="handleHeaderPairTap()">
       <span class="dot" id="connDot"></span>
       <span id="connLabel">Chờ kết nối</span>
     </div>
@@ -80,6 +80,11 @@
 
   <!-- VIEW 1: MY VEHICLE (HOME) -->
   <section id="view-home">
+    <div id="unpairedBanner" class="glass-card hidden" style="margin-bottom:10px;border-color:rgba(56,189,248,0.45)">
+      <div style="font-size:13px;font-weight:700;color:var(--cyan);margin-bottom:6px">🔗 Chưa ghép nối với xe BMW</div>
+      <div style="font-size:12.5px;color:var(--dim);margin-bottom:10px">Bấm nút bên dưới để mở camera quét mã QR trên màn hình <b>MyBMW &amp; 1CR</b> của xe:</div>
+      <button class="btn blue" style="width:100%;font-size:14px;padding:11px" onclick="startQrScan()">📷 Mở Camera Quét Mã QR Trên Xe</button>
+    </div>
     <div id="kombiHint" class="kombi-hint hidden" onclick="toggleEl('paintSheet')">
       💡 Đầu xe đang code đồng hồ M5 CS? <b>Chạm chọn đúng dòng xe thật (X3 / X5 / 5 Series / 3 Series) →</b>
     </div>
@@ -277,6 +282,9 @@
         Quét mã QR trên màn hình <b>MyBMW &amp; 1CR</b> của xe (cả iPhone và Android dùng chung 1 mã đều đồng bộ tức thì).<br>
         • <b>Trên iPhone:</b> Sau khi quét mở trang này trong Safari, bấm nút <b>Chia sẻ → Thêm vào MH chính</b> để dùng full màn hình như App hãng!
       </div>
+      <div class="btn-row" style="margin-top:0;margin-bottom:12px">
+        <button class="btn blue" style="font-size:14px;padding:11px" onclick="startQrScan()">📷 Mở Camera Quét Mã QR Trên Xe</button>
+      </div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị tuỳ chỉnh (để trống = tự lấy theo dòng xe):</div>
       <input type="text" id="inpCarName" placeholder="Tự nhận diện từ đầu xe (VD: BMW 5 Series LCI · M Sport)" onchange="saveCarName()">
       <div class="switch-row" style="margin-top:6px">
@@ -334,7 +342,14 @@
   <div style="margin-top:12px;font-size:12.5px;color:#cbd5e1">Chạm bất kỳ đâu để đóng</div>
 </div>
 
+<!-- Web Camera QR Modal (for browsers without AndroidBridge) -->
+<div id="qrWebModal" class="snap-modal hidden">
+  <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:#f8fafc">Hướng camera vào mã QR trên màn hình xe</div>
+  <video id="qrVideo" playsinline autoplay muted style="width:92%;max-width:340px;border-radius:16px;border:2px solid #38bdf8;background:#000"></video>
+  <button class="btn" style="margin-top:14px;max-width:220px" onclick="stopWebQrScan()">✕ Đóng máy quét</button>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.4.1"></script>
+<script src="app.js?v=0.4.2"></script>
 </body>
 </html>
