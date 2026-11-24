@@ -1,0 +1,64 @@
+{
+  "id": "bimmer-link",
+  "kind": "tool",
+  "version": "0.1.0",
+  "title": "Trợ thủ MyBMW & 1CR",
+  "description": "Trợ thủ chạy ngầm cho ứng dụng MyBMW & 1CR: kết nối xe với Telegram Bot cá nhân qua mgu-uplink, tự động gửi ảnh & vị trí hầm khi tắt máy đỗ xe, giám sát chế độ Valet (tốc độ, tua máy, bán kính GPS), điều khiển đề nổ làm mát từ xa 1CR và nạp giờ khởi hành xuống hộp BDC/IHKA, kèm trang cài đặt & dò lệnh 1CR qua mã QR trên điện thoại.",
+  "license": "GPL-3.0-or-later",
+  "mguHmi": [
+    "ID7"
+  ],
+  "uninstallable": true,
+  "requires": {
+    "mgu-deploy": "0.7.11"
+  },
+  "files": [
+    {
+      "path": "bimmer-link.js",
+      "mode": "0644"
+    },
+    {
+      "path": "car-link.js",
+      "mode": "0644"
+    },
+    {
+      "path": "snapshot.js",
+      "mode": "0644"
+    },
+    {
+      "path": "telegram.js",
+      "mode": "0644"
+    },
+    {
+      "path": "uplink.js",
+      "mode": "0644"
+    },
+    {
+      "path": "page.html",
+      "mode": "0644"
+    },
+    {
+      "path": "LICENSE.GPL-3.0",
+      "mode": "0644"
+    }
+  ],
+  "units": [
+    {
+      "name": "bimmer-link.service"
+    }
+  ],
+  "enable": [
+    {
+      "unit": "bimmer-link.service",
+      "target": "multi-user.target"
+    }
+  ],
+  "recmgr": [
+    "bimmer-link"
+  ],
+  "restart": [
+    "bimmer-link.service"
+  ],
+  "internet": true,
+  "uids": "state/internet-uids"
+}

@@ -1,0 +1,22 @@
+# bimmer-link: MyBMW offline Telegram link, Park Snapshot, Valet Guard & 1CR Remote Start helper
+[Unit]
+Description=MyBMW & 1CR helper service (bimmer-link)
+RequiresMountsFor=/var/opt
+After=local-fs.target network.target ufipc_daemon.service
+StartLimitIntervalSec=0
+
+[Service]
+User=root
+RuntimeDirectory=bimmer-link
+RuntimeDirectoryMode=0755
+Nice=10
+ExecStart=/bin/sh -c 'exec "$(command -v node || echo /usr/bin/node)" /var/opt/bimmer-link/current/bimmer-link.js run'
+ExecStopPost=-/bin/sh -c 'exec "$(command -v node || echo /usr/bin/node)" /var/opt/bimmer-link/current/bimmer-link.js fwclose'
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

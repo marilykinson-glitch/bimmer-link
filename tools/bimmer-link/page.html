@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>MyBMW &amp; 1CR — BimmerLink MGU</title>
+<style>
+  :root {
+    --bg: #070b14; --card: #101827; --border: #1f2d46; --text: #f1f5f9; --dim: #94a3b8;
+    --accent: #38bdf8; --go: #2fd27a; --warn: #ffb020; --crit: #ef4444;
+  }
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--text); padding: 14px; max-width: 680px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 4px 0 2px; display: flex; align-items: center; justify-content: space-between; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 12px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tab { flex: 1; padding: 10px 6px; border-radius: 10px; border: 1px solid var(--border); background: var(--card); color: var(--dim); font-weight: 600; font-size: 13px; text-align: center; cursor: pointer; }
+  .tab.active { background: #172554; color: #fff; border-color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: #0b111e; border: 1px solid #192338; border-radius: 10px; padding: 10px; }
+  .stat .k { font-size: 11px; color: var(--dim); text-transform: uppercase; }
+  .stat .v { font-size: 17px; font-weight: 700; margin-top: 3px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin: 10px 0 4px; }
+  input[type="text"], input[type="password"], input[type="number"], input[type="time"], textarea {
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: #090e1a; color: #fff; font-size: 14px;
+  }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    padding: 11px 14px; border-radius: 10px; border: none; font-weight: 700; font-size: 14px;
+    cursor: pointer; background: #1e293b; color: #fff; flex: 1; min-width: 120px;
+  }
+  button.go { background: #059669; }
+  button.primary { background: #0284c7; }
+  button.warn { background: #d97706; }
+  button.crit { background: #dc2626; }
+  .msg { padding: 10px 12px; border-radius: 10px; background: #0f172a; border-left: 4px solid var(--accent); font-size: 13px; margin-bottom: 12px; word-break: break-word; }
+  .switch { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #192338; font-size: 14px; }
+  .switch:last-child { border-bottom: none; }
+  img.snap { width: 100%; border-radius: 10px; border: 1px solid var(--border); margin-top: 8px; }
+  pre { background: #060911; padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 11px; color: #cbd5e1; max-height: 240px; }
+  .iface-box { border: 1px solid #1e293b; border-radius: 10px; padding: 10px; margin-bottom: 8px; background: #0a101d; }
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 6px; font-size: 11px; background: #1e3a8a; color: #93c5fd; margin-right: 4px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>
+    <span>🚘 MyBMW &amp; 1CR</span>
+    <span id="ver" style="font-size:12px;color:var(--dim)">MGU Store</span>
+  </h1>
+  <div class="sub">Điều khiển đề nổ từ xa 1CR, chụp chỗ đỗ hầm &amp; cảnh báo Valet qua Telegram</div>
+
+  <div id="pinBox" class="card hidden">
+    <h2>🔐 Nhập mã PIN trên màn hình xe</h2>
+    <div class="row">
+      <input type="number" id="pinInput" placeholder="Mã PIN 4 số">
+      <button class="primary" onclick="savePin()">Mở khoá</button>
+    </div>
+  </div>
+
+  <div id="banner" class="msg">Đang kết nối tới đầu MGU…</div>
+
+  <div class="tabs">
+    <div class="tab active" onclick="showTab('ctrl', this)">🔥 Điều khiển &amp; 1CR</div>
+    <div class="tab" onclick="showTab('tg', this)">✈️ Telegram</div>
+    <div class="tab" onclick="showTab('probe', this)">🛠 Chuyên sâu 1CR</div>
+  </div>
+
+  <!-- TAB 1: CONTROL & 1CR -->
+  <div id="tab-ctrl">
+    <div class="card">
+      <h2>🔥 Đề nổ &amp; Làm mát từ xa (Option 1CR)</h2>
+      <div class="row">
+        <button class="go" onclick="act('start1cr')">🔥 Nổ máy / Bật 1CR ngay</button>
+        <button class="crit" onclick="act('stop1cr')">⏹ Tắt 1CR</button>
+      </div>
+      <label>⏰ Hẹn giờ khởi hành (lưu xuống hộp BDC/IHKA — tự đánh thức xe nổ máy cả khi đầu MGU đã ngủ 0W):</label>
+      <div class="row">
+        <input type="time" id="timerTime" value="07:30" style="flex:1">
+        <button class="primary" onclick="setTimer()">Nạp giờ vào BDC</button>
+        <button onclick="act('timer_off')">Huỷ hẹn</button>
+      </div>
+      <div class="switch" style="margin-top:8px">
+        <span>Tự động nạp lại giờ này mỗi lần tắt máy đỗ xe</span>
+        <input type="checkbox" id="autoSyncTimer" onchange="savePrefs()">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📊 Trạng thái xe trực tiếp</h2>
+      <div class="grid2">
+        <div class="stat"><div class="k">Trạng thái</div><div class="v" id="stCond">--</div></div>
+        <div class="stat"><div class="k">Đề nổ 1CR</div><div class="v" id="st1cr">--</div></div>
+        <div class="stat"><div class="k">Nhiên liệu / Tầm chạy</div><div class="v" id="stFuel">--</div></div>
+        <div class="stat"><div class="k">Ắc quy 12V / Nhiệt độ</div><div class="v" id="stBat">--</div></div>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="act('snap_now')">📸 Chụp &amp; Gửi Telegram ngay</button>
+        <button onclick="refreshPreview()">🔄 Xem thử ảnh chụp</button>
+      </div>
+      <img id="snapImg" class="snap hidden" alt="Snapshot preview">
+    </div>
+
+    <div class="card">
+      <h2>🛡️ Chế độ Valet (Gửi bãi / Rửa xe / Giao thợ)</h2>
+      <div class="switch">
+        <span><b>Bật giám sát Valet</b> (ghim toạ độ hiện tại)</span>
+        <input type="checkbox" id="valetOn" onchange="toggleValet()">
+      </div>
+      <div class="grid2">
+        <div><label>Tốc độ tối đa (km/h)</label><input type="number" id="vSpeed" value="45"></div>
+        <div><label>Tua máy tối đa (RPM)</label><input type="number" id="vRpm" value="3500"></div>
+      </div>
+      <label>Bán kính cho phép tính từ chỗ đỗ (mét)</label>
+      <input type="number" id="vRadius" value="500">
+      <div class="row"><button onclick="savePrefs()">Lưu ngưỡng Valet</button></div>
+    </div>
+  </div>
+
+  <!-- TAB 2: TELEGRAM -->
+  <div id="tab-tg" class="hidden">
+    <div class="card">
+      <h2>✈️ Kết nối Telegram Bot cá nhân</h2>
+      <div style="font-size:13px;color:var(--dim);line-height:1.5">
+        1. Mở Telegram tìm <b>@BotFather</b> → gõ <code>/newbot</code> để lấy <b>Bot Token</b>.<br>
+        2. Mở Bot vừa tạo, bấm <b>Start</b> (hoặc nhắn chữ <code>hi</code>).<br>
+        3. Dán Token vào ô dưới rồi bấm <b>Tự nhận Chat ID</b> là xong!
+      </div>
+      <label>Bot Token (từ @BotFather)</label>
+      <input type="password" id="botToken" placeholder="123456789:AAH...">
+      <div id="tokenHint" style="font-size:12px;color:var(--go);margin-top:4px"></div>
+
+      <label>Chat ID của bạn</label>
+      <div class="row" style="margin-top:0">
+        <input type="text" id="chatId" placeholder="Tự động điền hoặc nhập tay" style="flex:2">
+        <button class="primary" onclick="detectChat()">🔍 Tự nhận Chat ID</button>
+      </div>
+
+      <div class="switch" style="margin-top:10px">
+        <span>Tự chụp ảnh &amp; gửi vị trí mỗi khi tắt máy đỗ xe</span>
+        <input type="checkbox" id="parkSnap" checked>
+      </div>
+      <div class="switch">
+        <span>Báo tin Telegram mỗi khi xe khởi động có mạng</span>
+        <input type="checkbox" id="wakeNotify">
+      </div>
+
+      <div class="row">
+        <button class="primary" onclick="saveTelegram()">💾 Lưu cài đặt</button>
+        <button class="go" onclick="testTelegram()">📨 Gửi ảnh Test ngay</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 3: 1CR INSPECTOR / PROBE -->
+  <div id="tab-probe" class="hidden">
+    <div class="card">
+      <h2>🛠 Chuyên sâu 1CR &amp; SOME/IP Climate Inspector</h2>
+      <div style="font-size:13px;color:var(--dim);margin-bottom:8px">
+        Dò trực tiếp các hàm điều khiển điều hoà / đề nổ từ xa <code>1CR</code> trong <code>someip-interfaces.json</code> của chính chiếc xe này. Nếu xe bạn dùng tên hàm riêng, bấm thử bên dưới rồi bấm <b>Ghim cho nút 1CR</b>!
+      </div>
+      <div class="row">
+        <button class="primary" onclick="loadSchema()">🔍 Quét danh sách hàm Climate/1CR trên xe</button>
+        <button onclick="downloadSchema()">⬇️ Tải JSON chẩn đoán</button>
+      </div>
+      <div id="schemaList" style="margin-top:12px"></div>
+      <label>Chạy thử lệnh SOME/IP tuỳ chỉnh:</label>
+      <input type="text" id="rawIface" placeholder="de.bmw.infotainment.climate.Climate">
+      <div class="row">
+        <input type="text" id="rawKind" value="setter" placeholder="setter | method" style="flex:1">
+        <input type="text" id="rawName" placeholder="Tên trường hoặc hàm" style="flex:2">
+      </div>
+      <label>Payload JSON:</label>
+      <textarea id="rawPayload" rows="3">1</textarea>
+      <div class="row">
+        <button class="warn" onclick="runRaw(false)">⚡ Chạy thử</button>
+        <button class="go" onclick="runRaw(true, 'start')">📌 Ghim làm nút Nổ máy 1CR</button>
+        <button onclick="runRaw(true, 'stop')">📌 Ghim làm nút Tắt 1CR</button>
+      </div>
+      <pre id="rawOut">Chưa có dữ liệu quét.</pre>
+    </div>
+  </div>
+
+<script>
+let PIN = new URLSearchParams(location.search).get('pin') || localStorage.getItem('bl_pin') || '';
+if (PIN) localStorage.setItem('bl_pin', PIN);
+let lastSchema = null;
+
+function setBanner(txt, color) {
+  const b = document.getElementById('banner');
+  b.textContent = txt;
+  b.style.borderLeftColor = color || '#38bdf8';
+}
+
+function savePin() {
+  PIN = document.getElementById('pinInput').value.trim();
+  localStorage.setItem('bl_pin', PIN);
+  loadState();
+}
+
+function showTab(id, el) {
+  ['ctrl', 'tg', 'probe'].forEach((k) => document.getElementById('tab-' + k).classList.toggle('hidden', k !== id));
+  Array.prototype.forEach.call(document.querySelectorAll('.tab'), (t) => t.classList.remove('active'));
+  el.classList.add('active');
+}
+
+async function api(path, body) {
+  const opts = { headers: { 'X-Pin': PIN } };
+  if (body !== undefined) {
+    opts.method = 'POST';
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path + (path.indexOf('?') >= 0 ? '&' : '?') + 'pin=' + encodeURIComponent(PIN), opts);
+  const j = await r.json();
+  if (r.status === 403 || r.status === 429) {
+    document.getElementById('pinBox').classList.remove('hidden');
+    throw new Error(j.error || 'Sai mã PIN');
+  }
+  document.getElementById('pinBox').classList.add('hidden');
+  return j;
+}
+
+async function loadState() {
+  try {
+    const j = await api('/api/state');
+    if (!j.ok) return setBanner(j.error || 'Lỗi đọc trạng thái', '#ef4444');
+    document.getElementById('ver').textContent = 'v' + j.version;
+    setBanner(j.message || 'Đã kết nối đầu MGU.', j.tgError ? '#ffb020' : '#2fd27a');
+    const t = j.telemetry || {}, c1 = t.climate1cr || {}, cfg = j.config || {};
+    document.getElementById('stCond').textContent = t.conditionLabel || '--';
+    document.getElementById('st1cr').textContent = c1.active ? '🟢 Đang chạy' : (c1.timerText ? '⏰ ' + c1.timerText : 'Sẵn sàng');
+    document.getElementById('stFuel').textContent = (t.fuelPct != null ? t.fuelPct + '%' : '--') + ' / ' + (t.rangeKm != null ? t.rangeKm + ' km' : '--');
+    document.getElementById('stBat').textContent = (t.battery12v != null ? t.battery12v + 'V' : '--') + ' / ' + (t.ambientC != null ? t.ambientC + '°C' : '--');
+    if (document.activeElement.tagName !== 'INPUT') {
+      document.getElementById('chatId').value = cfg.chatId || '';
+      document.getElementById('tokenHint').textContent = cfg.hasToken ? ('Đã lưu Token: ' + cfg.maskedToken + (cfg.ownerName ? ' (' + cfg.ownerName + ')' : '')) : '';
+      document.getElementById('parkSnap').checked = cfg.parkSnapshot !== false;
+      document.getElementById('wakeNotify').checked = !!cfg.wakeNotify;
+      document.getElementById('autoSyncTimer').checked = !!cfg.autoSyncTimer;
+      if (cfg.dailyTimer) document.getElementById('timerTime').value = cfg.dailyTimer;
+      if (cfg.valet) {
+        document.getElementById('valetOn').checked = !!cfg.valet.enabled;
+        document.getElementById('vSpeed').value = cfg.valet.maxSpeed;
+        document.getElementById('vRpm').value = cfg.valet.maxRpm;
+        document.getElementById('vRadius').value = cfg.valet.radiusM;
+      }
+    }
+  } catch (e) {
+    setBanner(e.message, '#ef4444');
+  }
+}
+
+async function act(action, arg) {
+  try {
+    setBanner('Đang thực hiện ' + action + '…', '#38bdf8');
+    const j = await api('/api/action', { action, arg });
+    setBanner(j.message || j.error || 'Đã gửi lệnh', j.ok ? '#2fd27a' : '#ffb020');
+    if (action === 'snap_now') refreshPreview();
+    setTimeout(loadState, 600);
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+function setTimer() {
+  const v = (document.getElementById('timerTime').value || '07:30').split(':');
+  act('timer_set', { hour: Number(v[0]), minute: Number(v[1]) });
+}
+
+function toggleValet() {
+  act('valet_set', { mode: document.getElementById('valetOn').checked ? 'on' : 'off' });
+}
+
+function refreshPreview() {
+  const img = document.getElementById('snapImg');
+  img.src = '/api/snapshot.png?pin=' + encodeURIComponent(PIN) + '&t=' + Date.now();
+  img.classList.remove('hidden');
+}
+
+async function savePrefs() {
+  try {
+    const j = await api('/api/config', {
+      autoSyncTimer: document.getElementById('autoSyncTimer').checked,
+      dailyTimer: document.getElementById('timerTime').value,
+      valet: {
+        enabled: document.getElementById('valetOn').checked,
+        maxSpeed: Number(document.getElementById('vSpeed').value),
+        maxRpm: Number(document.getElementById('vRpm').value),
+        radiusM: Number(document.getElementById('vRadius').value),
+      },
+    });
+    setBanner(j.message || 'Đã lưu.', '#2fd27a');
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+async function detectChat() {
+  try {
+    setBanner('Đang tìm tin nhắn từ Telegram Bot…', '#38bdf8');
+    const j = await api('/api/detect-chat', { botToken: document.getElementById('botToken').value });
+    if (!j.ok) return setBanner(j.error, '#ffb020');
+    document.getElementById('chatId').value = j.chatId;
+    setBanner('Đã nhận diện: ' + j.ownerName + ' (ID ' + j.chatId + ')', '#2fd27a');
+    loadState();
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+async function saveTelegram() {
+  try {
+    const j = await api('/api/config', {
+      botToken: document.getElementById('botToken').value.trim(),
+      chatId: document.getElementById('chatId').value.trim(),
+      parkSnapshot: document.getElementById('parkSnap').checked,
+      wakeNotify: document.getElementById('wakeNotify').checked,
+    });
+    document.getElementById('botToken').value = '';
+    setBanner(j.message || 'Đã lưu cài đặt Telegram.', '#2fd27a');
+    loadState();
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+async function testTelegram() {
+  try {
+    setBanner('Đang chụp trạng thái và gửi về Telegram…', '#38bdf8');
+    const j = await api('/api/test-telegram', {
+      botToken: document.getElementById('botToken').value.trim(),
+      chatId: document.getElementById('chatId').value.trim(),
+    });
+    if (!j.ok) return setBanner(j.error, '#ef4444');
+    document.getElementById('botToken').value = '';
+    setBanner(j.message, '#2fd27a');
+    loadState();
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+async function loadSchema() {
+  try {
+    const j = await api('/api/1cr-schema');
+    lastSchema = j;
+    const box = document.getElementById('schemaList');
+    box.innerHTML = '';
+    const ifs = (j.schema && j.schema.interfaces) || [];
+    if (!ifs.length) {
+      box.innerHTML = '<div class="msg">Chưa thấy catalog SOME/IP (đang chạy trên máy tính hoặc chưa đọc được /etc/oap/someip/someip-interfaces.json).</div>';
+    }
+    ifs.forEach((iv) => {
+      const div = document.createElement('div');
+      div.className = 'iface-box';
+      const writables = iv.fields.filter((f) => f.setter).map((f) => ({ kind: 'setter', name: f.name, roles: f.roles }))
+        .concat(iv.methods.map((m) => ({ kind: 'method', name: m.name, roles: m.roles })));
+      let html = '<div style="font-weight:700;font-size:13px;margin-bottom:6px">' + iv.iface + '</div>';
+      if (!writables.length) html += '<div style="font-size:12px;color:var(--dim)">Chỉ đọc (' + iv.fields.length + ' trường)</div>';
+      writables.forEach((w) => {
+        const liveVal = j.schema.live && j.schema.live[iv.iface + '.' + w.name];
+        html += '<div style="margin:6px 0;padding:6px;background:#0f172a;border-radius:6px;font-size:12px">' +
+          '<span class="pill">' + w.kind + '</span><b>' + w.name + '</b> ' +
+          (w.roles.length ? '<span style="color:#2fd27a">[' + w.roles.join(',') + ']</span>' : '') +
+          (liveVal !== undefined ? '<div style="color:#94a3b8;margin-top:2px">Hiện tại: <code>' + JSON.stringify(liveVal).slice(0, 80) + '</code></div>' : '') +
+          '<div style="margin-top:4px"><button style="padding:5px 8px;font-size:11px;min-width:0" onclick=\'pickRaw(' +
+          JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(liveVal !== undefined ? liveVal : 1) +
+          ')\'>Chọn thử lệnh này</button></div></div>';
+      });
+      div.innerHTML = html;
+      box.appendChild(div);
+    });
+    document.getElementById('rawOut').textContent = JSON.stringify({ pinned: j.schema && j.schema.pinnedProfile, live: j.schema && j.schema.live, logs: j.logs }, null, 2);
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+function pickRaw(iface, kind, name, sample) {
+  document.getElementById('rawIface').value = iface;
+  document.getElementById('rawKind').value = kind;
+  document.getElementById('rawName').value = name;
+  document.getElementById('rawPayload').value = JSON.stringify(sample, null, 2);
+}
+
+async function runRaw(saveAsDefault, role) {
+  try {
+    let payload = null;
+    try { payload = JSON.parse(document.getElementById('rawPayload').value); } catch (e) { return setBanner('Payload JSON không hợp lệ', '#ef4444'); }
+    const j = await api('/api/1cr-raw', {
+      iface: document.getElementById('rawIface').value.trim(),
+      kind: document.getElementById('rawKind').value.trim(),
+      name: document.getElementById('rawName').value.trim(),
+      payload,
+      saveAsDefault: !!saveAsDefault,
+      role: role || 'start',
+    });
+    document.getElementById('rawOut').textContent = JSON.stringify(j, null, 2);
+    setBanner(j.ok ? (saveAsDefault ? 'Đã ghim cấu hình 1CR thành công!' : 'Đã chạy lệnh thử thành công!') : ('Lỗi: ' + (j.error || 'thất bại')), j.ok ? '#2fd27a' : '#ef4444');
+  } catch (e) { setBanner(e.message, '#ef4444'); }
+}
+
+function downloadSchema() {
+  if (!lastSchema) return setBanner('Hãy bấm Quét danh sách hàm trước.', '#ffb020');
+  const blob = new Blob([JSON.stringify(lastSchema, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bimmer-link-1cr-diag.json';
+  a.click();
+}
+
+loadState();
+setInterval(loadState, 3000);
+</script>
+</body>
+</html>

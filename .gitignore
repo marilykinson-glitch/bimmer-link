@@ -1,0 +1,5 @@
+dist/
+oap-sdk/
+native/build/
+node_modules/
+.DS_Store

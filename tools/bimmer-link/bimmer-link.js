@@ -1,0 +1,825 @@
+'use strict';
+/**
+ * bimmer-link.js - main root helper daemon for the "MyBMW & 1CR" MGU Store app.
+ *
+ * Responsibilities:
+ *   1. Supervises `car-link.js worker` (SOME/IP + UDS vehicle telemetry & 1CR Remote Start / Departure Timer engine).
+ *   2. Runs `TelegramController` over `mgu-uplink` (UID-isolated HTTPS) for remote commands, Park Snapshot photos, and Valet alerts.
+ *   3. Serves the PIN-protected mobile configuration & 1CR Inspector portal on HTTP port 8139 (with automatic `nftables` port rule).
+ *   4. Exchanges zero-flash-wear live state & commands with `apps/bimmer_link` through `/run/bimmer-link/`.
+ *
+ * Node 8, zero dependencies.
+ */
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const http = require('http');
+const urlMod = require('url');
+const crypto = require('crypto');
+const cp = require('child_process');
+
+const Up = require('./uplink');
+const Snap = require('./snapshot');
+const Tg = require('./telegram');
+const CarLink = require('./car-link');
+
+const VERSION = '0.1.0';
+const FW_TAG = 'bimmer-link';
+const APP_RE = /^bimmer_link\d*$/;
+
+const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
+const CFG = {
+    run: env('BL_RUN', '/run/bimmer-link'),
+    state: env('BL_STATE', '/var/opt/bimmer-link'),
+    oap: env('BL_OAP', '/var/opt/public/oap'),
+    proc: env('BL_PROC', '/proc'),
+    port: Number(env('BL_PORT', 8139)),
+    nft: env('BL_NFT', 'nft'),
+    route: env('BL_ROUTE', '/proc/net/route'),
+    ips: env('BL_IPS', ''),
+    noServer: env('BL_NO_SERVER', '') === '1',
+    noWorker: env('BL_NO_WORKER', '') === '1',
+    workerScript: env('BL_WORKER', path.join(__dirname, 'car-link.js')),
+    tgBaseUrl: env('BL_TG_BASE', ''),
+};
+
+const LOGS = [];
+function log(m) {
+    const line = new Date().toISOString() + ' ' + m;
+    LOGS.push(line);
+    if (LOGS.length > 200) LOGS.shift();
+    process.stdout.write(m + '\n');
+}
+
+const mkdirp = (d) => {
+    if (fs.existsSync(d)) return;
+    mkdirp(path.dirname(d));
+    try { fs.mkdirSync(d); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+};
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } };
+function writeAtomic(file, data, mode) {
+    mkdirp(path.dirname(file));
+    const tmp = file + '.tmp.' + process.pid;
+    fs.writeFileSync(tmp, data, { mode: mode || 0o644 });
+    fs.renameSync(tmp, file);
+}
+
+function defaultConfig() {
+    return {
+        botToken: '',
+        chatId: '',
+        ownerName: '',
+        parkSnapshot: true,
+        wakeNotify: false,
+        autoSyncTimer: false,
+        dailyTimer: '07:30',
+        valet: {
+            enabled: false,
+            maxSpeed: 45,
+            maxRpm: 3500,
+            radiusM: 500,
+            anchorPos: null,
+        },
+    };
+}
+
+function normalizeConfig(raw) {
+    const d = defaultConfig();
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const v = r.valet && typeof r.valet === 'object' ? r.valet : {};
+    return {
+        botToken: typeof r.botToken === 'string' ? r.botToken.trim() : '',
+        chatId: r.chatId !== undefined && r.chatId !== null ? String(r.chatId).trim() : '',
+        ownerName: typeof r.ownerName === 'string' ? r.ownerName.slice(0, 60) : '',
+        parkSnapshot: r.parkSnapshot !== false,
+        wakeNotify: !!r.wakeNotify,
+        autoSyncTimer: !!r.autoSyncTimer,
+        dailyTimer: /^\d{2}:\d{2}$/.test(String(r.dailyTimer || '')) ? String(r.dailyTimer) : d.dailyTimer,
+        valet: {
+            enabled: !!v.enabled,
+            maxSpeed: Math.max(20, Math.min(140, Number(v.maxSpeed) || d.valet.maxSpeed)),
+            maxRpm: Math.max(2000, Math.min(7000, Number(v.maxRpm) || d.valet.maxRpm)),
+            radiusM: Math.max(100, Math.min(10000, Number(v.radiusM) || d.valet.radiusM)),
+            anchorPos: (v.anchorPos && typeof v.anchorPos.lat === 'number' && typeof v.anchorPos.lon === 'number') ? v.anchorPos : null,
+        },
+    };
+}
+
+function newPin() {
+    const n = crypto.randomBytes(2).readUInt16BE(0) % 9000 + 1000;
+    return String(n);
+}
+
+/* ---------------- Network IP discovery & nftables port management ---------------- */
+
+let lastIfaces = {};
+function addresses() {
+    if (CFG.ips) return CFG.ips.split(',').filter(Boolean);
+    let via = '';
+    try {
+        const rows = fs.readFileSync(CFG.route, 'utf8').split('\n').slice(1)
+            .map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 7 && c[1] === '00000000' && c[7] === '00000000');
+        rows.sort((x, y) => Number(x[6]) - Number(y[6]));
+        via = rows.length ? rows[0][0] : '';
+    } catch (e) { via = ''; }
+    const out = [];
+    const nets = os.networkInterfaces();
+    Object.keys(nets).forEach((name) => (nets[name] || []).forEach((a) => {
+        if (a.internal || (a.family !== 'IPv4' && a.family !== 4) || /^169\.254\./.test(a.address)) return;
+        const range = /^192\.168\./.test(a.address) ? 0 : /^172\.(1[6-9]|2\d|3[01])\./.test(a.address) ? 1 : /^10\./.test(a.address) ? 2 : 3;
+        out.push({ ip: a.address, iface: name, rank: (name === via ? 0 : /^(wl|ml|uap|ap|wifi)/i.test(name) ? 10 : 20) + range });
+    }));
+    lastIfaces = {};
+    out.forEach((a) => { lastIfaces[a.ip] = a.iface; });
+    return out.sort((a, b) => a.rank - b.rank).map((a) => a.ip);
+}
+
+function execNft(args) {
+    return new Promise((resolve, reject) => cp.execFile(CFG.nft, args, { timeout: 10000, maxBuffer: 2 << 20 }, (err, out, stderr) => {
+        if (!err) return resolve(out);
+        const e = new Error('nft ' + args.join(' ') + ': ' + (String(stderr || '').trim() || err.message));
+        e.absent = err.code === 'ENOENT' || /No such file or directory/.test(String(stderr));
+        reject(e);
+    }));
+}
+
+const fwRules = (out) => out.split('\n').filter((l) => /# handle \d+\s*$/.test(l) && !/^\s*(chain|table)\b/.test(l));
+const fwMine = (rules) => rules.filter((l) => l.indexOf('comment "' + FW_TAG + '"') >= 0);
+
+async function fwClose(nft) {
+    nft = nft || execNft;
+    let out;
+    try { out = await nft(['-a', 'list', 'chain', 'ip', 'filter', 'input']); } catch (e) { if (e.absent) return 'absent'; throw e; }
+    const mine = fwMine(fwRules(out));
+    for (let i = 0; i < mine.length; i++) {
+        const m = /# handle (\d+)\s*$/.exec(mine[i]);
+        if (m) await nft(['delete', 'rule', 'ip', 'filter', 'input', 'handle', m[1]]);
+    }
+    return 'closed';
+}
+
+async function fwEnsure(port, iface, nft) {
+    nft = nft || execNft;
+    let out;
+    try { out = await nft(['-a', 'list', 'chain', 'ip', 'filter', 'input']); } catch (e) { if (e.absent) return 'absent'; throw e; }
+    const want = (iface ? 'iifname "' + iface + '" ' : '') + 'tcp dport ' + port + ' accept comment "' + FW_TAG + '"';
+    const mine = fwMine(fwRules(out));
+    if (mine.length === 1 && mine[0].indexOf('tcp dport ' + port) >= 0 && (!iface || mine[0].indexOf('"' + iface + '"') >= 0)) return 'kept';
+    for (let i = 0; i < mine.length; i++) {
+        const m = /# handle (\d+)\s*$/.exec(mine[i]);
+        if (m) await nft(['delete', 'rule', 'ip', 'filter', 'input', 'handle', m[1]]);
+    }
+    const args = ['insert', 'rule', 'ip', 'filter', 'input'];
+    if (iface) args.push('iifname', iface);
+    args.push('tcp', 'dport', String(port), 'accept', 'comment', FW_TAG);
+    await nft(args);
+    return 'added';
+}
+
+/* ---------------- App discovery & zero-flash RAM IPC folder ---------------- */
+
+function findInstalledApp(oapRoot) {
+    let dirs = [];
+    try { dirs = fs.readdirSync(oapRoot).filter((d) => /^oap_\d+$/.test(d)); } catch (e) { return null; }
+    for (let i = 0; i < dirs.length; i++) {
+        const rels = ['source/javascript/kit/app-spec.json', 'javascript/kit/app-spec.json'];
+        for (let k = 0; k < rels.length; k++) {
+            const specPath = path.join(oapRoot, dirs[i], rels[k]);
+            const s = readJson(specPath);
+            if (s && typeof s.id === 'string' && APP_RE.test(s.id)) {
+                return { id: s.id, root: path.join(oapRoot, dirs[i]) };
+            }
+        }
+    }
+    return null;
+}
+
+function ensureAppRamDir(runDir, oapRoot, procDir) {
+    const app = findInstalledApp(oapRoot);
+    if (!app) return null;
+    const appRun = path.join(runDir, 'app');
+    mkdirp(appRun);
+    try {
+        let uid = null, gid = null;
+        const pids = fs.readdirSync(procDir).filter((d) => /^\d+$/.test(d));
+        for (let i = 0; i < pids.length; i++) {
+            try {
+                const cmd = fs.readFileSync(path.join(procDir, pids[i], 'cmdline'), 'latin1');
+                if (cmd.indexOf(app.root) < 0) continue;
+                const st = fs.readFileSync(path.join(procDir, pids[i], 'status'), 'utf8');
+                const u = /^Uid:\s+(\d+)/m.exec(st), g = /^Gid:\s+(\d+)/m.exec(st);
+                if (u && g && Number(u[1]) > 0) { uid = Number(u[1]); gid = Number(g[1]); break; }
+            } catch (e) {}
+        }
+        if (uid === null) {
+            const st = fs.statSync(path.join(app.root, 'data'));
+            uid = st.uid; gid = st.gid;
+        }
+        if (uid > 0 && typeof process.getuid === 'function' && process.getuid() === 0) {
+            fs.chownSync(appRun, uid, gid);
+            fs.chmodSync(appRun, 0o770);
+        }
+    } catch (e) {}
+    return app;
+}
+
+/* ---------------- Main Service State & Orchestration ---------------- */
+
+function createService(customCfg) {
+    const C = Object.assign({}, CFG, customCfg || {});
+    mkdirp(C.run);
+    mkdirp(C.state);
+
+    const cfgFile = path.join(C.state, 'config.json');
+    const tripsFile = path.join(C.state, 'trips.json');
+    let config = normalizeConfig(readJson(cfgFile));
+    let trips = Array.isArray(readJson(tripsFile)) ? readJson(tripsFile).slice(0, 20) : [];
+
+    const saveConfig = () => writeAtomic(cfgFile, JSON.stringify(config, null, 2) + '\n', 0o600);
+    const saveTrips = () => writeAtomic(tripsFile, JSON.stringify(trips.slice(0, 20), null, 2) + '\n', 0o644);
+
+    const S = {
+        pin: newPin(),
+        port: C.port,
+        ipIndex: 0,
+        telemetry: new CarLink.TelemetryTracker().state,
+        activeTrip: null,
+        lastTrip: trips[0] || null,
+        workerUp: false,
+        message: 'Sẵn sàng. Quét mã QR bằng điện thoại để kết nối Telegram & điều khiển 1CR.',
+        messageKind: 'dim',
+        seenCmdId: -1,
+        valetAlerts: {},       // kind -> lastMs
+        badPins: {},           // remoteIp -> { count, until }
+        worker: null,
+        pendingReqs: {},
+        reqSeq: 1,
+        server: null,
+    };
+
+    const upOpts = Up.options({
+        stateDir: path.join(C.state, 'state'),
+        oapRoot: C.oap,
+        procDir: C.proc,
+        route: C.route,
+        baseUrl: C.tgBaseUrl,
+        noSetuid: !!C.tgBaseUrl,
+        log,
+    });
+
+    const tell = (msg, kind) => { S.message = msg; S.messageKind = kind || 'go'; writeStatus(); };
+
+    const tg = new Tg.TelegramController({
+        upOpts,
+        getConfig: () => config,
+        log,
+        onAction: (act, arg) => executeAction(act, arg, 'Telegram'),
+    });
+
+    function callWorker(op, params, timeoutMs) {
+        if (!S.worker || !S.worker.stdin || S.worker.killed) {
+            return Promise.resolve({ ok: false, error: 'Trợ thủ tín hiệu xe chưa chạy' });
+        }
+        const id = ++S.reqSeq;
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                delete S.pendingReqs[id];
+                resolve({ ok: false, error: 'Quá thời gian chờ phản hồi từ xe' });
+            }, timeoutMs || 6000);
+            S.pendingReqs[id] = (msg) => { clearTimeout(timer); resolve(msg); };
+            try { S.worker.stdin.write(JSON.stringify({ reqId: id, op, params: params || {} }) + '\n'); } catch (e) {
+                clearTimeout(timer);
+                delete S.pendingReqs[id];
+                resolve({ ok: false, error: e.message });
+            }
+        });
+    }
+
+    function startWorker() {
+        if (C.noWorker || S.worker) return;
+        const child = cp.spawn(process.execPath, [C.workerScript, 'worker'], {
+            env: process.env,
+            stdio: ['pipe', 'pipe', 'ignore'],
+        });
+        S.worker = child;
+        let buf = '';
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (d) => {
+            buf += d;
+            let idx;
+            while ((idx = buf.indexOf('\n')) >= 0) {
+                const line = buf.slice(0, idx).trim();
+                buf = buf.slice(idx + 1);
+                if (!line) continue;
+                let msg = null;
+                try { msg = JSON.parse(line); } catch (e) { continue; }
+                onWorkerEvent(msg);
+            }
+        });
+        child.on('close', () => {
+            S.worker = null;
+            S.workerUp = false;
+            Object.keys(S.pendingReqs).forEach((k) => { S.pendingReqs[k]({ ok: false, error: 'worker restarted' }); delete S.pendingReqs[k]; });
+            setTimeout(() => { if (!tg.stopped) startWorker(); }, 3000);
+        });
+    }
+
+    function onWorkerEvent(msg) {
+        if (!msg) return;
+        if (msg.ev === 'ready') {
+            S.workerUp = true;
+            log('car-link ready (climate interfaces=' + msg.discoveredClimate + ')');
+            writeStatus();
+        } else if (msg.ev === 'telemetry') {
+            S.workerUp = true;
+            if (msg.state) S.telemetry = msg.state;
+            S.activeTrip = msg.activeTrip || null;
+            if (msg.lastTrip) S.lastTrip = msg.lastTrip;
+            checkValetViolations();
+            writeStatus();
+        } else if (msg.ev === 'parked') {
+            if (msg.state) S.telemetry = msg.state;
+            onCarParked(msg.trip || null);
+        } else if (msg.ev === 'reply' && msg.reqId && S.pendingReqs[msg.reqId]) {
+            const cb = S.pendingReqs[msg.reqId];
+            delete S.pendingReqs[msg.reqId];
+            if (msg.state) S.telemetry = msg.state;
+            cb(msg);
+            writeStatus();
+        } else if (msg.ev === 'log') {
+            log('[car-link] ' + msg.text);
+        }
+    }
+
+    async function onCarParked(trip) {
+        if (trip && trip.distanceKm >= 0.1) {
+            trips.unshift(trip);
+            if (trips.length > 20) trips.length = 20;
+            S.lastTrip = trip;
+            saveTrips();
+        }
+        // Read fresh 12V battery voltage before sleep
+        await callWorker('refresh_vitals', {}, 3000);
+
+        // If daily auto-sync 1CR Departure Timer is enabled, push timer into BDC/IHKA before MGU sleeps
+        if (config.autoSyncTimer && /^\d{2}:\d{2}$/.test(config.dailyTimer)) {
+            const parts = config.dailyTimer.split(':');
+            await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true }, 4500);
+        }
+
+        if (config.parkSnapshot && config.botToken && config.chatId) {
+            try {
+                const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ĐÃ ĐỖ XE AN TOAN', trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+                const cap = Tg.formatStatusCaption('XE VỪA ĐỖ XONG', S.telemetry, { trip, valet: config.valet });
+                await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
+                tell('Đã gửi ảnh & vị trí đỗ xe về Telegram.', 'go');
+            } catch (e) {
+                log('park snapshot telegram error: ' + e.message);
+            }
+        }
+        writeStatus();
+    }
+
+    function checkValetViolations() {
+        const v = config.valet;
+        if (!v || !v.enabled || !config.botToken || !config.chatId) return;
+        const t = S.telemetry;
+        const now = Date.now();
+        const trigger = (kind, reason) => {
+            if (S.valetAlerts[kind] && now - S.valetAlerts[kind] < 90000) return;
+            S.valetAlerts[kind] = now;
+            tell('CẢNH BÁO VALET: ' + reason, 'crit');
+            const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const cap = Tg.formatStatusCaption('🚨 CẢNH BÁO VALET: ' + reason, t, { valet: v });
+            tg.sendSnapshotPhoto(snap.png, cap, t, true).catch((e) => log('valet alert err: ' + e.message));
+        };
+
+        if ((t.speed || 0) > v.maxSpeed) {
+            trigger('speed', 'Tốc độ vượt mức (' + Math.round(t.speed) + ' > ' + v.maxSpeed + ' km/h)');
+        }
+        if ((t.rpm || 0) > v.maxRpm) {
+            trigger('rpm', 'Đạp tua máy cao (' + Math.round(t.rpm) + ' > ' + v.maxRpm + ' RPM)');
+        }
+        if (v.anchorPos && t.pos) {
+            const distM = Math.round(CarLink.haversineKm(v.anchorPos.lat, v.anchorPos.lon, t.pos.lat, t.pos.lon) * 1000);
+            if (distM > v.radiusM) {
+                trigger('geo', 'Xe ra khỏi bán kính cho phép (' + distM + 'm > ' + v.radiusM + 'm)');
+            }
+        }
+    }
+
+    /** Unified action handler called by Telegram Bot, Phone QR Portal, and In-Car App. */
+    async function executeAction(action, arg, source) {
+        arg = arg || {};
+        source = source || 'App';
+        if (action === 'help') {
+            const helpMsg =
+                '🤖 Trợ lý MyBMW & 1CR (MGU Store)\n' +
+                '• Bấm các nút bên dưới hoặc gõ lệnh:\n' +
+                '  /status — Xem vị trí, xăng, bình 12V, cửa\n' +
+                '  /photo — Chụp ảnh thẻ trạng thái / cam 360\n' +
+                '  /1cr — Kích nổ máy / làm mát từ xa 1CR ngay\n' +
+                '  /stop1cr — Tắt nổ máy từ xa 1CR\n' +
+                '  /timer 17:15 — Nạp giờ nổ máy 1CR vào hộp BDC (chạy cả khi MGU ngủ)\n' +
+                '  /valet on|off — Bật/tắt giám sát giao xe rửa xe / garage\n' +
+                '  /trips — Xem lịch sử 5 chuyến đi gần nhất';
+            if (config.botToken && config.chatId) await tg.sendMessage(helpMsg, S.telemetry, config.valet.enabled);
+            return { ok: true, message: 'Đã gửi hướng dẫn.' };
+        }
+
+        if (action === 'status') {
+            await callWorker('refresh_vitals', {}, 2500);
+            const txt = Tg.formatStatusCaption('TRẠNG THÁI HIỆN TẠI', S.telemetry, { trip: S.lastTrip, valet: config.valet });
+            if (config.botToken && config.chatId) await tg.sendMessage(txt, S.telemetry, config.valet.enabled);
+            return { ok: true, message: 'Đã cập nhật trạng thái.' };
+        }
+
+        if (action === 'snap_now') {
+            await callWorker('refresh_vitals', {}, 2500);
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRANG THAI TRUC TIEP', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            if (config.botToken && config.chatId) {
+                const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
+                await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
+                tell('Đã chụp và gửi về Telegram!', 'go');
+                return { ok: true, message: S.message };
+            }
+            tell('Chưa kết nối Telegram — hãy quét mã QR trên màn hình để cài đặt.', 'warn');
+            return { ok: false, error: S.message };
+        }
+
+        if (action === 'start1cr' || action === 'stop1cr') {
+            const wantOn = action === 'start1cr';
+            const rep = await callWorker(action, {}, 6000);
+            const resObj = (rep && rep.result) || {};
+            if (rep && rep.ok) {
+                const msg = (wantOn ? '🔥 Đã kích hoạt đề nổ / làm mát 1CR (' : '⏹ Đã gửi lệnh tắt 1CR (') + (resObj.method || 'SOME/IP') + ')';
+                tell(msg, 'go');
+                if (config.botToken && config.chatId) {
+                    tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+                }
+                return { ok: true, message: msg, detail: resObj };
+            }
+            // Simulated / bench feedback when not on car bus yet
+            const errText = (resObj && resObj.error) || (rep && rep.error) || 'Không nhận được phản hồi từ hộp điều hoà';
+            tell('1CR: ' + errText, 'warn');
+            if (source === 'Telegram' && config.botToken && config.chatId) {
+                tg.sendMessage('⚠️ 1CR: ' + errText, S.telemetry, config.valet.enabled).catch(() => {});
+            }
+            return { ok: false, error: errText, detail: resObj };
+        }
+
+        if (action === 'timer_set' || action === 'timer_off') {
+            const en = action === 'timer_set';
+            const h = Number(arg.hour) || 7, m = Number(arg.minute) || 30;
+            const hhmm = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+            if (en) config.dailyTimer = hhmm;
+            else config.autoSyncTimer = false;
+            saveConfig();
+            const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en }, 5000);
+            S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
+            const msg = en
+                ? ('⏰ Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? ' (đã nạp xuống BDC/IHKA)' : ' (đã lưu lịch)'))
+                : '❌ Đã tắt hẹn giờ nổ máy 1CR.';
+            tell(msg, 'go');
+            if (config.botToken && config.chatId) {
+                tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+            }
+            return { ok: true, message: msg };
+        }
+
+        if (action === 'valet_toggle' || action === 'valet_set') {
+            const next = action === 'valet_toggle' ? !config.valet.enabled : (arg.mode === 'on' ? true : arg.mode === 'off' ? false : !config.valet.enabled);
+            config.valet.enabled = next;
+            config.valet.anchorPos = (next && S.telemetry.pos) ? { lat: S.telemetry.pos.lat, lon: S.telemetry.pos.lon } : null;
+            S.valetAlerts = {};
+            saveConfig();
+            const msg = next
+                ? ('🛡️ Đã BẬT chế độ Valet (giới hạn ' + config.valet.maxSpeed + ' km/h, ' + config.valet.maxRpm + ' RPM, bán kính ' + config.valet.radiusM + 'm).')
+                : '🛡️ Đã TẮT chế độ Valet.';
+            tell(msg, next ? 'warn' : 'go');
+            if (config.botToken && config.chatId) {
+                tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+            }
+            return { ok: true, message: msg, valet: config.valet };
+        }
+
+        if (action === 'trips') {
+            const rows = trips.slice(0, 5).map((tr, idx) => {
+                const d = new Date(tr.endedAt);
+                const pad = (n) => (n < 10 ? '0' : '') + n;
+                const when = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' ' + pad(d.getDate()) + '/' + (d.getMonth() + 1);
+                return (idx + 1) + '. [' + when + '] ' + tr.distanceKm + ' km · ' + tr.durationMin + 'p · Max ' + tr.maxSpeed + ' km/h';
+            });
+            const msg = '🏁 LỊCH SỬ CHUYẾN ĐI GẦN ĐÂY:\n' + (rows.length ? rows.join('\n') : 'Chưa có chuyến đi nào được ghi nhận.');
+            if (config.botToken && config.chatId) await tg.sendMessage(msg, S.telemetry, config.valet.enabled);
+            return { ok: true, message: msg };
+        }
+
+        if (action === 'next_ip') {
+            S.ipIndex++;
+            writeStatus();
+            fwCheck();
+            return { ok: true, message: 'Đã chuyển địa chỉ mạng.' };
+        }
+
+        return { ok: false, error: 'Lệnh không hợp lệ: ' + action };
+    }
+
+    function currentUrl() {
+        const ips = addresses();
+        if (!ips.length) return '';
+        const ip = ips[S.ipIndex % ips.length];
+        return 'http://' + ip + ':' + S.port + '/?pin=' + S.pin;
+    }
+
+    function writeStatus() {
+        const url = currentUrl();
+        const payload = {
+            at: Date.now(),
+            version: VERSION,
+            url,
+            pin: S.pin,
+            ips: addresses(),
+            telegramOk: !!(config.botToken && config.chatId),
+            ownerName: config.ownerName || (config.chatId ? ('ID ' + config.chatId) : ''),
+            tgLastOkAt: tg.lastOkAt,
+            tgError: tg.lastError,
+            parkSnapshot: config.parkSnapshot,
+            autoSyncTimer: config.autoSyncTimer,
+            dailyTimer: config.dailyTimer,
+            valet: config.valet,
+            workerUp: S.workerUp,
+            telemetry: S.telemetry,
+            activeTrip: S.activeTrip,
+            lastTrip: S.lastTrip,
+            trips: trips.slice(0, 6),
+            message: S.message,
+            messageKind: S.messageKind,
+        };
+        try { writeAtomic(path.join(C.run, 'status.json'), JSON.stringify(payload), 0o644); } catch (e) {}
+    }
+
+    function pollAppCommands() {
+        const app = ensureAppRamDir(C.run, C.oap, C.proc);
+        const candidates = [path.join(C.run, 'app', 'command.json')];
+        if (app) candidates.push(path.join(app.root, 'data', 'command.json'));
+        let newest = null;
+        candidates.forEach((f) => {
+            const c = readJson(f);
+            if (c && typeof c.id === 'number' && (!newest || c.id > newest.id)) newest = c;
+        });
+        if (!newest) return;
+        if (S.seenCmdId < 0) { S.seenCmdId = newest.id; return; }
+        if (newest.id === S.seenCmdId) return;
+        S.seenCmdId = newest.id;
+        executeAction(newest.cmd, newest.arg || {}, 'Màn hình xe').catch((e) => tell('Lỗi: ' + e.message, 'crit'));
+    }
+
+    function fwCheck() {
+        if (C.noServer) return;
+        const ips = addresses();
+        const ip = ips.length ? ips[S.ipIndex % ips.length] : '';
+        const iface = ip ? lastIfaces[ip] : '';
+        fwEnsure(S.port, iface).catch(() => {});
+    }
+
+    /* ---------------- Local HTTP Phone Setup & 1CR Inspector Server ---------------- */
+
+    function checkPin(req, queryPin) {
+        const remote = String((req.socket && req.socket.remoteAddress) || 'local');
+        const now = Date.now();
+        const rec = S.badPins[remote];
+        if (rec && rec.until > now) return { ok: false, locked: true };
+        const pin = String(queryPin || req.headers['x-pin'] || '').trim();
+        if (pin === S.pin) {
+            delete S.badPins[remote];
+            return { ok: true };
+        }
+        const count = (rec ? rec.count : 0) + 1;
+        S.badPins[remote] = { count, until: count >= 5 ? now + 60000 : 0 };
+        return { ok: false, locked: count >= 5 };
+    }
+
+    function sendJson(res, code, obj) {
+        const body = Buffer.from(JSON.stringify(obj), 'utf8');
+        res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': body.length });
+        res.end(body);
+    }
+
+    function readBodyJson(req) {
+        return new Promise((resolve, reject) => {
+            const chunks = [];
+            let sz = 0;
+            req.on('data', (c) => { sz += c.length; if (sz > 256 * 1024) { req.destroy(); reject(new Error('body too large')); return; } chunks.push(c); });
+            req.on('end', () => {
+                if (!chunks.length) return resolve({});
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(new Error('JSON không hợp lệ')); }
+            });
+            req.on('error', reject);
+        });
+    }
+
+    async function handleHttp(req, res) {
+        const parsed = urlMod.parse(req.url || '/', true);
+        const pathname = parsed.pathname || '/';
+
+        if (req.method === 'GET' && pathname === '/') {
+            const html = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8');
+            const buf = Buffer.from(html, 'utf8');
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': buf.length });
+            res.end(buf);
+            return;
+        }
+
+        const auth = checkPin(req, parsed.query && parsed.query.pin);
+        if (!auth.ok) {
+            return sendJson(res, auth.locked ? 429 : 403, {
+                ok: false,
+                error: auth.locked ? 'Nhập sai mã PIN quá 5 lần. Vui lòng thử lại sau 1 phút.' : 'Sai mã PIN (xem mã 4 số trên màn hình xe).',
+            });
+        }
+
+        if (req.method === 'GET' && pathname === '/api/state') {
+            return sendJson(res, 200, {
+                ok: true,
+                version: VERSION,
+                config: {
+                    hasToken: !!config.botToken,
+                    maskedToken: config.botToken ? (config.botToken.slice(0, 8) + '…' + config.botToken.slice(-4)) : '',
+                    chatId: config.chatId,
+                    ownerName: config.ownerName,
+                    parkSnapshot: config.parkSnapshot,
+                    wakeNotify: config.wakeNotify,
+                    autoSyncTimer: config.autoSyncTimer,
+                    dailyTimer: config.dailyTimer,
+                    valet: config.valet,
+                },
+                telemetry: S.telemetry,
+                lastTrip: S.lastTrip,
+                trips: trips.slice(0, 10),
+                message: S.message,
+                tgError: tg.lastError,
+            });
+        }
+
+        if (req.method === 'GET' && pathname === '/api/snapshot.png') {
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'XEM TRUOC ANH TRANG THAI', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Content-Length': snap.png.length });
+            res.end(snap.png);
+            return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/1cr-schema') {
+            const rep = await callWorker('schema', {}, 5000);
+            return sendJson(res, 200, {
+                ok: !!(rep && rep.ok),
+                schema: (rep && rep.schema) || { interfaces: [], live: {}, pinnedProfile: null },
+                telemetry: S.telemetry,
+                logs: LOGS.slice(-40),
+            });
+        }
+
+        if (req.method === 'POST' && pathname === '/api/config') {
+            const b = await readBodyJson(req);
+            const merged = Object.assign({}, config, b);
+            if (!b.botToken && config.botToken && b.keepToken !== false) merged.botToken = config.botToken;
+            if (b.valet) merged.valet = Object.assign({}, config.valet, b.valet);
+            if (merged.valet.enabled && !merged.valet.anchorPos && S.telemetry.pos) {
+                merged.valet.anchorPos = { lat: S.telemetry.pos.lat, lon: S.telemetry.pos.lon };
+            }
+            config = normalizeConfig(merged);
+            saveConfig();
+            tell('Đã lưu cấu hình từ điện thoại.', 'go');
+            return sendJson(res, 200, { ok: true, message: S.message });
+        }
+
+        if (req.method === 'POST' && pathname === '/api/detect-chat') {
+            const b = await readBodyJson(req);
+            const token = (b.botToken && String(b.botToken).trim()) || config.botToken;
+            if (!token) return sendJson(res, 400, { ok: false, error: 'Hãy dán Bot Token trước.' });
+            const found = await tg.detectOwnerChat(token);
+            if (!found) {
+                return sendJson(res, 200, { ok: false, error: 'Chưa thấy tin nhắn nào. Hãy mở Telegram, bấm Start hoặc nhắn "hi" cho Bot rồi bấm lại!' });
+            }
+            config.botToken = token;
+            config.chatId = found.chatId;
+            config.ownerName = found.name;
+            saveConfig();
+            tell('Đã kết nối Telegram với ' + found.name + '!', 'go');
+            return sendJson(res, 200, { ok: true, chatId: found.chatId, ownerName: found.name });
+        }
+
+        if (req.method === 'POST' && pathname === '/api/test-telegram') {
+            const b = await readBodyJson(req);
+            const token = (b.botToken && String(b.botToken).trim()) || config.botToken;
+            const chatId = (b.chatId && String(b.chatId).trim()) || config.chatId;
+            if (!token || !chatId) return sendJson(res, 400, { ok: false, error: 'Cần cả Bot Token và Chat ID.' });
+            config.botToken = token;
+            config.chatId = chatId;
+            saveConfig();
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'KET NOI TELEGRAM THANH CONG!', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const cap = Tg.formatStatusCaption('✅ KẾT NỐI XE BMW THÀNH CÔNG!', S.telemetry, { note: 'Bấm các nút bên dưới để điều khiển 1CR, chụp ảnh hoặc bật Valet.' });
+            await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled, token, chatId);
+            tell('Đã gửi ảnh thử nghiệm thành công về Telegram!', 'go');
+            return sendJson(res, 200, { ok: true, message: S.message });
+        }
+
+        if (req.method === 'POST' && pathname === '/api/action') {
+            const b = await readBodyJson(req);
+            const out = await executeAction(String(b.action || ''), b.arg || {}, 'Điện thoại');
+            return sendJson(res, 200, out);
+        }
+
+        if (req.method === 'POST' && pathname === '/api/1cr-raw') {
+            const b = await readBodyJson(req);
+            const rep = await callWorker('invoke_raw', b, 6000);
+            return sendJson(res, 200, (rep && rep.result) || rep || { ok: false });
+        }
+
+        return sendJson(res, 404, { ok: false, error: 'Not found' });
+    }
+
+    function start() {
+        // Ensure uplink UID drop-in is registered early
+        try { Up.pickUid(upOpts); } catch (e) {}
+        startWorker();
+
+        if (!C.noServer) {
+            const srv = http.createServer((req, res) => {
+                handleHttp(req, res).catch((e) => {
+                    log('http err: ' + e.message);
+                    try { sendJson(res, 500, { ok: false, error: e.message }); } catch (x) {}
+                });
+            });
+            let p = C.port;
+            srv.on('error', (e) => {
+                if (e.code === 'EADDRINUSE' && p < C.port + 8) { p++; srv.listen(p, '0.0.0.0'); }
+                else log('http server error: ' + e.message);
+            });
+            srv.on('listening', () => {
+                S.port = srv.address().port;
+                log('bimmer-link portal listening on port ' + S.port + ', PIN ' + S.pin);
+                writeStatus();
+                fwCheck();
+            });
+            srv.listen(p, '0.0.0.0');
+            S.server = srv;
+        }
+
+        const tickTimer = setInterval(() => {
+            try { pollAppCommands(); } catch (e) {}
+            writeStatus();
+            tg.pollOnce();
+        }, 1500);
+
+        const fwTimer = setInterval(fwCheck, 30000);
+        writeStatus();
+
+        if (config.wakeNotify && config.botToken && config.chatId) {
+            setTimeout(() => {
+                tg.sendMessage('🟢 Đầu xe BMW vừa khởi động và kết nối mạng sẵn sàng.', S.telemetry, config.valet.enabled).catch(() => {});
+            }, 6000);
+        }
+
+        return {
+            S,
+            tg,
+            getConfig: () => config,
+            executeAction,
+            onWorkerEvent,
+            stop: () => {
+                tg.stopped = true;
+                clearInterval(tickTimer);
+                clearInterval(fwTimer);
+                if (S.server) { try { S.server.close(); } catch (e) {} }
+                if (S.worker) { try { S.worker.kill('SIGTERM'); } catch (e) {} }
+            },
+        };
+    }
+
+    return { S, tg, start, executeAction, onWorkerEvent, writeStatus, handleHttp };
+}
+
+if (require.main === module) {
+    const cmd = process.argv[2] || 'run';
+    if (cmd === 'fwclose') {
+        fwClose().then((r) => process.stdout.write(r + '\n'), (e) => process.stdout.write(e.message + '\n'));
+    } else if (cmd === 'status') {
+        process.stdout.write(JSON.stringify(readJson(path.join(CFG.run, 'status.json')) || {}, null, 2) + '\n');
+    } else {
+        const svc = createService();
+        const running = svc.start();
+        process.on('SIGTERM', () => { running.stop(); process.exit(0); });
+    }
+}
+
+module.exports = {
+    VERSION,
+    CFG,
+    defaultConfig,
+    normalizeConfig,
+    addresses,
+    fwEnsure,
+    fwClose,
+    createService,
+};
