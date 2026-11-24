@@ -9,8 +9,8 @@
  *   each row's dark runs one rect (works on every canvas: fillRect only). Returns the square's side.
  */
 
-// per version 1..4 at level M: [data codewords per block, blocks, EC codewords per block, alignment centre]
-const SPEC = [null, [16, 1, 10, 0], [28, 1, 16, 18], [44, 1, 26, 22], [32, 2, 18, 26]];
+// per version 1..6 at level M: [data codewords per block, blocks, EC codewords per block, alignment centre]
+const SPEC = [null, [16, 1, 10, 0], [28, 1, 16, 18], [44, 1, 26, 22], [32, 2, 18, 26], [43, 2, 24, 30], [27, 4, 16, 34]];
 
 function gmul(x, y) {
     let z = 0;
@@ -93,8 +93,8 @@ function penalty(m) {
 function encode(text, opts) {
     const bytes = Array.from(Buffer.from(String(text), 'utf8'));
     let ver = 1;
-    while (ver <= 4 && SPEC[ver][0] * SPEC[ver][1] < bytes.length + 2) ver++;
-    if (ver > 4) throw new Error('qr: text too long (' + bytes.length + ' bytes, at most 62)');
+    while (ver <= 6 && SPEC[ver][0] * SPEC[ver][1] < bytes.length + 2) ver++;
+    if (ver > 6) throw new Error('qr: text too long (' + bytes.length + ' bytes, at most 106)');
     const n = 17 + 4 * ver;
     const m = [], fn = [];
     for (let y = 0; y < n; y++) { m.push(new Array(n).fill(false)); fn.push(new Array(n).fill(false)); }

@@ -2,4 +2,10 @@ dist/
 oap-sdk/
 native/build/
 node_modules/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.jks
 .DS_Store

@@ -16,6 +16,7 @@ const FILES = [
     'apps/bimmer_link/ui.js',
     'tools/bimmer-link/bimmer-link.js',
     'tools/bimmer-link/car-link.js',
+    'tools/bimmer-link/cloud.js',
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
     'tools/bimmer-link/uplink.js',

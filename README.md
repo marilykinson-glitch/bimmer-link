@@ -1,38 +1,27 @@
-# MyBMW & 1CR (`bimmer_link`) — BMW iDrive 7 / MGU Store
+# MyBMW & 1CR (`bimmer_link` 0.2.0) — Trọn bộ MGU Store + iPhone App + Android APK
 
-Ứng dụng **"MyBMW không cần ConnectedDrive"** tích hợp điều khiển **Đề nổ làm mát từ xa (`Option 1CR`)**, tự động gửi **Ảnh thẻ trạng thái / cam 360 & vị trí hầm khi đỗ xe** và **Giám sát chế độ Valet** qua **Telegram Bot cá nhân** (0 tốn máy chủ trung gian).
+Hệ sinh thái **MyBMW không cần ConnectedDrive** dành cho xe **BMW iDrive 7 (MGU)** đã có hoặc độ **Option 1CR (Remote Engine Start)**:
 
-## Tính năng chính
-
-1. **Đề nổ & Làm mát từ xa (`Option 1CR`):**
-   - **Kích nổ trực tiếp (`Start 1CR`):** Tự động dò các giao diện `Climate / AuxiliaryConditioning / Preconditioning` trong `/etc/oap/someip/someip-interfaces.json` của xe, bật cờ cho phép đề nổ và kích hoạt ngay khi đầu MGU đang thức (hoặc trong ~10 phút đầu sau khi khoá xe).
-   - **Hẹn giờ nổ máy lưu thẳng vào hộp `BDC_BODY3 / IHKA` (`Smart Departure Sync`):** Nạp giờ khởi hành (ví dụ `07:30` đi làm, `17:15` tan ca) xuống bộ đếm phần cứng của hộp BDC/IHKA. Khi đầu MGU tắt điện ngủ sâu (`0W`), **tự hộp BDC thức dậy đề nổ máy `1CR` làm lạnh cabin sẵn** mà không hao ắc quy lúc đỗ!
-   - **Tab Chuyên sâu 1CR (`SOME/IP Inspector`):** Mở trên điện thoại qua mã QR để xem trực tiếp toàn bộ hàm/trường Climate của phiên bản phần mềm trên xe, bấm chạy thử từng lệnh và **ghim cố định cấu hình chuẩn** cho xe.
-
-2. **Tự động báo vị trí hầm & Ảnh chụp khi tắt máy (`Park Snapshot`):**
-   - Bắt khoảnh khắc tắt máy đỗ xe (`FAHREN → PARKEN`), đọc vị trí định vị hầm (`Positioning.currentLocation` vẫn nhớ toạ độ dưới hầm chung cư/TTTM), mức xăng, quãng đường còn lại, điện áp bình 12V (qua UDS `0x22 F442`), nhiệt độ máy/ngoài trời, kiểm tra cửa/cốp/khoá xe và tổng kết chuyến đi vừa chạy, gửi thẳng về **Telegram** kèm các nút bấm điều khiển nhanh.
-
-3. **Chế độ Valet 1 chạm (`Gửi bãi / Rửa xe / Giao thợ garage`):**
-   - Bật ngay trên màn hình xe hoặc trên Telegram trước khi giao chìa. Hễ xe chạy quá tốc độ cho phép (mặc định `45 km/h`), đạp tua máy cao (`> 3500 RPM`), hoặc chạy ra khỏi bán kính cho phép (`> 500m`), xe lập tức bắn cảnh báo đỏ kèm vị trí về Telegram.
+1. **Trên đầu xe BMW (`bimmer_link` + dịch vụ nền `bimmer-link`):**
+   - Đọc trực tiếp vị trí hầm (`Positioning.currentLocation`), % xăng, tầm chạy còn lại, ODO, điện áp bình 12V (qua UDS `0x22 F442`), nhiệt độ máy/ngoài trời, trạng thái cửa/cốp/khoá xe.
+   - Tự động dò và điều khiển **Đề nổ làm mát từ xa (`Option 1CR`)** + nạp **Hẹn giờ khởi hành (`Departure Timer`)** thẳng xuống hộp `BDC_BODY3 / IHKA` (tự thức dậy đề nổ máy `1CR` kể cả khi đầu MGU đã tắt điện ngủ sâu `0W`).
+   - Tự động chụp thẻ ảnh trạng thái khi tắt máy đỗ xe (`Park Snapshot`) và canh **Chế độ Valet** (giới hạn tốc độ, tua máy, bán kính GPS).
+2. **Trên iPhone (`iOS Fullscreen PWA`):**
+   - Giao diện chuẩn **MyBMW Dark UI**: https://marilykinson-glitch.github.io/bimmer-link/app/
+   - Quét mã QR trên màn hình xe bằng Camera iPhone → mở Safari → bấm **Chia sẻ → Thêm vào MH chính** để dùng tràn viền như App hãng (không bao giờ hết hạn chứng chỉ 7 ngày, vẫn xem được vị trí đỗ, ảnh chụp, % xăng, bình 12V và lịch sử chuyến đi ngay cả khi xe đang ngủ `0W`).
+3. **Trên Android (`MyBMW-MGU-0.2.0.apk`):**
+   - Tải trực tiếp file `.apk` trong mục **Releases**: https://github.com/marilykinson-glitch/bimmer-link/releases/latest
+   - Tích hợp sẵn **Widget 4×2 ngoài màn hình chính Android** và dịch vụ báo động Valet / đỗ xe chạy ngầm.
+   - Quét cùng 1 mã QR trên xe là **cả iPhone lẫn Android đồng bộ song song theo thời gian thực** (qua mạng 4G/5G toàn cầu, không cần ngắt CarPlay không dây!).
 
 ---
 
-## Cài đặt lên MGU Store
+## Cách cài đặt & Ghép nối nhanh
 
-1. Đẩy thư mục này lên một repo GitHub của bạn (ví dụ `ten-tai-khoan/bimmer-link`).
-2. Mở **MGU Store** trên xe → phần **Sources** → thêm `ten-tai-khoan/bimmer-link` (nhánh `main`).
-3. Bấm cài đặt **MyBMW & 1CR** (Store sẽ tự cài kèm dịch vụ chạy ngầm **Trợ thủ MyBMW & 1CR** và cấp quyền ra mạng qua `mgu-uplink`).
-
-## Kết nối Telegram trong 30 giây
-
-1. Mở ứng dụng **MyBMW & 1CR** trên màn hình xe → màn hình hiện **Mã QR** và **Mã PIN 4 số** (điện thoại và xe nối chung Wi-Fi hoặc điểm phát sóng).
-2. Trên Telegram, mở `@BotFather` → gõ `/newbot` để lấy **Bot Token**, sau đó bấm **Start** (nhắn `hi`) vào Bot vừa tạo.
-3. Quét mã QR trên màn hình xe → qua tab **Telegram** → dán Token → bấm **🔍 Tự nhận Chat ID** → bấm **📨 Gửi ảnh Test ngay**!
-
-## Kiểm tra mã nguồn trên máy tính
-
-```sh
-python3 tests/verify_all.py
-# Hoặc nếu máy có cài Node.js:
-node scripts/check_node8.js && node tests/bimmer_link_test.js
-```
+1. **Trên xe (MGU Store):**
+   - Vào **MGU Store → Sources**, thêm nguồn: `marilykinson-glitch/bimmer-link` (nhánh `main`).
+   - Cài đặt hoặc cập nhật **MyBMW & 1CR** lên bản `0.2.0`.
+2. **Trên iPhone:**
+   - Mở ứng dụng **MyBMW & 1CR** trên màn hình xe → đưa Camera iPhone quét mã QR bên trái → mở trong Safari → bấm **Chia sẻ → Thêm vào MH chính**.
+3. **Trên Android:**
+   - Tải và cài `MyBMW-MGU-0.2.0.apk` từ trang Releases → quét cùng mã QR trên màn hình xe (hoặc bấm *Sao chép link sang máy thứ 2* từ iPhone gửi qua) → nhấn giữ màn hình chính Android để lấy **Widget MyBMW** ra ngoài!

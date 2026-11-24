@@ -84,20 +84,31 @@ function draw(cv, G, t, v, act) {
     const top = G.TOP + 54;
     const bottom = H - G.BOT - 16;
 
-    // LEFT PANE: QR + PIN or Trip Log
+    // LEFT PANE: QR (MyBMW Cloud App or Local Wi-Fi) or Trip Log
     if (v.viewMode === 'trips') {
         drawTripsPane(cv, G, t, lx - 16, top - 6, v.trips, act.toggleTrips);
+    } else if (v.state === 'ok' && v.qrMode !== 'local' && v.cloudUrl) {
+        let side = 0;
+        try { side = QR.draw(cv, v.cloudUrl, lx + 4, top, 5); } catch (e) { side = 0; }
+        const qside = side || 245;
+        const qx = lx + 4 + qside / 2;
+        cv.text('QUÉT GHÉP APP MYBMW', qx, top + qside + 32, 14, t.go || '#2fd27a', { literal: true, align: 'center', font: 'bold', spacing: 1 });
+        cv.text('iPhone & Android (4G / Cloud)', qx, top + qside + 58, 16, t.text, { literal: true, align: 'center', font: 'label' });
+        cv.text('Chạm đổi sang QR Wi-Fi nội bộ', qx, top + qside + 88, 14, t.accent2 || '#81c4ff', { literal: true, align: 'center', font: 'bold' });
+        if (cv.target && act.toggleQrMode) {
+            cv.target(lx, top + qside + 68, qside + 12, 34, act.toggleQrMode, 'blToggleQr');
+        }
     } else if (v.state === 'ok' && v.url) {
         let side = 0;
         try { side = QR.draw(cv, v.url, lx, top, 7); } catch (e) { side = 0; }
         const qside = side || 259;
         const qx = lx + qside / 2;
-        cv.text('MÃ PIN CÀI ĐẶT', qx, top + qside + 32, 14, t.dim, { literal: true, align: 'center', font: 'bold', spacing: 1.5 });
-        cv.text(String(v.pin || '').split('').join(' '), qx, top + qside + 80, 50, t.text, { literal: true, align: 'center', font: 'bold', spacing: 3 });
-        const ipHint = (v.host || '') + (v.ipCount > 1 ? ' (Đổi IP)' : '');
-        cv.text(ipHint, qx, top + qside + 108, 14, G.withAlpha('#ffffff', 0.45), { literal: true, align: 'center', font: 'label' });
-        if (v.ipCount > 1 && cv.target && act.nextIp) {
-            cv.target(lx, top + qside + 86, qside, 32, act.nextIp, 'blNextIp');
+        cv.text('MÃ PIN WI-FI NỘI BỘ', qx, top + qside + 28, 13, t.dim, { literal: true, align: 'center', font: 'bold', spacing: 1.5 });
+        cv.text(String(v.pin || '').split('').join(' '), qx, top + qside + 72, 46, t.text, { literal: true, align: 'center', font: 'bold', spacing: 3 });
+        const ipHint = (v.host || '') + ' · Đổi sang QR App';
+        cv.text(ipHint, qx, top + qside + 98, 13, t.accent2 || '#81c4ff', { literal: true, align: 'center', font: 'bold' });
+        if (cv.target && act.toggleQrMode) {
+            cv.target(lx, top + qside + 80, qside, 30, act.toggleQrMode, 'blToggleQr2');
         }
     } else {
         cv.roundRect(lx, top, 259, 259, 18, G.withAlpha('#ffffff', 0.05));
@@ -111,10 +122,13 @@ function draw(cv, G, t, v, act) {
     const rx = 432, rw = W - 56 - rx;
     cv.text('MYBMW & 1CR', rx, G.TOP + 72, 38, t.text, { literal: true, font: 'bold', spacing: 2 });
 
-    const tgColor = v.state !== 'ok' ? kindColor(t, 'warn') : (v.telegramOk ? kindColor(t, 'go') : kindColor(t, 'warn'));
+    const linkReady = v.cloudOk || v.telegramOk || !!v.cloudUrl;
+    const tgColor = v.state !== 'ok' ? kindColor(t, 'warn') : (linkReady ? kindColor(t, 'go') : kindColor(t, 'warn'));
     const tgLabel = v.state !== 'ok'
         ? 'Đang chờ dịch vụ bimmer-link…'
-        : (v.telegramOk ? ('Đã nối Telegram: ' + (v.ownerName || 'Sẵn sàng')) : 'Chưa nối Telegram — quét QR bên trái để cài trong 30 giây');
+        : (v.cloudOk
+            ? ('App MyBMW trực tuyến' + (v.telegramOk ? ' · Telegram sẵn sàng' : ''))
+            : ('Quét mã QR bên trái bằng iPhone / Android để ghép App MyBMW'));
     const sx = rx + cv.textWidth('MYBMW & 1CR', 38, { literal: true, font: 'bold', spacing: 2 }) + 28;
     cv.circle(sx + 8, G.TOP + 64, 7, tgColor);
     cv.text(fit(cv, tgLabel, 18, { literal: true, font: 'label' }, W - 140 - (sx + 24)), sx + 24, G.TOP + 71, 18, tgColor, { literal: true, font: 'label' });

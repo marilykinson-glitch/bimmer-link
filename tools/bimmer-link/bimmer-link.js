@@ -22,8 +22,9 @@ const Up = require('./uplink');
 const Snap = require('./snapshot');
 const Tg = require('./telegram');
 const CarLink = require('./car-link');
+const Cloud = require('./cloud');
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -41,6 +42,8 @@ const CFG = {
     noWorker: env('BL_NO_WORKER', '') === '1',
     workerScript: env('BL_WORKER', path.join(__dirname, 'car-link.js')),
     tgBaseUrl: env('BL_TG_BASE', ''),
+    noCloud: env('BL_NO_CLOUD', '') === '1',
+    relayHost: env('BL_RELAY_HOST', ''),
 };
 
 const LOGS = [];
@@ -276,6 +279,69 @@ function createService(customCfg) {
         onAction: (act, arg) => executeAction(act, arg, 'Telegram'),
     });
 
+    const identity = Cloud.loadOrCreateIdentity(path.join(C.state, 'cloud-identity.json'));
+    const cloud = new Cloud.CloudBridge({
+        identity,
+        upOpts,
+        relayHost: C.relayHost || undefined,
+        enabled: !C.noCloud,
+        log,
+        onCommand: async (cmdObj) => {
+            const c = String(cmdObj.cmd || '');
+            const a = cmdObj.arg || {};
+            if (c === 'schema') {
+                const rep = await callWorker('schema', {}, 5000);
+                await cloud.publishDiag({
+                    t: 'schema',
+                    reqId: cmdObj.id,
+                    schema: (rep && rep.schema) || { interfaces: [], live: {}, pinnedProfile: null },
+                    logs: LOGS.slice(-30),
+                });
+                return;
+            }
+            if (c === 'invoke_raw') {
+                const rep = await callWorker('invoke_raw', a, 6000);
+                await cloud.publishDiag({ t: 'raw_result', reqId: cmdObj.id, result: (rep && rep.result) || rep });
+                syncCloudState(true);
+                return;
+            }
+            if (c === 'valet_prefs' && a) {
+                config.valet = normalizeConfig({ valet: Object.assign({}, config.valet, a) }).valet;
+                saveConfig();
+                tell('Đã cập nhật ngưỡng Valet từ App MyBMW.', 'go');
+                syncCloudState(true);
+                return;
+            }
+            if (c === 'timer_prefs' && a) {
+                if (typeof a.autoSyncTimer === 'boolean') config.autoSyncTimer = a.autoSyncTimer;
+                if (a.dailyTimer) config.dailyTimer = String(a.dailyTimer);
+                saveConfig();
+                syncCloudState(true);
+                return;
+            }
+            await executeAction(c, a, cmdObj.device || 'MyBMW App');
+            syncCloudState(true);
+        },
+    });
+
+    function cloudSnapshotPayload(extra) {
+        return Object.assign({
+            version: VERSION,
+            telemetry: S.telemetry,
+            lastTrip: S.lastTrip,
+            trips: trips.slice(0, 8),
+            valet: config.valet,
+            autoSyncTimer: config.autoSyncTimer,
+            dailyTimer: config.dailyTimer,
+            message: S.message,
+            messageKind: S.messageKind,
+        }, extra || {});
+    }
+
+    function syncCloudState(force, extra) {
+        cloud.publishState(cloudSnapshotPayload(extra), !!force).catch(() => {});
+    }
+
     function callWorker(op, params, timeoutMs) {
         if (!S.worker || !S.worker.stdin || S.worker.killed) {
             return Promise.resolve({ ok: false, error: 'Trợ thủ tín hiệu xe chưa chạy' });
@@ -337,6 +403,7 @@ function createService(customCfg) {
             if (msg.lastTrip) S.lastTrip = msg.lastTrip;
             checkValetViolations();
             writeStatus();
+            syncCloudState(false);
         } else if (msg.ev === 'parked') {
             if (msg.state) S.telemetry = msg.state;
             onCarParked(msg.trip || null);
@@ -367,22 +434,30 @@ function createService(customCfg) {
             await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true }, 4500);
         }
 
-        if (config.parkSnapshot && config.botToken && config.chatId) {
-            try {
-                const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ĐÃ ĐỖ XE AN TOAN', trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
-                const cap = Tg.formatStatusCaption('XE VỪA ĐỖ XONG', S.telemetry, { trip, valet: config.valet });
-                await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
-                tell('Đã gửi ảnh & vị trí đỗ xe về Telegram.', 'go');
-            } catch (e) {
-                log('park snapshot telegram error: ' + e.message);
+        if (config.parkSnapshot) {
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ĐÃ ĐỖ XE AN TOAN', trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            syncCloudState(true, { event: 'parked' });
+            cloud.publishSnapshot(snap.png, { title: 'Đã đỗ xe', at: Date.now() }).catch(() => {});
+            if (config.botToken && config.chatId) {
+                try {
+                    const cap = Tg.formatStatusCaption('XE VỪA ĐỖ XONG', S.telemetry, { trip, valet: config.valet });
+                    await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
+                    tell('Đã đồng bộ vị trí đỗ xe lên App MyBMW & Telegram.', 'go');
+                } catch (e) {
+                    log('park snapshot telegram error: ' + e.message);
+                }
+            } else {
+                tell('Đã lưu ảnh & vị trí đỗ xe lên App MyBMW.', 'go');
             }
+        } else {
+            syncCloudState(true, { event: 'parked' });
         }
         writeStatus();
     }
 
     function checkValetViolations() {
         const v = config.valet;
-        if (!v || !v.enabled || !config.botToken || !config.chatId) return;
+        if (!v || !v.enabled) return;
         const t = S.telemetry;
         const now = Date.now();
         const trigger = (kind, reason) => {
@@ -390,8 +465,12 @@ function createService(customCfg) {
             S.valetAlerts[kind] = now;
             tell('CẢNH BÁO VALET: ' + reason, 'crit');
             const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
-            const cap = Tg.formatStatusCaption('🚨 CẢNH BÁO VALET: ' + reason, t, { valet: v });
-            tg.sendSnapshotPhoto(snap.png, cap, t, true).catch((e) => log('valet alert err: ' + e.message));
+            syncCloudState(true, { alert: { kind, reason, at: now } });
+            cloud.publishSnapshot(snap.png, { title: 'Cảnh báo Valet: ' + reason, alert: true, at: now }).catch(() => {});
+            if (config.botToken && config.chatId) {
+                const cap = Tg.formatStatusCaption('🚨 CẢNH BÁO VALET: ' + reason, t, { valet: v });
+                tg.sendSnapshotPhoto(snap.png, cap, t, true).catch((e) => log('valet alert err: ' + e.message));
+            }
         };
 
         if ((t.speed || 0) > v.maxSpeed) {
@@ -437,14 +516,16 @@ function createService(customCfg) {
         if (action === 'snap_now') {
             await callWorker('refresh_vitals', {}, 2500);
             const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRANG THAI TRUC TIEP', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            syncCloudState(true);
+            const cloudSent = await cloud.publishSnapshot(snap.png, { title: 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
                 await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
-                tell('Đã chụp và gửi về Telegram!', 'go');
+                tell('Đã chụp và đồng bộ lên App MyBMW & Telegram!', 'go');
                 return { ok: true, message: S.message };
             }
-            tell('Chưa kết nối Telegram — hãy quét mã QR trên màn hình để cài đặt.', 'warn');
-            return { ok: false, error: S.message };
+            tell(cloudSent ? 'Đã chụp và đồng bộ lên App MyBMW!' : 'Đã chụp trạng thái xe.', 'go');
+            return { ok: true, message: S.message };
         }
 
         if (action === 'start1cr' || action === 'stop1cr') {
@@ -538,6 +619,9 @@ function createService(customCfg) {
             at: Date.now(),
             version: VERSION,
             url,
+            cloudUrl: cloud.pairingUrl(),
+            pairCode: identity.pairCode,
+            cloudOk: cloud.lastOkAt > 0,
             pin: S.pin,
             ips: addresses(),
             telegramOk: !!(config.botToken && config.chatId),
@@ -602,7 +686,14 @@ function createService(customCfg) {
 
     function sendJson(res, code, obj) {
         const body = Buffer.from(JSON.stringify(obj), 'utf8');
-        res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': body.length });
+        res.writeHead(code, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type, X-Pin',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Content-Length': body.length,
+        });
         res.end(body);
     }
 
@@ -620,6 +711,15 @@ function createService(customCfg) {
     }
 
     async function handleHttp(req, res) {
+        if (req.method === 'OPTIONS') {
+            res.writeHead(204, {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type, X-Pin',
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            });
+            res.end();
+            return;
+        }
         const parsed = urlMod.parse(req.url || '/', true);
         const pathname = parsed.pathname || '/';
 
@@ -643,6 +743,9 @@ function createService(customCfg) {
             return sendJson(res, 200, {
                 ok: true,
                 version: VERSION,
+                cloudUrl: cloud.pairingUrl(),
+                pairCode: identity.pairCode,
+                cloudOk: cloud.lastOkAt > 0,
                 config: {
                     hasToken: !!config.botToken,
                     maskedToken: config.botToken ? (config.botToken.slice(0, 8) + '…' + config.botToken.slice(-4)) : '',
@@ -770,10 +873,12 @@ function createService(customCfg) {
             try { pollAppCommands(); } catch (e) {}
             writeStatus();
             tg.pollOnce();
-        }, 1500);
+            cloud.pollCommandsOnce();
+        }, 1800);
 
         const fwTimer = setInterval(fwCheck, 30000);
         writeStatus();
+        setTimeout(() => syncCloudState(true, { event: 'online' }), 2500);
 
         if (config.wakeNotify && config.botToken && config.chatId) {
             setTimeout(() => {
@@ -784,11 +889,13 @@ function createService(customCfg) {
         return {
             S,
             tg,
+            cloud,
             getConfig: () => config,
             executeAction,
             onWorkerEvent,
             stop: () => {
                 tg.stopped = true;
+                cloud.stopped = true;
                 clearInterval(tickTimer);
                 clearInterval(fwTimer);
                 if (S.server) { try { S.server.close(); } catch (e) {} }

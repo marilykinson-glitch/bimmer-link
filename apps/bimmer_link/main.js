@@ -26,7 +26,7 @@ mgu.run({
         const version = (ctx.spec && ctx.spec.version) ? ('Bản ' + ctx.spec.version) : 'Bản 0.1.0';
         let status = null, readAt = 0, cmdId = Date.now(), lastKey = '', shown = false;
         let armed = '', armedAt = 0, note = '', noteKind = 'dim', noteAt = 0, noteBaseMsg = '';
-        let presetIdx = 0, viewMode = 'main';
+        let presetIdx = 0, viewMode = 'main', qrMode = 'app';
 
         function readStatus(now) {
             if (now - readAt < 650) return;
@@ -120,6 +120,10 @@ mgu.run({
                 viewMode = viewMode === 'trips' ? 'main' : 'trips';
                 return repaint();
             },
+            toggleQrMode: () => {
+                qrMode = qrMode === 'app' ? 'local' : 'app';
+                return repaint();
+            },
         };
 
         function model() {
@@ -133,7 +137,10 @@ mgu.run({
                 state: s ? 'ok' : 'down',
                 version,
                 viewMode,
+                qrMode,
                 url: s && s.url,
+                cloudUrl: s && s.cloudUrl,
+                cloudOk: !!(s && s.cloudOk),
                 host: s && hostOf(s.url),
                 pin: s && s.pin,
                 ipCount: s && Array.isArray(s.ips) ? s.ips.length : 0,
@@ -154,7 +161,7 @@ mgu.run({
             const m = model();
             const vis = ui.isVisible('MAIN');
             const key = JSON.stringify([
-                m.state, m.viewMode, m.url, m.pin, m.telegramOk, m.ownerName, m.tgError,
+                m.state, m.viewMode, m.qrMode, m.url, m.cloudUrl, m.cloudOk, m.pin, m.telegramOk, m.ownerName, m.tgError,
                 m.valet, m.telemetry, m.lastTrip, m.trips.length, m.message, m.messageKind, m.armed, vis,
             ]);
             if (key === lastKey && shown) return;

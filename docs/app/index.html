@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MyBMW">
+<meta name="theme-color" content="#050811">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="styles.css">
+<title>MyBMW</title>
+</head>
+<body>
+<div class="app-shell">
+  <div class="topbar">
+    <div>
+      <div class="car-title" id="carTitle">BMW iDrive 7</div>
+      <div class="sub-meta">
+        <span id="updatedLabel">Chưa ghép nối xe</span>
+      </div>
+    </div>
+    <div class="status-pill">
+      <span class="dot" id="connDot"></span>
+      <span id="connLabel">Chờ kết nối</span>
+    </div>
+  </div>
+
+  <div id="toastBar" class="toast hidden"></div>
+
+  <!-- VIEW 1: MY VEHICLE (HOME) -->
+  <section id="view-home">
+    <div class="hero-stage">
+      <div class="studio-glow" id="studioGlow"></div>
+      <!-- Sleek BMW G-Series Sedan Studio Silhouette -->
+      <svg class="car-svg" viewBox="0 0 420 150" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="bodyGrad" x1="20" y1="20" x2="390" y2="120" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#64748b"/>
+            <stop offset="45%" stop-color="#cbd5e1"/>
+            <stop offset="100%" stop-color="#1e293b"/>
+          </linearGradient>
+          <linearGradient id="glassGrad" x1="120" y1="25" x2="290" y2="68" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#0f172a"/>
+            <stop offset="100%" stop-color="#1e3a5f"/>
+          </linearGradient>
+        </defs>
+        <ellipse cx="210" cy="126" rx="176" ry="12" fill="rgba(0,0,0,0.65)"/>
+        <path d="M36 96 C40 74, 68 65, 114 60 L158 34 C192 26, 256 26, 294 38 L342 62 C372 67, 392 78, 394 98 L388 112 L34 112 Z" fill="url(#bodyGrad)" stroke="#94a3b8" stroke-width="1.4"/>
+        <path d="M126 59 L163 38 C194 31, 248 31, 284 41 L322 61 Z" fill="url(#glassGrad)" stroke="#475569" stroke-width="1"/>
+        <line x1="218" y1="34" x2="214" y2="60" stroke="#64748b" stroke-width="2"/>
+        <!-- Iconic BMW L-shaped Angel Eyes Headlights & Taillights -->
+        <path id="headlightGlow" d="M40 84 L64 81 L68 88 L42 90 Z" fill="#38bdf8"/>
+        <path d="M366 78 L392 80 L390 88 L364 85 Z" fill="#ef4444"/>
+        <!-- Alloy Wheels -->
+        <circle cx="102" cy="110" r="24" fill="#090d16" stroke="#94a3b8" stroke-width="3"/>
+        <circle cx="102" cy="110" r="14" fill="#1e293b" stroke="#cbd5e1" stroke-width="1.5"/>
+        <circle cx="102" cy="110" r="4" fill="#38bdf8"/>
+        <circle cx="324" cy="110" r="24" fill="#090d16" stroke="#94a3b8" stroke-width="3"/>
+        <circle cx="324" cy="110" r="14" fill="#1e293b" stroke="#cbd5e1" stroke-width="1.5"/>
+        <circle cx="324" cy="110" r="4" fill="#38bdf8"/>
+      </svg>
+      <div class="lock-banner" id="securityBanner">ĐÃ KHOÁ AN TOÀN</div>
+    </div>
+
+    <!-- Fuel & Range Card -->
+    <div class="range-card">
+      <div class="range-row">
+        <div>
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;font-weight:700">Quãng đường dự kiến</div>
+          <div class="range-big" id="rangeKm">-- <span>km</span></div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase;font-weight:700">Nhiên liệu</div>
+          <div style="font-size:20px;font-weight:800;color:var(--cyan)" id="fuelPct">--%</div>
+        </div>
+      </div>
+      <div class="fuel-track"><div class="fuel-fill" id="fuelFill"></div></div>
+    </div>
+
+    <!-- 4 Circular MyBMW Remote Controls -->
+    <div class="action-dock">
+      <div class="act-item">
+        <button class="act-btn" id="btn1cr" onclick="handle1crTap()">
+          <svg id="fanIcon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="2.5"/>
+            <path d="M12 9.5C12 6 14.5 3.5 17 4.5C19.5 5.5 18 9.5 14.5 11"/>
+            <path d="M14.5 12C18 12 20.5 14.5 19.5 17C18.5 19.5 14.5 18 13 14.5"/>
+            <path d="M12 14.5C12 18 9.5 20.5 7 19.5C4.5 18.5 6 14.5 9.5 13"/>
+            <path d="M9.5 12C6 12 3.5 9.5 4.5 7C5.5 4.5 9.5 6 11 9.5"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lbl1cr">Đề nổ 1CR</div>
+      </div>
+
+      <div class="act-item">
+        <button class="act-btn" onclick="sendCmd('snap_now')">
+          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+            <circle cx="12" cy="13" r="4"/>
+          </svg>
+        </button>
+        <div class="act-label">Chụp xe</div>
+      </div>
+
+      <div class="act-item">
+        <button class="act-btn" id="btnValet" onclick="sendCmd('valet_toggle')">
+          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblValet">Valet Off</div>
+      </div>
+
+      <div class="act-item">
+        <button class="act-btn" id="btnTimerQuick" onclick="openTimerSheet()">
+          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="13" r="8"/>
+            <polyline points="12 9 12 13 15 15"/>
+            <line x1="9" y1="2" x2="15" y2="2"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblTimer">Hẹn giờ BDC</div>
+      </div>
+    </div>
+
+    <!-- Timer Quick Card (collapsible) -->
+    <div id="timerSheet" class="glass-card hidden">
+      <div class="card-head">
+        <span>⏰ Hẹn giờ khởi hành 1CR (Hộp BDC/IHKA)</span>
+        <span style="cursor:pointer;color:var(--dim)" onclick="toggleEl('timerSheet')">Đóng</span>
+      </div>
+      <div style="font-size:12.5px;color:var(--dim);margin-bottom:8px">
+        Lưu trực tiếp xuống hộp BDC/IHKA của xe — tới giờ tự thức dậy đề nổ máy làm mát cabin kể cả khi đầu MGU đã tắt điện ngủ 0W.
+      </div>
+      <div class="btn-row">
+        <input type="time" id="timerInput" value="07:30" style="flex:1">
+        <button class="btn blue" onclick="applyTimer()">Lưu hẹn giờ</button>
+        <button class="btn" onclick="cancelTimer()">Tắt hẹn</button>
+      </div>
+      <div class="switch-row" style="margin-top:6px">
+        <span>Tự động nạp lại giờ này mỗi lần tắt máy</span>
+        <input type="checkbox" id="chkAutoSync" onchange="saveTimerPrefs()">
+      </div>
+    </div>
+
+    <!-- Vehicle Vitals Grid -->
+    <div class="glass-card">
+      <div class="card-head">
+        <span>Thông số xe &amp; Môi trường</span>
+        <span id="odoText" style="color:var(--dim)">ODO: -- km</span>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric-box"><div class="k">Ắc quy 12V</div><div class="v" id="mBat">-- V</div></div>
+        <div class="metric-box"><div class="k">Nhiệt độ ngoài / Cabin</div><div class="v" id="mTemp">-- °C</div></div>
+        <div class="metric-box"><div class="k">Nhiệt độ nước / Dầu</div><div class="v" id="mEngTemp">-- °C</div></div>
+        <div class="metric-box"><div class="k">Trạng thái 1CR</div><div class="v" id="m1cr">Sẵn sàng</div></div>
+      </div>
+    </div>
+
+    <!-- Latest Parked Snapshot Card -->
+    <div class="glass-card">
+      <div class="card-head">
+        <span>📸 Ảnh chụp chỗ đỗ / Trạng thái gần nhất</span>
+        <span id="snapTime" style="color:var(--dim)">--</span>
+      </div>
+      <div id="noSnapHint" style="font-size:13px;color:var(--dim);padding:10px 0">
+        Tự động lưu ảnh &amp; vị trí hầm ngay khi tắt máy đỗ xe, hoặc bấm nút <b>Chụp xe</b> ở trên.
+      </div>
+      <img id="latestSnapImg" class="snap-img hidden" alt="Vehicle snapshot">
+    </div>
+  </section>
+
+  <!-- VIEW 2: MAP & TRIPS -->
+  <section id="view-map" class="hidden">
+    <div class="glass-card">
+      <div class="card-head">
+        <span>📍 Vị trí đỗ xe</span>
+        <span id="posSourceBadge" style="color:var(--go)">MGU NAV</span>
+      </div>
+      <div id="addrText" style="font-size:14px;font-weight:600;margin-bottom:10px">Đang chờ toạ độ từ xe…</div>
+      <div id="mapBox"></div>
+      <div class="btn-row">
+        <button class="btn blue" onclick="openExternalMaps()">🧭 Mở chỉ đường tới xe</button>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <div class="card-head"><span>🛡️ Cài đặt giám sát Valet</span></div>
+      <div class="metrics-grid">
+        <div>
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tốc độ tối đa (km/h)</div>
+          <input type="number" id="valetSpeed" value="45">
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tua máy tối đa (RPM)</div>
+          <input type="number" id="valetRpm" value="3500">
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin:8px 0 4px">Bán kính cho phép từ chỗ đỗ (mét)</div>
+      <input type="number" id="valetRadius" value="500">
+      <div class="btn-row">
+        <button class="btn" onclick="saveValetPrefs()">Cập nhật ngưỡng Valet</button>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <div class="card-head"><span>🏁 Lịch sử hành trình gần đây</span></div>
+      <div id="tripList" style="font-size:13px;color:var(--dim)">Chưa có chuyến đi nào.</div>
+    </div>
+  </section>
+
+  <!-- VIEW 3: 1CR INSPECTOR -->
+  <section id="view-1cr" class="hidden">
+    <div class="glass-card">
+      <div class="card-head"><span>🛠️ Dò &amp; Ghim lệnh 1CR từ xa</span></div>
+      <div style="font-size:13px;color:var(--dim);line-height:1.45;margin-bottom:10px">
+        Đọc trực tiếp danh sách giao diện <code>Climate / 1CR</code> của đầu MGU qua mạng (không cần chung Wi-Fi). Chọn hàm bất kỳ để chạy thử và ghim cố định cho nút <b>Đề nổ 1CR</b>.
+      </div>
+      <div class="btn-row">
+        <button class="btn blue" onclick="requestSchema()">🔍 Tải danh sách hàm Climate từ xe</button>
+        <button class="btn" onclick="exportSchemaJson()">⬇️ Xuất JSON</button>
+      </div>
+      <div id="schemaCards" style="margin-top:12px"></div>
+
+      <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Interface SOME/IP:</div>
+      <input type="text" id="inpIface" placeholder="de.bmw.infotainment.climate.Climate">
+      <div class="btn-row">
+        <input type="text" id="inpKind" value="setter" style="flex:1" placeholder="setter | method">
+        <input type="text" id="inpMember" style="flex:2" placeholder="Tên trường / hàm">
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin:8px 0 4px">Payload JSON:</div>
+      <textarea id="inpPayload" rows="2">1</textarea>
+      <div class="btn-row">
+        <button class="btn warn" onclick="sendRaw1cr(false)">⚡ Chạy thử</button>
+        <button class="btn go" onclick="sendRaw1cr(true, 'start')">📌 Ghim Nổ 1CR</button>
+        <button class="btn" onclick="sendRaw1cr(true, 'stop')">📌 Ghim Tắt 1CR</button>
+      </div>
+      <pre id="diagOutput" class="code-box">Chưa có dữ liệu chẩn đoán.</pre>
+    </div>
+  </section>
+
+  <!-- VIEW 4: PAIRING & SETTINGS -->
+  <section id="view-settings" class="hidden">
+    <div class="glass-card">
+      <div class="card-head"><span>🔗 Ghép nối với xe BMW (Đa thiết bị)</span></div>
+      <div style="font-size:13px;color:var(--dim);line-height:1.5;margin-bottom:10px">
+        Quét mã QR trên màn hình <b>MyBMW &amp; 1CR</b> của xe (cả iPhone và Android dùng chung 1 mã đều đồng bộ tức thì).<br>
+        • <b>Trên iPhone:</b> Sau khi quét mở trang này trong Safari, bấm nút <b>Chia sẻ → Thêm vào MH chính</b> để dùng full màn hình như App hãng!
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị của xe:</div>
+      <input type="text" id="inpCarName" value="BMW iDrive 7" onchange="saveCarName()">
+
+      <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Mã ghép nối xe (Pair Code hoặc Link QR):</div>
+      <input type="text" id="inpPairCode" placeholder="Dán link hoặc mã ghép nối từ màn hình xe">
+      <div class="btn-row">
+        <button class="btn blue" onclick="applyPairInput()">Kết nối xe</button>
+        <button class="btn" onclick="copyShareLink()">📋 Sao chép link sang máy thứ 2</button>
+      </div>
+    </div>
+
+    <div class="glass-card" id="androidDownloadCard">
+      <div class="card-head"><span>🤖 Bản cài đặt Android (.APK + Home Widget)</span></div>
+      <div style="font-size:13px;color:var(--dim);margin-bottom:10px">
+        Dành cho máy Android: cài bản APK riêng để có <b>Widget trạng thái xe ngoài màn hình chính</b> và dịch vụ báo động Valet chạy nền.
+      </div>
+      <div class="btn-row">
+        <a class="btn go" style="text-align:center;text-decoration:none" href="https://github.com/marilykinson-glitch/bimmer-link/releases/latest">⬇️ Tải MyBMW-MGU.apk</a>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Bottom Tab Bar -->
+<nav class="bottom-nav">
+  <button class="nav-tab active" onclick="switchView('home', this)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 17h14v-5l-2-5H7L5 12v5z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>
+    <span>Xe của tôi</span>
+  </button>
+  <button class="nav-tab" onclick="switchView('map', this)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+    <span>Bản đồ</span>
+  </button>
+  <button class="nav-tab" onclick="switchView('1cr', this)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    <span>Dò 1CR</span>
+  </button>
+  <button class="nav-tab" onclick="switchView('settings', this)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+    <span>Kết nối</span>
+  </button>
+</nav>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="app.js"></script>
+</body>
+</html>
