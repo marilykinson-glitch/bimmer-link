@@ -17,6 +17,7 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const cp = require('child_process');
+const Wbm = require('./wbm');
 
 const CR_JSON = 0x4a;   // 'J'
 const CR_FRAME = 0x46;  // 'F'
@@ -176,16 +177,22 @@ function capture360Frame(opts) {
                     .then(() => resolve(result));
             }
 
-            function finalizeFromAtlas(atlas) {
+            const layers = {};
+
+            function finalizeFromAtlas(frameObj) {
                 try {
-                    const rgba = yuv420AtlasToRgba(atlas, W, H);
+                    const fw = frameObj.vw || W;
+                    const fh = frameObj.vh || H;
+                    const srcRgba = yuv420AtlasToRgba(frameObj.pixels, fw, fh);
+                    const rgba = (fw === W && fh === H) ? srcRgba : Wbm.resize(srcRgba, fw, fh, W, H);
                     if (rawOutFile) {
                         try {
                             fs.writeFileSync(rawOutFile + '.tmp', rgba);
                             fs.renameSync(rawOutFile + '.tmp', rawOutFile);
                         } catch (e) {}
                     }
-                    cleanupAndFinish({ ok: true, width: W, height: H, rgba, frames: validCount });
+                    log('cam360 captured ' + fw + 'x' + fh + ' -> ' + W + 'x' + H + ' (' + validCount + ' frames)');
+                    cleanupAndFinish({ ok: true, width: W, height: H, srcWidth: fw, srcHeight: fh, rgba, frames: validCount });
                 } catch (e) {
                     cleanupAndFinish({ ok: false, reason: e.message });
                 }
@@ -195,14 +202,10 @@ function capture360Frame(opts) {
                 activeConn = conn;
                 let rx = Buffer.alloc(0);
                 conn.on('error', () => {});
-                try {
-                    conn.write(encodeCrJson({
-                        ev: 'hello',
-                        backend: 'bimmer-link',
-                        targets: 'map:' + W + 'x' + H,
-                        repeat: 0,
-                    }));
-                } catch (e) {}
+
+                const sendCr = (obj) => {
+                    try { conn.write(encodeCrJson(obj)); } catch (e) {}
+                };
 
                 conn.on('data', (chunk) => {
                     if (settled) return;
@@ -221,16 +224,40 @@ function capture360Frame(opts) {
                         if (type === CR_JSON) {
                             let j = null;
                             try { j = JSON.parse(body.toString('utf8')); } catch (e) {}
-                            if (j && j.op === 'layer') {
-                                try {
-                                    conn.write(encodeCrJson({ ev: 'layer', ref: Number(j.ref) || 1, state: 'shown', reason: '' }));
-                                } catch (e) {}
+                            if (!j) continue;
+                            if (j.op === 'hello') {
+                                sendCr({
+                                    ev: 'hello',
+                                    proto: 1,
+                                    backend: 'id7',
+                                    targets: 'map:1088x480,panel:1920x720,hud:800x480',
+                                    repeat: 1,
+                                });
+                            } else if (j.op === 'layer') {
+                                const ref = Number(j.ref) || 1;
+                                const hidden = j.visible === 0 || j.visible === '0' || j.visible === false;
+                                layers[ref] = {
+                                    vw: Number(j.vw) || W,
+                                    vh: Number(j.vh) || H,
+                                    target: j.target || 'map',
+                                    visible: hidden ? 0 : 1,
+                                };
+                                sendCr({ ev: 'target', target: j.target || 'map', state: 'shown', holder: '', reason: '' });
+                                sendCr({ ev: 'layer', ref, state: hidden ? 'hidden' : 'shown', reason: '' });
+                            } else if (j.op === 'set') {
+                                const ref = Number(j.ref) || 1;
+                                const hidden = j.visible === 0 || j.visible === '0' || j.visible === false;
+                                if (layers[ref]) Object.assign(layers[ref], j);
+                                sendCr({ ev: 'layer', ref, state: hidden ? 'hidden' : 'shown', reason: '' });
                             }
                         } else if (type === CR_FRAME) {
                             const f = parseCrFrame(body);
-                            if (!f || f.id === 0 || f.pixels.length !== expectedBytes) continue;
-                            if (!hasLiveLuma(f.pixels, W, H)) continue;
-                            bestAtlas = Buffer.from(f.pixels);
+                            if (!f || f.id === 0) continue;
+                            const lay = layers[f.ref] || { vw: W, vh: H };
+                            const wantBytes = (lay.vw * lay.vh * 3) / 2;
+                            if (f.pixels.length !== wantBytes) continue;
+                            if (!hasLiveLuma(f.pixels, lay.vw, lay.vh)) continue;
+                            bestAtlas = { pixels: Buffer.from(f.pixels), vw: lay.vw, vh: lay.vh };
                             validCount++;
                             if (validCount >= 2) {
                                 finalizeFromAtlas(bestAtlas);
@@ -266,7 +293,10 @@ function capture360Frame(opts) {
                 });
                 child.on('close', (code) => {
                     if (!settled && bestAtlas) finalizeFromAtlas(bestAtlas);
-                    else if (!settled) cleanupAndFinish({ ok: false, reason: 'sidecam exited (' + code + ')' });
+                    else if (!settled) {
+                        log('cam360 exited (' + code + ') before frame');
+                        cleanupAndFinish({ ok: false, reason: 'sidecam exited (' + code + ')' });
+                    }
                 });
                 if (child.stdin) child.stdin.on('error', () => {});
                 if (child.stdout) {
@@ -277,7 +307,7 @@ function capture360Frame(opts) {
                         while ((nl = sbuf.indexOf('\n')) >= 0) {
                             const ln = sbuf.slice(0, nl).trim();
                             sbuf = sbuf.slice(nl + 1);
-                            if (ln && ln.indexOf('"fps":0') < 0) log('sidecam: ' + ln.slice(0, 140));
+                            if (ln && ln.indexOf('"fps":0') < 0) log('sidecam: ' + ln.slice(0, 380));
                         }
                     });
                 }

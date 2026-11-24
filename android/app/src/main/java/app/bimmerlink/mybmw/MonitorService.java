@@ -115,7 +115,14 @@ public class MonitorService extends Service {
                 long tSec = ev.optLong("time", 0L);
                 if (tSec >= lastPollSec) lastPollSec = tSec + 1;
 
-                String plain = CryptoHelper.decryptPacket(id.aesKey, ev.optString("message", ""));
+                String wire = ev.optString("message", "");
+                if (!wire.startsWith("BL2:")) {
+                    JSONObject att = ev.optJSONObject("attachment");
+                    if (att != null && !att.optString("url", "").isEmpty()) {
+                        wire = fetchAttachmentText(att.optString("url", ""));
+                    }
+                }
+                String plain = CryptoHelper.decryptPacket(id.aesKey, wire);
                 if (plain == null) continue;
                 JSONObject pkt = new JSONObject(plain);
                 if (!"state".equals(pkt.optString("t"))) continue;
@@ -142,6 +149,25 @@ public class MonitorService extends Service {
         } catch (Exception ignored) {
         } finally {
             if (conn != null) conn.disconnect();
+        }
+    }
+
+    private String fetchAttachmentText(String urlStr) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(urlStr).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(10000);
+            if (c.getResponseCode() != 200) return "";
+            StringBuilder sb = new StringBuilder();
+            BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+            String ln;
+            while ((ln = r.readLine()) != null) sb.append(ln);
+            return sb.toString().trim();
+        } catch (Exception e) {
+            return "";
+        } finally {
+            if (c != null) c.disconnect();
         }
     }
 

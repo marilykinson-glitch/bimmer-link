@@ -713,16 +713,24 @@ async function connectCar(code) {
   openMqttSocket();
   renderAll();
 
-  // Only fall back to 12h ntfy sleep cache if MQTT hasn't delivered retained state within 2.5s
+  // Fetch 12h ntfy sleep cache for any channel not yet populated by MQTT retained state within 2.5s
   setTimeout(async () => {
     if (identity !== id) return;
+    let touched = false;
     if (!mqttReady || !vehicleData) {
       await fetchCachedTopic(id.topics.state, onStatePacket);
-      if (!latestSnap) await fetchCachedTopic(id.topics.photo, onPhotoPacket);
-      if (!factoryHero) await fetchCachedTopic(id.topics.hero, onHeroPacket);
-      if (!mqttReady) openFallbackNtfySockets();
-      renderAll();
+      touched = true;
     }
+    if (!latestSnap) {
+      await fetchCachedTopic(id.topics.photo, onPhotoPacket);
+      touched = true;
+    }
+    if (!factoryHero && (!vehicleData || vehicleData.hasFactoryHero !== false)) {
+      await fetchCachedTopic(id.topics.hero, onHeroPacket);
+      touched = true;
+    }
+    if (!mqttReady) openFallbackNtfySockets();
+    if (touched) renderAll();
   }, 2500);
   return true;
 }
@@ -1143,11 +1151,36 @@ function quickInvoke1cr(iface, kind, name, payload, saveRole) {
 
 function exportSchemaJson() {
   if (!lastSchema) return showToast('Hãy bấm Tải danh sách hàm từ xe trước.', '#ffb020');
-  const blob = new Blob([JSON.stringify(lastSchema, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'mybmw-1cr-schema.json';
-  a.click();
+  const exportObj = {
+    ok: true,
+    schema: lastSchema.schema || lastSchema,
+    telemetry: (vehicleData && vehicleData.telemetry) || null,
+    logs: lastSchema.logs || [],
+  };
+  const jsonText = JSON.stringify(exportObj, null, 2);
+  let copied = false;
+  if (window.AndroidBridge && window.AndroidBridge.copyToClipboard) {
+    try {
+      window.AndroidBridge.copyToClipboard(jsonText);
+      copied = true;
+    } catch (e) {}
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(jsonText).then(() => {
+      showToast('📋 Đã copy toàn bộ JSON chẩn đoán vào bộ nhớ tạm — dán gửi thẳng được ngay!', '#2fd27a', 7500);
+    }).catch(() => {});
+  } else if (copied) {
+    showToast('📋 Đã copy toàn bộ JSON chẩn đoán vào bộ nhớ tạm — dán gửi thẳng được ngay!', '#2fd27a', 7500);
+  }
+  if (!window.AndroidBridge) {
+    try {
+      const blob = new Blob([jsonText], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'bimmer-link-1cr-diag.json';
+      a.click();
+    } catch (e) {}
+  }
 }
 
 /* ---------------- Rendering UI & Map ---------------- */
@@ -1389,6 +1422,76 @@ function openExternalMaps() {
   window.open(url, '_blank');
 }
 
+function pickCardEnum(td, wantOn, sample, preferNoop) {
+  const invRe = /INVALID|UNKNOWN|ERROR|UNGUELTIG|UNBEFUELLT|KEINE_AKTION|KEINE_AENDERUNG|KEINE_ANGABE|NO_ACTION|NO_CHANGE|INIT/i;
+  const offRe = /(^|_)(OFF|AUS|AUSSCHALTEN|INACTIVE|INAKTIV|NICHT_AKTIV|DEACTIVATE|STOP|DISABLE|FALSE)(_|$)/i;
+  const onRe = /(^|_)(ON|EIN|AN|EINSCHALTEN|ACTIVE|AKTIV|ACTIVATE|START|ENABLE|TRUE|RUN)(_|$)/i;
+  if (td && td.kind === 'enum' && Array.isArray(td.values) && td.values.length) {
+    const vals = td.values.map(String);
+    if (preferNoop) {
+      const noop = vals.find((v) => /KEINE_AKTION|KEINE_AENDERUNG|NO_ACTION|NO_CHANGE|SIGNAL_UNBEFUELLT/i.test(v));
+      if (noop !== undefined) return noop;
+    }
+    const clean = vals.filter((v) => !invRe.test(v));
+    const hit = clean.find((v) => wantOn ? (onRe.test(v) && !offRe.test(v)) : offRe.test(v));
+    if (hit !== undefined) return hit;
+    if (clean.length >= 2) return wantOn ? clean[1] : clean[0];
+  }
+  if (typeof sample === 'boolean') return !!wantOn;
+  if (typeof sample === 'string') {
+    if (preferNoop && /SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|KEINE_AKTION|KEINE_ANGABE/i.test(sample)) return sample;
+    if (wantOn && offRe.test(sample)) {
+      return sample.replace(/NICHT_AKTIV/ig, 'AKTIV').replace(/AUSSCHALTEN/ig, 'EINSCHALTEN').replace(/(^|_)AUS(_|$)/ig, '$1EIN$2').replace(/INACTIVE/ig, 'ACTIVE').replace(/(^|_)OFF(_|$)/ig, '$1ON$2');
+    }
+    if (!wantOn && onRe.test(sample) && !offRe.test(sample)) {
+      return sample.replace(/(^|_)AKTIV(_|$)/ig, '$1NICHT_AKTIV$2').replace(/EINSCHALTEN/ig, 'AUSSCHALTEN').replace(/(^|_)EIN(_|$)/ig, '$1AUS$2').replace(/ACTIVE/ig, 'INACTIVE').replace(/(^|_)ON(_|$)/ig, '$1OFF$2');
+    }
+  }
+  return wantOn ? 1 : 0;
+}
+
+function buildSmartCardPayload(iface, w, liveMap, wantOn) {
+  const exactSample = liveMap && liveMap[iface + '.' + w.name];
+  const bare = String(w.name || '').replace(/^(operation|control|request|set)/i, '');
+  const stSample = exactSample !== undefined ? exactSample : (bare && liveMap ? liveMap[iface + '.status' + bare[0].toUpperCase() + bare.slice(1)] : undefined);
+  if (w.kind === 'method' && Array.isArray(w.inArgs)) {
+    const obj = {};
+    w.inArgs.forEach((a) => {
+      if (a && a.name) obj[a.name] = pickCardEnum(a.typeDef, wantOn, undefined, false);
+    });
+    return obj;
+  }
+  const td = w.typeDef;
+  if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
+    const out = {};
+    const hasParkAc = td.fields.some((f) => f && /parkAirCond|standklima/i.test(f.name || ''));
+    td.fields.forEach((f) => {
+      if (!f || !f.name) return;
+      const fb = f.name.replace(/^(operation|control|request|set|status)/i, '');
+      const cur = (stSample && typeof stSample === 'object') ? (stSample[f.name] !== undefined ? stSample[f.name] : stSample['status' + (fb ? fb[0].toUpperCase() + fb.slice(1) : '')]) : undefined;
+      if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
+      else if (/remoteStart|motorstart|res$/i.test(f.name)) out[f.name] = wantOn ? pickCardEnum(f.typeDef, true, cur, false) : pickCardEnum(f.typeDef, true, cur, true);
+      else if (/ventilat|standlueft/i.test(f.name) && hasParkAc && wantOn) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
+      else out[f.name] = pickCardEnum(f.typeDef, wantOn, cur, false);
+    });
+    return out;
+  }
+  if (stSample && typeof stSample === 'object' && !Array.isArray(stSample)) {
+    const out = {};
+    const keys = Object.keys(stSample);
+    const hasParkAc = keys.some((k) => /parkAirCond|standklima/i.test(k));
+    keys.forEach((k) => {
+      const ok = /^status[A-Z]/.test(k) ? (k[6].toLowerCase() + k.slice(7)) : k;
+      if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(k)) out[ok] = pickCardEnum(null, false, stSample[k], true);
+      else if (/remoteStart|motorstart|res$/i.test(k)) out[ok] = pickCardEnum(null, true, stSample[k], !wantOn);
+      else if (/ventilat|standlueft/i.test(k) && hasParkAc && wantOn) out[ok] = pickCardEnum(null, false, stSample[k], true);
+      else out[ok] = pickCardEnum(null, wantOn, stSample[k], false);
+    });
+    return out;
+  }
+  return pickCardEnum(td, wantOn, stSample, false);
+}
+
 function renderSchemaCards(schema) {
   const box = document.getElementById('schemaCards');
   box.innerHTML = '';
@@ -1405,22 +1508,8 @@ function renderSchemaCards(schema) {
     card.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:11px;margin-bottom:8px;background:#080d18';
     card.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--cyan);margin-bottom:6px">' + iv.iface + '</div>' +
       (writables.length ? writables.map((w) => {
-        const liveVal = schema.live && schema.live[iv.iface + '.' + w.name];
-        let onPayload = 1, offPayload = 0;
-        if (w.kind === 'method' && Array.isArray(w.inArgs)) {
-          onPayload = {}; offPayload = {};
-          w.inArgs.forEach((a) => {
-            if (!a || !a.name) return;
-            const vals = a.typeDef && a.typeDef.kind === 'enum' && a.typeDef.values ? a.typeDef.values : null;
-            onPayload[a.name] = vals && vals.length > 1 ? vals[1] : 1;
-            offPayload[a.name] = vals && vals.length > 0 ? vals[0] : 0;
-          });
-        } else if (w.typeDef && w.typeDef.kind === 'enum' && w.typeDef.values && w.typeDef.values.length >= 2) {
-          onPayload = w.typeDef.values[1];
-          offPayload = w.typeDef.values[0];
-        } else if (typeof liveVal === 'boolean') {
-          onPayload = true; offPayload = false;
-        }
+        const onPayload = buildSmartCardPayload(iv.iface, w, schema.live, true);
+        const offPayload = buildSmartCardPayload(iv.iface, w, schema.live, false);
         return '<div style="padding:8px;background:#0f172a;border-radius:9px;margin-bottom:6px;font-size:12px">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px">' +
           '<div style="min-width:0;overflow:hidden;text-overflow:ellipsis"><b>' + w.name + '</b> <span style="color:var(--dim)">(' + w.kind + (w.roles && w.roles.length ? ' · ' + w.roles.join(',') : '') + ')</span></div>' +
@@ -1586,12 +1675,12 @@ window.injectPairCodeFromNative = async function (raw) {
     });
   }
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    if (location.hostname === 'mybmw.local') {
+    if (window.AndroidBridge || /\.local$/i.test(location.hostname)) {
       navigator.serviceWorker.getRegistrations().then((regs) => {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.5.0').catch(() => {});
+      navigator.serviceWorker.register('./sw.js?v=0.5.1').catch(() => {});
     }
   }
   const healConnection = () => {

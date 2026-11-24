@@ -130,7 +130,8 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
             man_j = json.loads(mf.extractfile('source/manifest.json').read().decode('utf-8'))
             assert 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy' in meta_j.get('optional', {})
             assert man_j['proxies'].get('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy') == '*'
-            assert man_j['proxies'].get('de.bmw.infotainment.climate.ClimateMaster') == '*'
+            assert man_j['proxies'].get('de.bmw.infotainment.climate.Climate2') == '*'
+            assert man_j['proxies'].get('de.bmw.infotainment.climate.climatemaster.ClimateMaster') == '*'
 
         cloud_src = open(os.path.join(ROOT, 'tools/bimmer-link/cloud.js'), encoding='utf-8').read()
         m_chunk = re.search(r'const CHUNK_BYTES\s*=\s*(\d+);', cloud_src)
@@ -455,14 +456,90 @@ def check_car_link_logic_in_jxa():
     var tpNum = C.buildTimerPayload(tf, 17, 15, true, undefined, true);
     if (tpNum.status !== 2) throw new Error('bad numeric timer struct payload: ' + JSON.stringify(tpNum));
 
-    // Test 2b: British spelling ClimateMaster + SteeringWheelClimate exclusion + VIN/FA chassis & Range estimate
+    // Test 2b: Real BMW G30 LCI (`WBA71AG050CF37906`) Climate2 + German Franca enums + generated cfg enrichment
     var rolesMaster = C.classifyClimateMember('de.bmw.infotainment.climate.ClimateMaster', 'parkClimatisation', 'field', {{ setter: true }});
     if (rolesMaster.indexOf('direct_write') < 0) throw new Error('expected parkClimatisation to match direct_write');
-    var rolesFallback = C.classifyClimateMember('de.bmw.infotainment.climate.ClimateMaster', 'auxiliaryOperation', 'method', {{}});
-    if (rolesFallback.indexOf('master_candidate') < 0) throw new Error('expected ClimateMaster auxiliaryOperation -> master_candidate');
-    var rolesSw = C.classifyClimateMember('de.bmw.infotainment.climate.SteeringWheelClimate', 'activateHeatingNow', 'method', {{}});
+    var rolesParkFn = C.classifyClimateMember('de.bmw.infotainment.climate.Climate2', 'airConditionParkFunctions', 'field', {{ setter: true }});
+    if (rolesParkFn.indexOf('direct_write') < 0) throw new Error('expected Climate2.airConditionParkFunctions -> direct_write');
+    var rolesMasterPark = C.classifyClimateMember('de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'requestParkingFunctionsOn', 'method', {{}});
+    if (rolesMasterPark.indexOf('direct_write') < 0) throw new Error('expected requestParkingFunctionsOn -> direct_write');
+    var rolesEco = C.classifyClimateMember('de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'requestClimateFunctionECO', 'method', {{}});
+    if (rolesEco.length !== 0) throw new Error('requestClimateFunctionECO must be ignored, got ' + JSON.stringify(rolesEco));
+    var rolesRear = C.classifyClimateMember('de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'requestRearClimateDefault', 'method', {{}});
+    if (rolesRear.length !== 0) throw new Error('requestRearClimateDefault must be ignored');
+    var rolesSw = C.classifyClimateMember('de.bmw.body.steeringwheelcomfort.SteeringWheelClimate', 'requestHeating', 'method', {{}});
     if (rolesSw.indexOf('direct_write') >= 0) throw new Error('SteeringWheelClimate must not match cabin 1CR direct_write');
 
+    // Enrich Climate2 descriptor from IFConfigGenerator cfg (numeric typeId + German enums)
+    var g30Db = {{
+      interfaces: {{
+        'de.bmw.infotainment.climate.Climate2': {{
+          serviceId: 46358,
+          fields: {{
+            airConditionParkFunctions: {{ getter: true, setter: true, notifier: true }},
+            statusAirConditionParkFunctions: {{ getter: true, setter: false, notifier: true }}
+          }},
+          methods: {{}}
+        }}
+      }},
+      datatypes: {{}}
+    }};
+    var g30Cat = C.discoverClimateCatalog(g30Db);
+    var c2Desc = g30Cat.interfaces[0];
+    var fakeGenCfg = {{
+      fields: {{
+        airConditionParkFunctions: {{ setter: {{ in: [{{ name: 'val', typeId: 701 }}] }} }}
+      }},
+      datatypes: {{
+        '701': {{
+          type: 'struct',
+          fields: {{
+            parkAirConditioning: {{ dataType: 'ParkAcEnum' }},
+            independentVentilate: {{ dataType: 'VentEnum' }},
+            parkHeater: {{ dataType: 'HeaterEnum' }},
+            setupRemoteStart: {{ dataType: 'ResEnum' }}
+          }}
+        }},
+        ParkAcEnum: {{ type: 'enum', items: {{ STANDKLIMATISIERUNG_AUS: 0, STANDKLIMATISIERUNG_EIN: 1, KEINE_AKTION: 2, SIGNAL_UNGUELTIG: 255 }} }},
+        VentEnum: {{ type: 'enum', items: {{ STANDLUEFTEN_AUS: 0, STANDLUEFTEN_EIN: 1, KEINE_AKTION: 2 }} }},
+        HeaterEnum: {{ type: 'enum', items: {{ STANDHEIZUNG_AUS: 0, STANDHEIZUNG_EIN: 1, KEINE_AKTION: 2 }} }},
+        ResEnum: {{ type: 'enum', items: {{ REMOTE_ENGINE_START_AUS: 0, REMOTE_ENGINE_START_EIN: 1 }} }}
+      }}
+    }};
+    C.enrichDescWithGeneratedCfg(g30Db, g30Db.interfaces['de.bmw.infotainment.climate.Climate2'], c2Desc, fakeGenCfg);
+    var acpf = c2Desc.fields.filter(function(f){{ return f.name === 'airConditionParkFunctions'; }})[0];
+    if (!acpf.typeDef || acpf.typeDef.kind !== 'struct') throw new Error('expected enriched struct typeDef for airConditionParkFunctions');
+    var liveStatusSample = {{
+      statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+      statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+      statusParkHeater: 'STANDHEIZUNG_AUS',
+      statusSetupRemoteStart: 'REMOTE_ENGINE_START_EIN'
+    }};
+    var pStart = C.buildDirectPayload(acpf, true, liveStatusSample, false);
+    if (pStart.parkAirConditioning !== 'STANDKLIMATISIERUNG_EIN' || pStart.independentVentilate !== 'KEINE_AKTION' || pStart.parkHeater !== 'KEINE_AKTION' || pStart.setupRemoteStart !== 'REMOTE_ENGINE_START_EIN') {{
+      throw new Error('bad G30LCI start1cr payload: ' + JSON.stringify(pStart));
+    }}
+    var pStop = C.buildDirectPayload(acpf, false, liveStatusSample, false);
+    if (pStop.parkAirConditioning !== 'STANDKLIMATISIERUNG_AUS' || pStop.independentVentilate !== 'STANDLUEFTEN_AUS' || pStop.setupRemoteStart !== 'REMOTE_ENGINE_START_EIN') {{
+      throw new Error('bad G30LCI stop1cr payload (must preserve 1CR consent!): ' + JSON.stringify(pStop));
+    }}
+
+    // Verify interpretClimateField on real G30LCI statusAirConditionParkFunctions
+    var stField = c2Desc.fields.filter(function(f){{ return f.name === 'statusAirConditionParkFunctions'; }})[0];
+    var curSt = {{ climate1cr: {{ consentEnabled: null, active: false, rawState: '' }} }};
+    C.interpretClimateField('de.bmw.infotainment.climate.Climate2', stField, liveStatusSample, function(p){{ if (p.climate1cr) curSt.climate1cr = p.climate1cr; }}, curSt);
+    if (curSt.climate1cr.consentEnabled !== true || curSt.climate1cr.active !== false) {{
+      throw new Error('bad idle interpretClimateField: ' + JSON.stringify(curSt.climate1cr));
+    }}
+    C.interpretClimateField('de.bmw.infotainment.climate.Climate2', stField, {{
+      statusParkAirConditioning: 'STANDKLIMATISIERUNG_EIN',
+      statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+      statusSetupRemoteStart: 'REMOTE_ENGINE_START_EIN'
+    }}, function(p){{ if (p.climate1cr) curSt.climate1cr = p.climate1cr; }}, curSt);
+    if (curSt.climate1cr.active !== true) throw new Error('expected active=true when STANDKLIMATISIERUNG_EIN');
+
+    var vinUserG30Lci = C.decodeChassisFromVinOrFa('WBA71AG050CF37906', '');
+    if (vinUserG30Lci.trueChassis !== 'G30LCI' || !vinUserG30Lci.notMCar) throw new Error('expected WBA71AG050CF37906 -> G30LCI + notMCar, got ' + JSON.stringify(vinUserG30Lci));
     var vinG01 = C.decodeChassisFromVinOrFa('RL4TY51000L123456', '');
     if (vinG01.trueChassis !== 'G01' || !vinG01.notMCar) throw new Error('expected RL4TY51 -> G01 + notMCar');
     var vinG30 = C.decodeChassisFromVinOrFa('WBAJA51090G654321', '');
@@ -552,11 +629,66 @@ def check_pwa_and_manifest_filtering():
     """
     assert run_jxa(mqtt_test) == 'MQTT_CODEC_OK'
 
+    # Test cam360.js frame parsing + YUV420->RGBA + Wbm.resize (1280x960 -> 960x440)
+    wbm_src = open(os.path.join(ROOT, 'tools/bimmer-link/wbm.js'), encoding='utf-8').read()
+    cam_src = open(os.path.join(ROOT, 'tools/bimmer-link/cam360.js'), encoding='utf-8').read()
+    cam_test = f"""
+    var Buffer = {{
+      from: function(x) {{
+        if (typeof x === 'string') {{
+          var s = unescape(encodeURIComponent(x)), u = new Uint8Array(s.length);
+          for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+          return enhance(u);
+        }}
+        return enhance(new Uint8Array(x));
+      }},
+      isBuffer: function(b) {{ return !!(b && b._isBuf); }},
+      alloc: function(n) {{ return enhance(new Uint8Array(n)); }},
+      allocUnsafe: function(n) {{ return enhance(new Uint8Array(n)); }},
+      concat: function(list) {{
+        var tot = 0; for (var i = 0; i < list.length; i++) tot += list[i].length;
+        var out = new Uint8Array(tot), off = 0;
+        for (var j = 0; j < list.length; j++) {{ out.set(list[j], off); off += list[j].length; }}
+        return enhance(out);
+      }}
+    }};
+    function enhance(u) {{
+      u._isBuf = true;
+      u.writeUInt32LE = function(v, o) {{ u[o]=v&255; u[o+1]=(v>>>8)&255; u[o+2]=(v>>>16)&255; u[o+3]=(v>>>24)&255; }};
+      u.readUInt32LE = function(o) {{ return (u[o] | (u[o+1]<<8) | (u[o+2]<<16) | (u[o+3]*16777216)) >>> 0; }};
+      u.readUInt16LE = function(o) {{ return u[o] | (u[o+1]<<8); }};
+      u.copy = function(dst, doff, s0, s1) {{ dst.set(u.subarray(s0 || 0, s1 === undefined ? u.length : s1), doff || 0); }};
+      u.slice = function(a, b) {{ return enhance(Uint8Array.prototype.slice.call(u, a, b)); }};
+      return u;
+    }}
+    var wbmMod = {{ exports: {{}} }};
+    new Function('require', 'module', 'exports', 'Buffer', {json.dumps(wbm_src)})(function(){{ return {{}}; }}, wbmMod, wbmMod.exports, Buffer);
+    var camMod = {{ exports: {{}} }};
+    new Function('require', 'module', 'exports', '__dirname', 'process', 'Buffer', {json.dumps(cam_src)})(
+      function(id){{ return id === './wbm' ? wbmMod.exports : {{}}; }}, camMod, camMod.exports, '/', {{ pid: 1 }}, Buffer
+    );
+    var Cam = camMod.exports, Wbm = wbmMod.exports;
+    var sw = 64, sh = 48;
+    var yuv = Buffer.allocUnsafe((sw * sh * 3) / 2);
+    for (var i = 0; i < yuv.length; i++) yuv[i] = 120;
+    var body = Buffer.allocUnsafe(14 + yuv.length);
+    body.writeUInt32LE(1, 0); body.writeUInt32LE(7, 4); body.writeUInt32LE(0, 8);
+    body[12] = 0; body[13] = 0;
+    yuv.copy(body, 14);
+    var pf = Cam.parseCrFrame(body);
+    if (!pf || pf.ref !== 1 || pf.id !== 7 || !Cam.hasLiveLuma(pf.pixels, sw, sh)) throw new Error('bad parseCrFrame');
+    var rgba = Cam.yuv420AtlasToRgba(pf.pixels, sw, sh);
+    var resized = Wbm.resize(rgba, sw, sh, 32, 24);
+    if (resized.length !== 32 * 24 * 4 || resized[3] !== 255) throw new Error('bad resize');
+    'CAM360_UNIT_OK';
+    """
+    assert run_jxa(cam_test) == 'CAM360_UNIT_OK'
+
     with tempfile.TemporaryDirectory(prefix='bl-cat-') as td:
         cat = os.path.join(td, 'someip-interfaces.json')
         json.dump({'interfaces': {
             'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy': {'instances': {'1': {}}},
-            'de.bmw.infotainment.climate.ClimateMaster': {'instances': {'1': {}}},
+            'de.bmw.infotainment.climate.Climate2': {'instances': {'1': {}}},
             'de.bmw.infotainment.climate.CustomStandklima': {'instances': {'1': {}}},
         }}, open(cat, 'w', encoding='utf-8'))
         env = dict(os.environ, OAP_SOMEIP_CATALOG=cat)
@@ -568,9 +700,9 @@ def check_pwa_and_manifest_filtering():
         ], env=env, capture_output=True, text=True, check=True).stdout
         proxies = json.loads(out)
         assert 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy' in proxies
-        assert 'de.bmw.infotainment.climate.ClimateMaster' in proxies
+        assert 'de.bmw.infotainment.climate.Climate2' in proxies
         assert 'de.bmw.infotainment.climate.CustomStandklima' in proxies
-        assert 'de.bmw.infotainment.climate.SteeringWheelClimate' not in proxies
+        assert 'de.bmw.infotainment.climate.climatemaster.ClimateMaster' not in proxies
     print('[OK] PWA client syntax, black-canvas guard, and OAP SOME/IP catalog filtering verified')
 
 

@@ -3,6 +3,8 @@ package app.bimmerlink.mybmw;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -13,6 +15,8 @@ import android.os.Bundle;
 import android.view.Window;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
+import android.webkit.ServiceWorkerClient;
+import android.webkit.ServiceWorkerController;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -20,10 +24,13 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
 import org.json.JSONObject;
 
 public class MainActivity extends Activity {
-    private static final String VIRTUAL_ORIGIN = "https://mybmw.local";
+    private static final String VIRTUAL_ORIGIN = "https://app.mybmw.local";
+    private static final int APK_VERSION_CODE = 9;
     private static final int REQ_QR_SCAN = 201;
     private WebView webView;
 
@@ -49,6 +56,17 @@ public class MainActivity extends Activity {
         ws.setDomStorageEnabled(true);
         ws.setAllowFileAccess(false);
         ws.setMediaPlaybackRequiresUserGesture(false);
+        ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
+
+        try {
+            ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                    return interceptLocalAsset(request);
+                }
+            });
+        } catch (Exception ignored) {
+        }
 
         webView.addJavascriptInterface(new Bridge(), "AndroidBridge");
         webView.setWebChromeClient(new WebChromeClient() {
@@ -60,28 +78,14 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (uri != null && "mybmw.local".equals(uri.getHost())) {
-                    String path = uri.getPath();
-                    if (path == null || path.equals("/") || path.equals("/app/")) {
-                        path = "/app/index.html";
-                    }
-                    String assetPath = path.startsWith("/") ? path.substring(1) : path;
-                    try {
-                        InputStream is = getAssets().open(assetPath);
-                        String mime = mimeFor(assetPath);
-                        String enc = mime.startsWith("image/") ? null : "UTF-8";
-                        return new WebResourceResponse(mime, enc, is);
-                    } catch (Exception ignored) {
-                    }
-                }
-                return super.shouldInterceptRequest(view, request);
+                WebResourceResponse local = interceptLocalAsset(request);
+                return local != null ? local : super.shouldInterceptRequest(view, request);
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
-                if (uri != null && !"mybmw.local".equals(uri.getHost())) {
+                if (uri != null && !isVirtualHost(uri.getHost())) {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
                     return true;
                 }
@@ -97,6 +101,10 @@ public class MainActivity extends Activity {
         setContentView(webView);
 
         SharedPreferences prefs = getSharedPreferences("mybmw_prefs", MODE_PRIVATE);
+        if (prefs.getInt("apk_version", 0) != APK_VERSION_CODE) {
+            webView.clearCache(true);
+            prefs.edit().putInt("apk_version", APK_VERSION_CODE).apply();
+        }
         String savedPair = prefs.getString("pair_code", "");
         String startUrl = VIRTUAL_ORIGIN + "/app/index.html" + (savedPair.isEmpty() ? "" : ("?k=" + savedPair));
         webView.loadUrl(startUrl);
@@ -156,6 +164,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean isVirtualHost(String host) {
+        return "app.mybmw.local".equals(host) || "mybmw.local".equals(host);
+    }
+
+    private WebResourceResponse interceptLocalAsset(WebResourceRequest request) {
+        if (request == null) return null;
+        Uri uri = request.getUrl();
+        if (uri == null || !isVirtualHost(uri.getHost())) return null;
+        String path = uri.getPath();
+        if (path == null || path.equals("/") || path.equals("/app/")) {
+            path = "/app/index.html";
+        }
+        String assetPath = path.startsWith("/") ? path.substring(1) : path;
+        try {
+            InputStream is = getAssets().open(assetPath);
+            String mime = mimeFor(assetPath);
+            String enc = mime.startsWith("image/") ? null : "UTF-8";
+            Map<String, String> headers = new HashMap<>();
+            headers.put("Cache-Control", "no-store, no-cache, must-revalidate");
+            return new WebResourceResponse(mime, enc, 200, "OK", headers, is);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private static String mimeFor(String p) {
         if (p.endsWith(".html")) return "text/html";
         if (p.endsWith(".css")) return "text/css";
@@ -207,6 +240,20 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> MyBmwWidgetProvider.refreshAll(MainActivity.this));
             } catch (Exception ignored) {
             }
+        }
+
+        @JavascriptInterface
+        public void copyToClipboard(String text) {
+            if (text == null) return;
+            runOnUiThread(() -> {
+                try {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    if (cm != null) {
+                        cm.setPrimaryClip(ClipData.newPlainText("MyBMW Diag", text));
+                    }
+                } catch (Exception ignored) {
+                }
+            });
         }
     }
 }

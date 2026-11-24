@@ -130,24 +130,24 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 /* ---------------- Catalog Introspection (`db.datatypes`) & 1CR Payload Synthesis ---------------- */
 
 const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|stationary|precond|parkheat|parkclim|remotestart|independent|departure/i;
-const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|parkclim|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt/i;
+const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|parkclim|park.*func|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt/i;
 const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
-const STEERING_OR_SEAT_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|sitzheiz|sitzklima|massage|fragrance|ionis/i;
+const NON_1CR_MEMBER_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|seatAuto|sitzheiz|sitzklima|armSupport|massage|fragrance|scent|ionis|ioniz|aura|acFond|climateFond|2Tier|3Tier|rearClimate|rearWindow|heckscheib|defrost|stratification|surfaceHeating|airDistribution|airBlow|airQuality|sync|functionECO|climateEco|climateSystemOn|intelligentPassenger|telephone|swipe|residualHeat|restwaerme/i;
 
 /** Classify a Climate / 1CR field or method into semantic roles for automatic invocation. */
 function classifyClimateMember(ifaceName, memberName, kind, meta) {
     const full = ifaceName + '.' + memberName;
     const roles = [];
     const writable = kind === 'method' || !!(meta && meta.setter);
-    if (STEERING_OR_SEAT_RE.test(full)) {
+    if (NON_1CR_MEMBER_RE.test(full)) {
         if (/status|state|active|on|mode/i.test(memberName) && !writable) roles.push('state_read');
         return roles;
     }
-    if (/remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|motorstart|climatis.*engine|climatiz.*engine|1cr/i.test(full)) {
+    if (!/^statusAvailable/i.test(memberName) && /remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|setupRemoteStart|parkingFunctionsRES|motorstart|climatis.*engine|climatiz.*engine|1cr/i.test(full)) {
         roles.push(writable ? 'consent_write' : 'consent_read');
     }
-    if (/direct.*oper|immediate|sofort|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatis.*now|climatiz.*now|instant.*clim|activate.*aux|start.*aux|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|independent.*clim|precond|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatis|set.*climatiz|switch.*climat|climate.*on.*off|air.*cond.*on.*off|activate.*clim|request.*clim|start.*clim|stop.*clim/i.test(full)) {
-        if (!/timer|schedule|weekly|abfahrt|departure|zeitplan/i.test(memberName)) {
+    if (/airConditionParkFunctions|parkingFunctionsOn|requestParkingFunctionsOn|parkAirCond|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|independent.*clim|precond|direct.*oper|immediate|sofort|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatis.*now|climatiz.*now|instant.*clim|activate.*aux|start.*aux|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatis|set.*climatiz|switch.*climat|activate.*clim|start.*clim|stop.*clim/i.test(full)) {
+        if (!/timer|schedule|weekly|abfahrt|departure|zeitplan|^statusAvailable|controlClimateCompressor/i.test(memberName)) {
             roles.push(writable ? 'direct_write' : 'direct_read');
         }
     }
@@ -156,28 +156,93 @@ function classifyClimateMember(ifaceName, memberName, kind, meta) {
     }
     if (/temp/i.test(memberName) && !writable) roles.push('temp_read');
     if (/status|state|active|on|mode/i.test(memberName) && !writable && !roles.length) roles.push('state_read');
-    // Broad fallback role on ClimateMaster / Auxiliary / Standklima / PreConditioning for writable switches that aren't setpoints/zones
-    if (writable && !roles.length && /ClimateMaster|Auxiliary|Stand|PreCond|ParkClim|Independent|Remote/i.test(ifaceName)) {
-        if (!/temp|setpoint|soll|fan|blower|geblaese|intensity|flap|distribution|defrost|recirc|sync|auto.*program|filter|style/i.test(memberName)) {
+    if (writable && !roles.length && (/acSpecialFunction|extendedClimateFunctionalities/i.test(memberName) || /Auxiliary|Stand|PreCond|ParkClim|Independent|Remote/i.test(ifaceName))) {
+        if (!/temp|setpoint|soll|fan|blower|geblaese|intensity|flap|distribution|defrost|recirc|sync|auto.*program|filter|style|front$/i.test(memberName)) {
             roles.push('master_candidate');
         }
     }
     return roles;
 }
 
+const META_SKIP_KEYS = {
+    name: 1, id: 1, methodId: 1, fieldId: 1, eventId: 1, eventgroup: 1, eventGroup: 1,
+    notifierId: 1, getterId: 1, setterId: 1, reliable: 1, fireAndForget: 1,
+    version: 1, major: 1, minor: 1, serviceId: 1, instances: 1,
+};
+
 function lookupRawType(db, iv, typeName) {
-    if (!typeName || typeof typeName !== 'string') return null;
+    if (typeName === null || typeName === undefined || (typeof typeName !== 'string' && typeof typeName !== 'number')) return null;
+    const keyStr = String(typeName);
+    if (!keyStr) return null;
     const pools = [
         iv && iv.datatypes, db && db.datatypes,
-        iv && iv.types, iv && iv.enumerations, iv && iv.structs,
-        db && db.types, db && db.enumerations, db && db.structs, db && db.typeDefinitions,
+        iv && iv.someipDatatypes, db && db.someipDatatypes,
+        iv && iv.types, iv && iv.enumerations, iv && iv.structs, iv && iv.typeDefinitions,
+        db && db.types, db && db.enumerations, db && db.structs, db && db.typeDefinitions, db && db.typeCollections,
     ];
-    const shortName = typeName.split('.').pop();
+    const shortName = keyStr.split('.').pop();
+    const slashName = keyStr.split('/').pop();
     for (let i = 0; i < pools.length; i++) {
         const p = pools[i];
         if (!p || typeof p !== 'object') continue;
-        if (p[typeName]) return p[typeName];
+        if (p[keyStr]) return p[keyStr];
         if (p[shortName]) return p[shortName];
+        if (p[slashName]) return p[slashName];
+    }
+    return null;
+}
+
+function extractTypeRef(db, iv, entry, depth) {
+    if (entry === null || entry === undefined || (depth || 0) > 4) return null;
+    if (typeof entry === 'string' || typeof entry === 'number') {
+        const s = String(entry);
+        if (lookupRawType(db, iv, s) || (typeof entry === 'string' && /^(UInt\d+|Int\d+|Boolean|Float|Double|String|ByteBuffer)$/i.test(s))) {
+            return s;
+        }
+        return null;
+    }
+    if (Array.isArray(entry)) {
+        if (entry.length === 1) return extractTypeRef(db, iv, entry[0], (depth || 0) + 1);
+        if (entry.length > 1 && entry[0] && typeof entry[0] === 'object' && entry[0].name) {
+            return { type: 'struct', fields: entry };
+        }
+        return null;
+    }
+    if (typeof entry !== 'object') return null;
+    if (entry.type === 'enum' || entry.type === 'struct' || entry.type === 'union' || entry.enumerators || entry.enumValues || (entry.fields && typeof entry.fields === 'object')) {
+        return entry;
+    }
+    const directKeys = ['type', 'datatype', 'dataType', 'typeId', 'attributeType', 'valueType', 'elementType', 'argType'];
+    for (let i = 0; i < directKeys.length; i++) {
+        const v = entry[directKeys[i]];
+        if ((typeof v === 'string' || typeof v === 'number') && String(v)) return String(v);
+        if (v && typeof v === 'object') {
+            const sub = extractTypeRef(db, iv, v, (depth || 0) + 1);
+            if (sub) return sub;
+        }
+    }
+    const nestedPriority = ['setter', 'getter', 'notifier', 'in', 'out', 'args', 'input', 'parameters'];
+    for (let i = 0; i < nestedPriority.length; i++) {
+        const subObj = entry[nestedPriority[i]];
+        if (subObj && typeof subObj === 'object') {
+            const hit = extractTypeRef(db, iv, subObj, (depth || 0) + 1);
+            if (hit) return hit;
+        }
+    }
+    const keys = Object.keys(entry);
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        if (META_SKIP_KEYS[k]) continue;
+        const val = entry[k];
+        if (typeof val === 'string' || typeof val === 'number') {
+            const sv = String(val);
+            if (lookupRawType(db, iv, sv) || (typeof val === 'string' && /^(UInt\d+|Int\d+|Boolean|Float|Double|String|ByteBuffer)$/i.test(sv))) {
+                return sv;
+            }
+        } else if (val && typeof val === 'object') {
+            const sub = extractTypeRef(db, iv, val, (depth || 0) + 1);
+            if (sub) return sub;
+        }
     }
     return null;
 }
@@ -194,7 +259,6 @@ function resolveTypeDef(db, iv, typeName, depth) {
 
 function summarizeType(db, iv, t, depth) {
     if (!t || typeof t !== 'object') return null;
-    // Enum in MGU `db.datatypes` (`{ type: 'enum', items: { OFF: { value: 0 }, ON: { value: 1 } } }`) or Franca `values`/`enumerators`
     if (t.type === 'enum' || t.enumerators || t.values || t.enumValues || (t.items && typeof t.items === 'object' && !Array.isArray(t.items) && t.type !== 'struct' && t.type !== 'union')) {
         const ev = t.items || t.enumerators || t.values || t.enumValues || {};
         const values = [];
@@ -217,57 +281,97 @@ function summarizeType(db, iv, t, depth) {
         return { kind: 'enum', values, valueMap };
     }
 
-    // Struct in MGU `db.datatypes` (`{ type: 'struct', fields: { hour: { type: 'UInt8' } } }`) or array
-    if (t.type === 'struct' || t.fields || t.members || t.elements) {
+    if (t.type === 'struct' || t.fields || t.members || (t.elements && t.type !== 'union' && !Array.isArray(t.elements))) {
         const fl = t.fields || t.members || t.elements || {};
         const fields = Array.isArray(fl)
             ? fl.map((x) => {
-                const ftype = x && (x.type || x.datatype);
+                const ftype = extractTypeRef(db, iv, x, 0);
                 return { name: x && x.name, type: typeof ftype === 'string' ? ftype : null, typeDef: resolveTypeDef(db, iv, ftype, depth) };
             })
             : Object.keys(fl).map((k) => {
                 const entry = fl[k];
-                const ftype = typeof entry === 'string' ? entry : (entry && (entry.type || entry.datatype));
+                const ftype = typeof entry === 'string' ? entry : extractTypeRef(db, iv, entry, 0);
                 return { name: k, type: typeof ftype === 'string' ? ftype : null, typeDef: resolveTypeDef(db, iv, ftype, depth) };
             });
         return { kind: 'struct', fields };
     }
 
-    // Union in MGU `db.datatypes`
     if (t.type === 'union' && (t.elements || t.fields || t.items)) {
         const ul = t.elements || t.fields || t.items || {};
         const branches = Array.isArray(ul)
-            ? ul.map((x) => ({ name: x && x.name, type: x && x.type, typeDef: resolveTypeDef(db, iv, x && x.type, depth) }))
-            : Object.keys(ul).map((k) => ({ name: k, type: ul[k] && ul[k].type, typeDef: resolveTypeDef(db, iv, ul[k] && ul[k].type, depth) }));
+            ? ul.map((x) => {
+                const btype = extractTypeRef(db, iv, x, 0);
+                return { name: x && x.name, type: typeof btype === 'string' ? btype : null, typeDef: resolveTypeDef(db, iv, btype, depth) };
+            })
+            : Object.keys(ul).map((k) => {
+                const btype = typeof ul[k] === 'string' ? ul[k] : extractTypeRef(db, iv, ul[k], 0);
+                return { name: k, type: typeof btype === 'string' ? btype : null, typeDef: resolveTypeDef(db, iv, btype, depth) };
+            });
         return { kind: 'union', branches };
     }
 
-    // Typedef alias (`{ type: 'SomeOtherType' }`)
-    if (typeof t.type === 'string' && !/^(UInt\d+|Int\d+|Boolean|Float|Double|String|ByteBuffer|primitive|array|map)$/i.test(t.type)) {
-        const target = resolveTypeDef(db, iv, t.type, depth);
+    const ref = extractTypeRef(db, iv, t, 1);
+    if (typeof ref === 'string' && !/^(UInt\d+|Int\d+|Boolean|Float|Double|String|ByteBuffer|primitive|array|map)$/i.test(ref)) {
+        const target = resolveTypeDef(db, iv, ref, depth);
         if (target) return target;
     }
 
-    return { kind: String(t.kind || t.type || 'primitive') };
+    return { kind: String(t.kind || t.type || (typeof ref === 'string' ? ref : 'primitive')) };
 }
 
 function parseMethodInArgs(db, iv, mm) {
-    const rawIn = mm.inArgs || mm.in || mm.parameters || mm.args || mm.input;
+    if (!mm || typeof mm !== 'object') return [];
+    const rawIn = mm.inArgs || mm.in || mm.parameters || mm.args || mm.input || mm.request;
     if (!rawIn) return [];
     if (Array.isArray(rawIn)) {
-        return rawIn.map((a) => {
-            const tp = a && (a.type || a.datatype);
-            return { name: a && a.name, type: typeof tp === 'string' ? tp : null, typeDef: resolveTypeDef(db, iv, tp, 0) };
+        return rawIn.map((a, idx) => {
+            const tp = typeof a === 'string' ? a : extractTypeRef(db, iv, a, 0);
+            const nm = (a && a.name) || ('arg' + idx);
+            return { name: nm, type: typeof tp === 'string' ? tp : null, typeDef: resolveTypeDef(db, iv, tp, 0) };
         });
     }
     if (typeof rawIn === 'object') {
-        return Object.keys(rawIn).map((k) => {
+        const directStruct = extractTypeRef(db, iv, rawIn, 0);
+        if (directStruct && rawIn.type) {
+            const td = resolveTypeDef(db, iv, directStruct, 0);
+            if (td && td.kind === 'struct' && Array.isArray(td.fields)) return td.fields;
+        }
+        return Object.keys(rawIn).filter((k) => !META_SKIP_KEYS[k]).map((k) => {
             const entry = rawIn[k];
-            const tp = typeof entry === 'string' ? entry : (entry && (entry.type || entry.datatype));
+            const tp = typeof entry === 'string' ? entry : extractTypeRef(db, iv, entry, 0);
             return { name: k, type: typeof tp === 'string' ? tp : null, typeDef: resolveTypeDef(db, iv, tp, 0) };
         });
     }
     return [];
+}
+
+function enrichDescWithGeneratedCfg(db, iv, desc, cfg) {
+    if (!desc || !cfg || typeof cfg !== 'object') return;
+    const mergedIv = Object.assign({}, iv || {}, {
+        datatypes: Object.assign({}, (iv && iv.datatypes) || {}, cfg.datatypes || {}),
+        types: Object.assign({}, (iv && iv.types) || {}, cfg.types || {}),
+        enumerations: Object.assign({}, (iv && iv.enumerations) || {}, cfg.enumerations || {}),
+        structs: Object.assign({}, (iv && iv.structs) || {}, cfg.structs || {}),
+    });
+    const cfgFields = cfg.fields || cfg.attributes || {};
+    (desc.fields || []).forEach((f) => {
+        if (f.typeDef && f.typeDef.kind !== 'primitive') return;
+        const cf = cfgFields[f.name];
+        if (!cf) return;
+        const ftype = extractTypeRef(db, mergedIv, cf, 0);
+        if (ftype) {
+            f.type = typeof ftype === 'string' ? ftype : (f.type || null);
+            f.typeDef = resolveTypeDef(db, mergedIv, ftype, 0);
+        }
+    });
+    const cfgMethods = cfg.methods || {};
+    (desc.methods || []).forEach((m) => {
+        if (m.inArgs && m.inArgs.length && m.inArgs.every((a) => a.typeDef && a.typeDef.kind !== 'primitive')) return;
+        const cm = cfgMethods[m.name];
+        if (!cm) return;
+        const parsed = parseMethodInArgs(db, mergedIv, cm);
+        if (parsed.length) m.inArgs = parsed;
+    });
 }
 
 /**
@@ -305,7 +409,7 @@ function discoverClimateCatalog(db) {
             const fm = fields[fname] || {};
             const roles = classifyClimateMember(ifaceName, fname, 'field', fm);
             if (!ifaceMatches && !roles.length && !CLIMATE_MEMBER_HINT_RE.test(fname)) return;
-            const ftype = fm.type || fm.datatype || null;
+            const ftype = extractTypeRef(db, iv, fm, 0);
             item.fields.push({
                 name: fname,
                 getter: fm.getter !== false,
@@ -331,22 +435,27 @@ function discoverClimateCatalog(db) {
     return { interfaces: found, hasTypes: Object.keys(types).length > 0 };
 }
 
+const ENUM_INVALID_RE = /INVALID|UNKNOWN|ERROR|SIGNAL_UNAVAILABLE|SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|NO_ACTION|NO_CHANGE|KEINE_AKTION|KEINE_AENDERUNG|KEINE_ANGABE|KEINE_ANZEIGE|NICHT_VERFUEGBAR|INIT|NOT_AVAILABLE/i;
+const ENUM_OFF_TOKEN_RE = /(^|_)(OFF|AUS|AUSSCHALTEN|INACTIVE|INAKTIV|NICHT_AKTIV|DEACTIVATE|DEACTIVATED|DEAKTIVIEREN|STOP|STOPPED|STOPPEN|DISABLE|DISABLED|NEIN|FALSE|STANDBY|IDLE)(_|$)/i;
+const ENUM_ON_TOKEN_RE = /(^|_)(ON|EIN|AN|EINSCHALTEN|ACTIVE|AKTIV|ACTIVATE|ACTIVATED|AKTIVIEREN|START|STARTED|STARTEN|ENABLE|ENABLED|JA|TRUE|RUN|RUNNING|IMMEDIATE|SOFORT)(_|$)/i;
+
 /**
  * Pick an enum/boolean/numeric value for turning a feature ON or OFF based on its Franca type definition
- * or its last observed live value on the bus (`sample`). When `numericEnum` is true, returns wire integer.
+ * or its last observed live value on the bus (`sample`). Supports both English and German BMW Franca enums.
  */
 function pickEnumOrBool(typeDef, wantOn, sample, numericEnum) {
     if (typeDef && typeDef.kind === 'enum' && Array.isArray(typeDef.values) && typeDef.values.length) {
         const vals = typeDef.values.map(String);
-        const posRe = wantOn
-            ? /^(ON|ACTIVE|ACTIVATE|ACTIVATED|START|STARTED|ENABLE|ENABLED|TRUE|IMMEDIATE|DIRECT_ON|CLIMATE_ON|RUN|RUNNING|1)$/i
-            : /^(OFF|INACTIVE|DEACTIVATE|DEACTIVATED|STOP|STOPPED|DISABLE|DISABLED|FALSE|DIRECT_OFF|CLIMATE_OFF|STANDBY|0)$/i;
-        const looseRe = wantOn
-            ? /(^|_)(ON|ACTIVE|ACTIVATE|START|ENABLE|RUN|IMMEDIATE|CLIMAT|COOL|VENT|HEAT)(_|$)/i
-            : /(^|_)(OFF|INACTIVE|DEACTIVATE|STOP|DISABLE|CANCEL|IDLE|STANDBY)(_|$)/i;
-        const noInvalid = vals.filter((v) => !/INVALID|UNKNOWN|ERROR|SIGNAL_UNAVAILABLE|NO_ACTION|NO_CHANGE|INIT|NOT_AVAILABLE/i.test(v));
-        let chosen = noInvalid.find((v) => posRe.test(v));
-        if (chosen === undefined) chosen = noInvalid.find((v) => looseRe.test(v));
+        const exactRe = wantOn
+            ? /^(ON|EIN|AN|EINSCHALTEN|ACTIVE|AKTIV|ACTIVATE|ACTIVATED|AKTIVIEREN|START|STARTED|STARTEN|ENABLE|ENABLED|TRUE|IMMEDIATE|SOFORT|DIRECT_ON|CLIMATE_ON|STANDKLIMATISIERUNG_EIN|STANDLUEFTEN_EIN|REMOTE_ENGINE_START_EIN|AUTO_MINUS_MODUS_EIN|RUN|RUNNING|1)$/i
+            : /^(OFF|AUS|AUSSCHALTEN|INACTIVE|INAKTIV|NICHT_AKTIV|DEACTIVATE|DEACTIVATED|DEAKTIVIEREN|STOP|STOPPED|DISABLE|DISABLED|FALSE|DIRECT_OFF|CLIMATE_OFF|STANDKLIMATISIERUNG_AUS|STANDLUEFTEN_AUS|STANDHEIZUNG_AUS|AUTO_MINUS_MODUS_AUS|STANDBY|0)$/i;
+        const noInvalid = vals.filter((v) => !ENUM_INVALID_RE.test(v));
+        let chosen = noInvalid.find((v) => exactRe.test(v));
+        if (chosen === undefined) {
+            chosen = noInvalid.find((v) => wantOn
+                ? (ENUM_ON_TOKEN_RE.test(v) && !ENUM_OFF_TOKEN_RE.test(v))
+                : ENUM_OFF_TOKEN_RE.test(v));
+        }
         if (chosen === undefined && noInvalid.length >= 2) {
             chosen = wantOn ? noInvalid[1] : noInvalid[0];
         }
@@ -362,15 +471,72 @@ function pickEnumOrBool(typeDef, wantOn, sample, numericEnum) {
     if (typeof sample === 'string') {
         if (/^(true|false)$/i.test(sample)) return !!wantOn;
         if (numericEnum) return wantOn ? 1 : 0;
-        if (/OFF|INACTIVE|STOP|DISABLE/i.test(sample) && wantOn) {
-            return sample.replace(/INACTIVE/ig, 'ACTIVE').replace(/DISABLE[D]?/ig, 'ENABLED').replace(/STOP/ig, 'START').replace(/OFF/ig, 'ON');
+        if (ENUM_OFF_TOKEN_RE.test(sample) && wantOn) {
+            return sample
+                .replace(/NICHT_AKTIV/ig, 'AKTIV')
+                .replace(/AUSSCHALTEN/ig, 'EINSCHALTEN')
+                .replace(/(^|_)AUS(_|$)/ig, '$1EIN$2')
+                .replace(/INACTIVE/ig, 'ACTIVE')
+                .replace(/DISABLE[D]?/ig, 'ENABLED')
+                .replace(/STOP/ig, 'START')
+                .replace(/(^|_)OFF(_|$)/ig, '$1ON$2');
         }
-        if (/ON|ACTIVE|START|ENABLE/i.test(sample) && !wantOn) {
-            return sample.replace(/ACTIVE/ig, 'INACTIVE').replace(/ENABLE[D]?/ig, 'DISABLED').replace(/START/ig, 'STOP').replace(/ON/ig, 'OFF');
+        if (ENUM_ON_TOKEN_RE.test(sample) && !ENUM_OFF_TOKEN_RE.test(sample) && !wantOn) {
+            return sample
+                .replace(/(^|_)AKTIV(_|$)/ig, '$1NICHT_AKTIV$2')
+                .replace(/EINSCHALTEN/ig, 'AUSSCHALTEN')
+                .replace(/(^|_)EIN(_|$)/ig, '$1AUS$2')
+                .replace(/ACTIVE/ig, 'INACTIVE')
+                .replace(/ENABLE[D]?/ig, 'DISABLED')
+                .replace(/START/ig, 'STOP')
+                .replace(/(^|_)ON(_|$)/ig, '$1OFF$2');
         }
     }
     if (typeDef && typeDef.kind && /bool/i.test(typeDef.kind + ' ' + (typeDef.name || ''))) return !!wantOn;
     return wantOn ? 1 : 0;
+}
+
+function pickNoActionOrOff(typeDef, sample, numericEnum) {
+    if (typeDef && typeDef.kind === 'enum' && Array.isArray(typeDef.values) && typeDef.values.length) {
+        const vals = typeDef.values.map(String);
+        const noop = vals.find((v) => /KEINE_AKTION|KEINE_AENDERUNG|NO_ACTION|NO_CHANGE|UNCHANGED/i.test(v)) ||
+            vals.find((v) => /SIGNAL_UNBEFUELLT|KEINE_ANGABE/i.test(v));
+        if (noop !== undefined) {
+            return (numericEnum && typeDef.valueMap && typeDef.valueMap[noop] !== undefined) ? typeDef.valueMap[noop] : noop;
+        }
+        return pickEnumOrBool(typeDef, false, sample, numericEnum);
+    }
+    if (typeof sample === 'string' && /SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|KEINE_AKTION|KEINE_ANGABE/i.test(sample)) {
+        return numericEnum ? 0 : 'KEINE_AKTION';
+    }
+    return pickEnumOrBool(typeDef, false, sample, numericEnum);
+}
+
+function pickConsentKeepOrOn(typeDef, wantOn, sample, numericEnum) {
+    if (wantOn) return pickEnumOrBool(typeDef, true, sample, numericEnum);
+    if (typeDef && typeDef.kind === 'enum' && Array.isArray(typeDef.values)) {
+        const vals = typeDef.values.map(String);
+        const noop = vals.find((v) => /KEINE_AKTION|KEINE_AENDERUNG|NO_ACTION|NO_CHANGE|SIGNAL_UNBEFUELLT/i.test(v));
+        if (noop !== undefined) {
+            return (numericEnum && typeDef.valueMap && typeDef.valueMap[noop] !== undefined) ? typeDef.valueMap[noop] : noop;
+        }
+    }
+    // Never uncheck the owner's Remote Engine Start consent in iDrive when stopping park AC!
+    return pickEnumOrBool(typeDef, true, sample, numericEnum);
+}
+
+function lookupSampleField(sample, fname) {
+    if (!sample || typeof sample !== 'object') return undefined;
+    if (sample[fname] !== undefined) return sample[fname];
+    const bare = String(fname || '').replace(/^(operation|control|request|set|status)/i, '');
+    if (!bare) return undefined;
+    const statusKey = 'status' + bare[0].toUpperCase() + bare.slice(1);
+    if (sample[statusKey] !== undefined) return sample[statusKey];
+    const keys = Object.keys(sample);
+    for (let i = 0; i < keys.length; i++) {
+        if (keys[i].toLowerCase().slice(-bare.length) === bare.toLowerCase()) return sample[keys[i]];
+    }
+    return undefined;
 }
 
 /**
@@ -380,11 +546,22 @@ function buildDirectPayload(meta, wantOn, sample, numericEnum) {
     const td = meta && meta.typeDef;
     if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
         const out = {};
+        const hasParkAc = td.fields.some((x) => x && /parkAirCond|standklima|precond/i.test(x.name || ''));
         td.fields.forEach((f) => {
             if (!f || !f.name) return;
-            const cur = (sample && typeof sample === 'object') ? sample[f.name] : undefined;
+            const cur = lookupSampleField(sample, f.name);
             if (/zone|id|index|slot|seat/i.test(f.name)) {
                 out[f.name] = cur !== undefined ? cur : (f.typeDef && f.typeDef.kind === 'enum' && f.typeDef.values[0] ? (numericEnum ? 0 : f.typeDef.values[0]) : 0);
+            } else if (/heater|standheiz|zuheiz|extraHeater/i.test(f.name)) {
+                out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+            } else if (/remoteStart|motorstart|res$/i.test(f.name)) {
+                out[f.name] = pickConsentKeepOrOn(f.typeDef, wantOn, cur, numericEnum);
+            } else if (/ventilat|standlueft/i.test(f.name) && hasParkAc && wantOn) {
+                out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+            } else if (/blower|geblaese/i.test(f.name)) {
+                out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+            } else if (/autoMode|automatik/i.test(f.name)) {
+                out[f.name] = hasParkAc ? pickNoActionOrOff(f.typeDef, cur, numericEnum) : (wantOn ? pickEnumOrBool(f.typeDef, true, cur, numericEnum) : pickNoActionOrOff(f.typeDef, cur, numericEnum));
             } else {
                 out[f.name] = buildDirectPayload(f, wantOn, cur, numericEnum);
             }
@@ -403,9 +580,15 @@ function buildDirectPayload(meta, wantOn, sample, numericEnum) {
     }
     if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
         const out = {};
-        Object.keys(sample).forEach((k) => {
-            if (/zone|slot|id|index/i.test(k)) out[k] = sample[k];
-            else out[k] = pickEnumOrBool(null, wantOn, sample[k], numericEnum);
+        const keys = Object.keys(sample);
+        const hasParkAc = keys.some((k) => /parkAirCond|standklima|precond/i.test(k));
+        keys.forEach((k) => {
+            const outKey = /^status[A-Z]/.test(k) ? (k[6].toLowerCase() + k.slice(7)) : k;
+            if (/zone|slot|id|index/i.test(k)) out[outKey] = sample[k];
+            else if (/heater|standheiz|zuheiz|extraHeater|blower|geblaese/i.test(k)) out[outKey] = pickNoActionOrOff(null, sample[k], numericEnum);
+            else if (/remoteStart|motorstart|res$/i.test(k)) out[outKey] = pickConsentKeepOrOn(null, wantOn, sample[k], numericEnum);
+            else if (/ventilat|standlueft/i.test(k) && hasParkAc && wantOn) out[outKey] = pickNoActionOrOff(null, sample[k], numericEnum);
+            else out[outKey] = pickEnumOrBool(null, wantOn, sample[k], numericEnum);
         });
         return out;
     }
@@ -895,10 +1078,27 @@ async function runWorker() {
                 try { opened = await openDynamicProxies(desc.iface, attrs, methods, desc.broadcasts, 4); } catch (e2) {}
             }
             if (!opened.list.length) continue;
+            if (opened.cfg) {
+                enrichDescWithGeneratedCfg(db, db.interfaces && db.interfaces[desc.iface], desc, opened.cfg);
+            }
+            const writableDefs = {};
+            if (opened.cfg) {
+                (desc.fields || []).forEach((f) => {
+                    if (f.setter && opened.cfg.fields && opened.cfg.fields[f.name]) {
+                        writableDefs[f.name] = opened.cfg.fields[f.name];
+                    }
+                });
+                (desc.methods || []).forEach((m) => {
+                    if (m.roles.length && opened.cfg.methods && opened.cfg.methods[m.name]) {
+                        writableDefs[m.name + '()'] = opened.cfg.methods[m.name];
+                    }
+                });
+            }
             const cfgSummary = opened.cfg ? {
                 instances: Object.keys(opened.cfg.instances || {}),
                 fields: Object.keys(opened.cfg.fields || {}),
                 methods: Object.keys(opened.cfg.methods || {}),
+                writableDefs,
             } : null;
             climateProxies[desc.iface] = { list: opened.list, desc, cfgSummary };
             opened.list.forEach((instEntry) => {
@@ -1084,20 +1284,37 @@ async function runWorker() {
         const trace = [];
         const savedProfile = readJsonSafe(PROFILE_PATH);
 
+        const ifaceHasLive = (iface) => {
+            const prefix = iface + '.';
+            return Object.keys(climateLive).some((k) => k.indexOf(prefix) === 0);
+        };
+
+        const sampleForMember = (iface, fname) => {
+            const exact = climateLive[iface + '.' + fname];
+            if (exact !== undefined) return exact;
+            const bare = String(fname || '').replace(/^(operation|control|request|set)/i, '');
+            if (bare) {
+                const stKey = iface + '.status' + bare[0].toUpperCase() + bare.slice(1);
+                if (climateLive[stKey] !== undefined) return climateLive[stKey];
+            }
+            return undefined;
+        };
+
         const callOne = async (iface, kind, name, payload) => {
             const holder = climateProxies[iface];
             if (!holder || !holder.list || !holder.list.length) throw new Error('Proxy not open: ' + iface);
-            // Sort available instances first
+            const hasLive = ifaceHasLive(iface);
             const sorted = holder.list.slice().sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0));
             let lastErr = null;
             for (let i = 0; i < sorted.length; i++) {
                 const inst = sorted[i];
+                const tmo = (inst.available || hasLive) ? 3500 : 1500;
                 try {
                     if (kind === 'setter') {
-                        await nativeTick(() => within(inst.proxy.setValue(name, payload, 3500), 4000, iface + '.' + name));
+                        await nativeTick(() => within(inst.proxy.setValue(name, payload, tmo), tmo + 400, iface + '.' + name));
                         return { ok: true, iface, inst: inst.inst, kind, name, payload };
                     }
-                    const res = await nativeTick(() => within(inst.proxy.callMethod(name, payload || {}, 3500), 4000, iface + '.' + name));
+                    const res = await nativeTick(() => within(inst.proxy.callMethod(name, payload || {}, tmo), tmo + 400, iface + '.' + name));
                     return { ok: true, iface, inst: inst.inst, kind, name, payload, response: res };
                 } catch (e) {
                     lastErr = e;
@@ -1113,11 +1330,45 @@ async function runWorker() {
             } catch (e1) {
                 const pNum = buildFn(true);
                 if (JSON.stringify(pNum) !== JSON.stringify(pStr)) {
-                    return await callOne(iface, kind, meta.name, pNum);
+                    try {
+                        return await callOne(iface, kind, meta.name, pNum);
+                    } catch (e2) {
+                        lastErrAttach(e1, e2);
+                    }
+                }
+                // Extra struct key prefix fallback if typeDef was absent and sample came from status*
+                if (kind === 'setter' && (!meta.typeDef || meta.typeDef.kind === 'primitive') && pStr && typeof pStr === 'object' && !Array.isArray(pStr)) {
+                    const opObj = {};
+                    Object.keys(pStr).forEach((k) => {
+                        const opKey = /^operation[A-Z]/.test(k) ? k : ('operation' + k[0].toUpperCase() + k.slice(1));
+                        opObj[opKey] = pStr[k];
+                    });
+                    if (JSON.stringify(opObj) !== JSON.stringify(pStr)) {
+                        return await callOne(iface, kind, meta.name, opObj);
+                    }
                 }
                 throw e1;
             }
         };
+
+        function lastErrAttach(e1, e2) {
+            if (e1 && e2 && e2.message && String(e1.message).indexOf(e2.message) < 0) {
+                e1.message = e1.message + ' | ' + e2.message;
+            }
+        }
+
+        const orderedCatalogInterfaces = () => climateCatalog.interfaces.slice().sort((a, b) => {
+            const score = (d) => {
+                let sc = 0;
+                if (ifaceHasLive(d.iface)) sc += 100;
+                const h = climateProxies[d.iface];
+                if (h && h.list && h.list.some((x) => x.available)) sc += 50;
+                if ((d.fields || []).some((f) => f.setter && f.roles.indexOf('direct_write') >= 0)) sc += 25;
+                if ((d.methods || []).some((m) => m.roles.indexOf('direct_write') >= 0)) sc += 10;
+                return sc;
+            };
+            return score(b) - score(a);
+        });
 
         if (action === 'invoke_raw') {
             try {
@@ -1127,8 +1378,10 @@ async function runWorker() {
                     cur[params.role || 'start'] = { iface: params.iface, kind: params.kind, name: params.name, payload: params.payload };
                     writeJsonSafe(PROFILE_PATH, cur);
                 }
+                emit({ ev: 'log', level: 'info', text: '1CR raw ok: ' + params.iface + '.' + params.name });
                 return { ok: true, trace: [r], saved: !!params.saveAsDefault };
             } catch (e) {
+                emit({ ev: 'log', level: 'warn', text: '1CR raw err (' + params.iface + '.' + params.name + '): ' + e.message });
                 return { ok: false, error: e.message, trace: [{ ok: false, error: e.message }] };
             }
         }
@@ -1136,6 +1389,7 @@ async function runWorker() {
         if (action === 'start1cr' || action === 'stop1cr') {
             const wantOn = action === 'start1cr';
             const roleKey = wantOn ? 'start' : 'stop';
+            const sortedIfs = orderedCatalogInterfaces();
 
             if (savedProfile && savedProfile[roleKey]) {
                 const p = savedProfile[roleKey];
@@ -1152,15 +1406,15 @@ async function runWorker() {
                 }
             }
 
-            // Enable 1CR Remote Engine Start consent flag first when starting
+            // Enable 1CR Remote Engine Start consent flag first when starting (unless already confirmed ON on live bus)
             const consentCandidates = [];
-            if (wantOn) {
-                for (let i = 0; i < climateCatalog.interfaces.length; i++) {
-                    const d = climateCatalog.interfaces[i];
+            if (wantOn && tracker.state.climate1cr.consentEnabled !== true) {
+                for (let i = 0; i < sortedIfs.length; i++) {
+                    const d = sortedIfs[i];
                     for (let k = 0; k < d.fields.length; k++) {
                         const f = d.fields[k];
                         if (f.setter && f.roles.indexOf('consent_write') >= 0) {
-                            const sample = climateLive[d.iface + '.' + f.name];
+                            const sample = sampleForMember(d.iface, f.name);
                             consentCandidates.push({
                                 iface: d.iface,
                                 kind: 'setter',
@@ -1174,30 +1428,57 @@ async function runWorker() {
                             }
                         }
                     }
+                    for (let k = 0; k < d.methods.length; k++) {
+                        const m = d.methods[k];
+                        if (m.roles.indexOf('consent_write') >= 0) {
+                            const mkConsent = (num) => {
+                                const argObj = {};
+                                m.inArgs.forEach((a) => {
+                                    if (a && a.name) argObj[a.name] = buildDirectPayload(a, true, undefined, num);
+                                });
+                                return argObj;
+                            };
+                            consentCandidates.push({
+                                iface: d.iface,
+                                kind: 'method',
+                                name: m.name,
+                                payload: mkConsent(false),
+                                altPayload: mkConsent(true),
+                            });
+                            if (!climateProxies[d.iface] || !ifaceHasLive(d.iface)) continue;
+                            try { trace.push(await callSmart(d.iface, 'method', m, mkConsent)); } catch (e) {
+                                trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
+                            }
+                        }
+                    }
                 }
             }
 
-            // Try all discovered direct-operation setters & methods first, then master_candidate switches on ClimateMaster
+            // Try all discovered direct-operation setters & methods on LIVE interfaces first, then fallbacks
             let succeeded = null;
             const attemptedCalls = [];
             const rolePasses = ['direct_write', 'master_candidate'];
             for (let rp = 0; rp < rolePasses.length && !succeeded; rp++) {
                 const targetRole = rolePasses[rp];
-                for (let i = 0; i < climateCatalog.interfaces.length; i++) {
-                    const d = climateCatalog.interfaces[i];
-                    const pStrSetter = (f) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], false);
-                    const pNumSetter = (f) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], true);
+                for (let i = 0; i < sortedIfs.length && !succeeded; i++) {
+                    const d = sortedIfs[i];
+                    const pStrSetter = (f) => buildDirectPayload(f, wantOn, sampleForMember(d.iface, f.name), false);
+                    const pNumSetter = (f) => buildDirectPayload(f, wantOn, sampleForMember(d.iface, f.name), true);
                     for (let k = 0; k < d.fields.length; k++) {
                         const f = d.fields[k];
                         if (!f.setter || f.roles.indexOf(targetRole) < 0) continue;
-                        attemptedCalls.push({ iface: d.iface, kind: 'setter', name: f.name, payload: pStrSetter(f), altPayload: pNumSetter(f) });
+                        const p1 = pStrSetter(f);
+                        const p2 = pNumSetter(f);
+                        attemptedCalls.push({ iface: d.iface, kind: 'setter', name: f.name, payload: p1, altPayload: p2 });
                         if (!climateProxies[d.iface]) continue;
                         try {
-                            const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, climateLive[d.iface + '.' + f.name], num));
+                            const r = await callSmart(d.iface, 'setter', f, (num) => (num ? p2 : p1));
                             trace.push(r);
+                            emit({ ev: 'log', level: 'info', text: '1CR ' + action + ' ok via ' + d.iface + '.' + f.name });
                             if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
                         } catch (e) {
                             trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
+                            emit({ ev: 'log', level: 'warn', text: '1CR ' + d.iface.split('.').pop() + '.' + f.name + ' err: ' + e.message });
                         }
                     }
                     for (let k = 0; k < d.methods.length; k++) {
@@ -1215,9 +1496,11 @@ async function runWorker() {
                         try {
                             const r = await callSmart(d.iface, 'method', m, makeArgs);
                             trace.push(r);
+                            emit({ ev: 'log', level: 'info', text: '1CR ' + action + ' ok via ' + d.iface + '.' + m.name + '()' });
                             if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
                         } catch (e) {
                             trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
+                            emit({ ev: 'log', level: 'warn', text: '1CR ' + d.iface.split('.').pop() + '.' + m.name + '() err: ' + e.message });
                         }
                     }
                 }
@@ -1495,7 +1778,9 @@ function decodeChassisFromVinOrFa(vin, faStr) {
         else if (/^(CR|CV|TA|JU)\d\d$|^\d\dE[UV]$/.test(tc)) out.trueChassis = 'G05';
         else if (/^(CY|GT)\d\d$|^\d\dE[XY]$/.test(tc)) out.trueChassis = 'G06';
         else if (/^(CW|TB)\d\d$|^\d\dE[MN]$/.test(tc)) out.trueChassis = 'G07';
+        else if (/^\d\dF[H-Z]$/.test(tc)) out.trueChassis = 'G20LCI';
         else if (/^(5F|5V|5U|6K)\d\d$|^\d\d(DY|DZ|FF|FG)$/.test(tc)) out.trueChassis = 'G20';
+        else if (/^\d\dA[G-N]$|^\d\dB[A-H]$/.test(tc)) out.trueChassis = 'G30LCI';
         else if (/^J[A-T]\d\d$|^\d\dB[J-N]$/.test(tc)) out.trueChassis = 'G30';
         else if (/^7[A-W]\d\d$|^\d\dE[A-D]$/.test(tc)) out.trueChassis = 'G12';
         else if (/^\d\dA[PRTV]$/.test(tc)) out.trueChassis = 'G22';
@@ -1605,18 +1890,45 @@ function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
     if (val === undefined || val === null) return;
     const s = JSON.stringify(val);
     const c1 = Object.assign({}, curState.climate1cr);
-    if (fieldDesc.roles.indexOf('consent_read') >= 0 || fieldDesc.roles.indexOf('consent_write') >= 0) {
-        if (/ON|TRUE|ACTIVE|ENABLE/i.test(s) && !/OFF|FALSE|INACTIVE|DISABLE/i.test(s)) c1.consentEnabled = true;
-        else if (/OFF|FALSE|INACTIVE|DISABLE/i.test(s)) c1.consentEnabled = false;
+
+    // Check embedded 1CR setup consent inside structs such as `statusAirConditionParkFunctions.statusSetupRemoteStart`
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+        Object.keys(val).forEach((k) => {
+            if (/remoteStart|motorstart|RES$/i.test(k) && !/Available/i.test(k)) {
+                const sv = String(val[k]);
+                if (ENUM_ON_TOKEN_RE.test(sv) && !ENUM_OFF_TOKEN_RE.test(sv)) c1.consentEnabled = true;
+                else if (ENUM_OFF_TOKEN_RE.test(sv)) c1.consentEnabled = false;
+            }
+        });
+    } else if (fieldDesc.roles.indexOf('consent_read') >= 0 || fieldDesc.roles.indexOf('consent_write') >= 0) {
+        if (ENUM_ON_TOKEN_RE.test(s) && !ENUM_OFF_TOKEN_RE.test(s)) c1.consentEnabled = true;
+        else if (ENUM_OFF_TOKEN_RE.test(s)) c1.consentEnabled = false;
     }
+
     if (fieldDesc.roles.indexOf('direct_read') >= 0 || fieldDesc.roles.indexOf('direct_write') >= 0) {
-        c1.rawState = fieldDesc.name + '=' + s.slice(0, 60);
-        if (/\"ON\"|\"ACTIVE\"|\"RUNNING\"|\"START\"|_ON\"|_ACTIVE\"/i.test(s) && !/OFF|INACTIVE|STOP/i.test(s)) c1.active = true;
-        else if (/OFF|INACTIVE|STOP/i.test(s)) c1.active = false;
+        c1.rawState = fieldDesc.name + '=' + s.slice(0, 80);
+        if (val && typeof val === 'object' && !Array.isArray(val)) {
+            const opKeys = Object.keys(val).filter((k) => /parkAirCond|standklima|independentVent|standlueft|parkHeat|standheiz|parkingFunctionsOn|precond/i.test(k) && !/remoteStart|autoMode|Available/i.test(k));
+            if (opKeys.length) {
+                let anyOn = false;
+                let anyOff = false;
+                opKeys.forEach((k) => {
+                    const sv = String(val[k]);
+                    if (ENUM_ON_TOKEN_RE.test(sv) && !ENUM_OFF_TOKEN_RE.test(sv) && !ENUM_INVALID_RE.test(sv)) anyOn = true;
+                    else if (ENUM_OFF_TOKEN_RE.test(sv)) anyOff = true;
+                });
+                if (anyOn) c1.active = true;
+                else if (anyOff) c1.active = false;
+            }
+        } else {
+            const sv = String(val);
+            if ((ENUM_ON_TOKEN_RE.test(sv) || val === true || val === 1) && !ENUM_OFF_TOKEN_RE.test(sv) && !ENUM_INVALID_RE.test(sv)) c1.active = true;
+            else if (ENUM_OFF_TOKEN_RE.test(sv) || val === false || val === 0) c1.active = false;
+        }
     }
     if (fieldDesc.roles.indexOf('temp_read') >= 0 && /interior|cabin|innen/i.test(fieldDesc.name)) {
         const n = pickNamedNum(val, /temp|value/i, [255, 65535]);
-        if (n !== null && n >= -20 && n <= 70) pushPatch({ cabinC: +n.toFixed(1) });
+        if (n !== null && n >= -15 && n <= 60) pushPatch({ cabinC: +n.toFixed(1) });
     }
     pushPatch({ climate1cr: c1 });
 }
@@ -1640,10 +1952,13 @@ module.exports = {
     haversineKm,
     classifyClimateMember,
     discoverClimateCatalog,
+    enrichDescWithGeneratedCfg,
     resolveTypeDef,
     pickEnumOrBool,
+    pickNoActionOrOff,
     buildDirectPayload,
     buildTimerPayload,
+    interpretClimateField,
     decodeChassisFromVinOrFa,
     estimateRangeFromFuel,
     TelemetryTracker,

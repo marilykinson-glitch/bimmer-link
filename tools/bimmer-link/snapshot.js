@@ -87,7 +87,7 @@ function encodeIndexedPngRgba(w, h, rgba) {
     }
     const stride = w + 1;
     const raw = Buffer.allocUnsafe(stride * h);
-    const bayer = [-3, 1, 3, -1];
+    const bayer = [-1, 0, 1, 0];
     for (let y = 0; y < h; y++) {
         const rowOff = y * stride;
         raw[rowOff] = 0;
@@ -246,6 +246,9 @@ class MiniSurface {
 
 function tryCapture4Cam(opts) {
     opts = opts || {};
+    if (opts.camFrame && Buffer.isBuffer(opts.camFrame.rgba) && opts.camFrame.w > 0 && opts.camFrame.h > 0 && opts.camFrame.rgba.length >= opts.camFrame.w * opts.camFrame.h * 4) {
+        return { w: opts.camFrame.w, h: opts.camFrame.h, rgba: opts.camFrame.rgba };
+    }
     const rawFile = opts.rawCamFile || '/run/bimmer-link/cam4.rgba';
     const bin = opts.camshotBin || path.join(__dirname, 'mgu-camshot');
     if (fs.existsSync(bin)) {
@@ -276,7 +279,8 @@ function formatClock(ms) {
 
 /**
  * Render a PNG Buffer representing the vehicle's current parking/live snapshot.
- * Uses 4-camera 360 composite if available, otherwise renders the full BMW Dark Telemetry Card.
+ * Uses 4-camera 360 composite (`640x416` so encrypted BL2 wire stays < 115 KB inside MQTT broker retainers!)
+ * if available, otherwise renders the full BMW Dark Telemetry Card.
  */
 function renderSnapshotPng(telemetry, extra, opts) {
     const t = telemetry || {};
@@ -285,31 +289,31 @@ function renderSnapshotPng(telemetry, extra, opts) {
     const cam = tryCapture4Cam(opts);
 
     if (cam) {
-        const s = new MiniSurface(768, 496, '#070a10');
-        s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 768, 352);
+        const s = new MiniSurface(640, 416, '#070a10');
+        s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 640, 288);
         // Crosshairs & camera labels for 2x2 quad view
-        s.fillRect(383, 0, 2, 352, '#1e293b');
-        s.fillRect(0, 175, 768, 2, '#1e293b');
-        const labels = [['CAM TRUOC', 10, 8], ['CAM SAU', 394, 8], ['GUONG TRAI', 10, 184], ['GUONG PHAI', 394, 184]];
+        s.fillRect(319, 0, 2, 288, '#1e293b');
+        s.fillRect(0, 143, 640, 2, '#1e293b');
+        const labels = [['CAM TRUOC', 10, 8], ['CAM SAU', 330, 8], ['GUONG TRAI', 10, 152], ['GUONG PHAI', 330, 152]];
         labels.forEach((lb) => {
             s.fillRect(lb[1] - 4, lb[2] - 4, 132, 22, [8, 11, 18, 195]);
             s.text(lb[0], lb[1], lb[2], 2, '#4da6ff');
         });
         // Telemetry HUD bar underneath
-        s.fillRect(0, 352, 768, 144, '#0b101b');
-        s.fillRect(0, 352, 768, 3, '#2fd27a');
-        const carHdr = ex.modelTitle ? (ex.modelTitle + '  -  ') : 'BMW 360  -  ';
-        s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 16, 366, 2, '#2fd27a', 46);
-        s.text(formatClock(ex.at), 548, 366, 2, '#94a3b8', 20);
+        s.fillRect(0, 288, 640, 128, '#0b101b');
+        s.fillRect(0, 288, 640, 3, '#2fd27a');
+        const carHdr = ex.modelTitle ? (ex.modelTitle + ' - ') : 'BMW 360 - ';
+        s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 12, 300, 2, '#2fd27a', 35);
+        s.text(formatClock(ex.at), 434, 300, 2, '#94a3b8', 18);
         const loc = t.pos
             ? ((t.pos.street ? t.pos.street + ', ' : '') + (t.pos.district ? t.pos.district + ', ' : '') + (t.pos.city || '') + ' (' + t.pos.lat.toFixed(5) + ', ' + t.pos.lon.toFixed(5) + ')')
             : 'CHUA CO TOA DO GPS';
-        s.text('VI TRI: ' + loc, 16, 398, 2, '#f8fafc', 61);
-        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ')  |  12V: ' + fmtVal(t.battery12v, 'V') +
-            '  |  NHIET: ' + fmtVal(t.ambientC, '*C') + ' / ' + fmtVal(t.coolantC, '*C');
-        s.text(line2, 16, 430, 2, '#cbd5e1', 62);
+        s.text('VI TRI: ' + loc, 12, 330, 2, '#f8fafc', 51);
+        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ') | 12V: ' + fmtVal(t.battery12v, 'V') +
+            ' | NHIET: ' + fmtVal(t.ambientC, '*C') + '/' + fmtVal(t.coolantC, '*C');
+        s.text(line2, 12, 360, 2, '#cbd5e1', 51);
         const doorsWarn = (t.doorsOpen && t.doorsOpen.length) || t.trunkOpen || t.hoodOpen || t.locked === false;
-        s.text(doorsWarn ? 'CANH BAO: KIEM TRA CUA / COP / KHOA XE!' : 'AN TOAN: CUA & COP DONG KIN  |  1CR SAN SANG', 16, 462, 2, doorsWarn ? '#ffb020' : '#2fd27a', 60);
+        s.text(doorsWarn ? 'CANH BAO: KIEM TRA CUA / COP / KHOA XE!' : 'AN TOAN: CUA & COP DONG KIN | 1CR SAN SANG', 12, 390, 2, doorsWarn ? '#ffb020' : '#2fd27a', 51);
         return { png: encodeIndexedPngRgba(s.w, s.h, s.buf), hasCamera: true };
     }
 

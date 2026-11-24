@@ -2,7 +2,7 @@
   "id": "bimmer_link",
   "title": "MyBMW & 1CR",
   "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp 4 camera 360° / thẻ trạng thái kèm vị trí hầm gửi về App MyBMW & Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "startType": "autostart",
   "autoClimateSignals": true,
   "vendor": "custom",
@@ -11,8 +11,10 @@
     "de.bmw.infotainment.video.cameraproxy.ICAM2Proxy": { "_all": true, "_optional": "360 Surround View camera" },
     "de.bmw.infotainment.video.cameraproxy.CameraProxy": { "_all": true, "_optional": "CameraProxy base" },
     "de.bmw.dass.XView3D": { "_all": true, "_optional": "XView3D state" },
-    "de.bmw.infotainment.climate.ClimateMaster": { "_all": true, "_optional": "1CR ClimateMaster" },
-    "de.bmw.infotainment.climate.SteeringWheelClimate": { "_all": true, "_optional": "SteeringWheelClimate" }
+    "de.bmw.infotainment.climate.Climate2": { "_all": true, "_optional": "1CR Climate2 parkFunctions" },
+    "de.bmw.infotainment.climate.Climate": { "_all": true, "_optional": "Climate base" },
+    "de.bmw.infotainment.climate.climatemaster.ClimateMaster": { "_all": true, "_optional": "1CR ClimateMaster" },
+    "de.bmw.body.steeringwheelcomfort.SteeringWheelClimate": { "_all": true, "_optional": "SteeringWheelClimate" }
   },
   "screens": [
     {

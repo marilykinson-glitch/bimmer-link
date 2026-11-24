@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -608,10 +608,13 @@ function createService(customCfg) {
         }
 
         if (config.parkSnapshot) {
-            await tryGrab360(3600);
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const camGrab = await tryGrab360(4000);
+            const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { event: 'parked' });
-            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', at: Date.now() }).catch(() => {});
+            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', at: Date.now() }).then((ok) => {
+                log('park snapshot: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + ok);
+            }).catch(() => {});
             if (config.botToken && config.chatId) {
                 try {
                     const cap = Tg.formatStatusCaption('XE VỪA ĐỖ XONG', S.telemetry, { trip, valet: config.valet });
@@ -687,14 +690,17 @@ function createService(customCfg) {
         }
 
         if (action === 'snap_now') {
-            await Promise.all([
+            const pairRes = await Promise.all([
                 callWorker('refresh_vitals', {}, 3500),
-                tryGrab360(3800),
+                tryGrab360(4200),
             ]);
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const camGrab = pairRes[1];
+            const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true);
             const snapLabel = snap.hasCamera ? '4 camera 360° quanh xe' : 'thẻ trạng thái đỗ xe';
             const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
+            log('snap_now: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + cloudSent);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
                 await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
@@ -727,6 +733,7 @@ function createService(customCfg) {
             for (let i = 0; i < cands.length; i++) {
                 const cd = cands[i];
                 const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3200);
+                log('1CR OAP ' + cd.iface.split('.').pop() + '.' + cd.name + ': ' + (oapRes && oapRes.ok ? 'ok' : ((oapRes && oapRes.error) || 'fail')));
                 if (oapRes && oapRes.ok) {
                     hitNames.push(cd.iface.split('.').pop() + '.' + cd.name);
                     if (hitNames.length >= 2) break;

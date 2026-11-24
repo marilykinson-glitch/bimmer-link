@@ -225,7 +225,9 @@ mgu.run({
             'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy',
             'de.bmw.infotainment.video.cameraproxy.CameraProxy',
             'de.bmw.dass.XView3D',
-            'de.bmw.infotainment.climate.ClimateMaster',
+            'de.bmw.infotainment.climate.Climate2',
+            'de.bmw.infotainment.climate.Climate',
+            'de.bmw.infotainment.climate.climatemaster.ClimateMaster',
         ].forEach((ifn) => { getOapInstances(ifn).catch(() => {}); });
 
         async function attachOrDetachCam(wantOn) {
