@@ -143,11 +143,12 @@ class TelegramController {
         const token = overrideToken || cfg.botToken;
         const chatId = overrideChatId || cfg.chatId;
         if (!token || !chatId) throw new Error('Chưa điền Bot Token hoặc Chat ID');
+        const isJpeg = Buffer.isBuffer(pngBuf) && pngBuf.length > 3 && pngBuf[0] === 0xff && pngBuf[1] === 0xd8;
         const mp = Up.buildMultipart({
             chat_id: String(chatId),
             caption: String(caption || '').slice(0, 1000),
             reply_markup: JSON.stringify(mainKeyboard(telemetry && telemetry.pos, valetOn)),
-        }, 'photo', 'bmw-mgu-snapshot.png', 'image/png', pngBuf);
+        }, 'photo', isJpeg ? 'bmw-mgu-360.jpg' : 'bmw-mgu-snapshot.png', isJpeg ? 'image/jpeg' : 'image/png', pngBuf);
 
         const res = await Up.request(this.upOpts, {
             host: TG_HOST,

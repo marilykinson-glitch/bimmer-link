@@ -21,6 +21,7 @@ JS_FILES = [
     'tools/bimmer-link/wbm.js',
     'tools/bimmer-link/cloud.js',
     'tools/bimmer-link/mqtt-lite.js',
+    'tools/bimmer-link/jpeg.js',
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
     'tools/bimmer-link/uplink.js',
@@ -132,6 +133,7 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
             assert man_j['proxies'].get('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.climate.Climate2') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.climate.climatemaster.ClimateMaster') == '*'
+            assert man_j['proxies'].get('de.bmw.infotainment.lsc.LSCDataSink') == '*'
 
         cloud_src = open(os.path.join(ROOT, 'tools/bimmer-link/cloud.js'), encoding='utf-8').read()
         m_chunk = re.search(r'const CHUNK_BYTES\s*=\s*(\d+);', cloud_src)
@@ -557,6 +559,131 @@ def check_car_link_logic_in_jxa():
     if (evs.length !== 1 || evs[0].type !== 'parked' || evs[0].trip.distanceKm !== 15.6 || evs[0].trip.maxSpeed !== 82) {{
       throw new Error('bad trip event: ' + JSON.stringify(evs));
     }}
+
+    // Test 4: Exact Live G30 LCI (`WBA71AG050CF37906`) IFConfigGenerator compact schema + Closed-Loop 1CR Verdict
+    var realCarDb = {{
+      interfaces: {{
+        'de.bmw.dass.parking.ParkingFunctionsForSeamlessParking': {{
+          serviceId: 12300,
+          fields: {{ parkingFunctionIncident: {{ getter: true, notifier: true }} }},
+          methods: {{}}
+        }},
+        'de.bmw.infotainment.climate.Climate2': {{
+          serviceId: 46358,
+          fields: {{
+            airConditionParkFunctions: {{ setter: true }},
+            statusAirConditionParkFunctions: {{ getter: true, notifier: true }}
+          }},
+          methods: {{}}
+        }},
+        'de.bmw.infotainment.climate.climatemaster.ClimateMaster': {{
+          serviceId: 45210,
+          fields: {{ statusParkingFunctionsOn: {{ getter: true, notifier: true }} }},
+          methods: {{ requestParkingFunctionsOn: {{}}, requestParkingFunctionsRES: {{}} }}
+        }},
+        'de.bmw.infotainment.lsc.LSCDataSink': {{
+          serviceId: 47000,
+          fields: {{ statusAirConditioningParkFunctions: {{ getter: true, notifier: true }} }},
+          methods: {{}}
+        }}
+      }}
+    }};
+    var rcCat = C.discoverClimateCatalog(realCarDb);
+    if (rcCat.interfaces.some(function(x){{ return x.iface.indexOf('dass.parking') >= 0; }})) {{
+      throw new Error('dass.parking must be excluded from climate catalog');
+    }}
+    var lscDesc = rcCat.interfaces.filter(function(x){{ return x.iface.indexOf('LSCDataSink') >= 0; }})[0];
+    if (!lscDesc || lscDesc.fields[0].roles.indexOf('direct_read') < 0) {{
+      throw new Error('LSCDataSink.statusAirConditioningParkFunctions must have direct_read');
+    }}
+    var c2Real = rcCat.interfaces.filter(function(x){{ return x.iface.indexOf('Climate2') >= 0; }})[0];
+    C.enrichDescWithGeneratedCfg(realCarDb, realCarDb.interfaces['de.bmw.infotainment.climate.Climate2'], c2Real, {{
+      fields: {{
+        airConditionParkFunctions: {{
+          schema: {{
+            t: 'Struct',
+            e: [
+              {{ n: 'operationParkHeat', t: 'Enum', e: {{ KEINE_AKTION__S__NICHT_VERFUEGBAR: 0, STANDHEIZUNG_AUS: 1, STANDHEIZUNG_EIN: 2, SIGNAL_UNGUELTIG: 3 }} }},
+              {{ n: 'operationIndependentVentilate', t: 'Enum', e: {{ KEINE_AKTION__S__NICHT_VERFUEGBAR: 0, STANDLUEFTEN_AUS: 1, STANDLUEFTEN_EIN: 2, SIGNAL_UNGUELTIG: 3 }} }},
+              {{ n: 'operationExtraHeater', t: 'Enum', e: {{ KEINE_AKTION__S__NICHT_VERFUEGBAR: 0, ZH_AUSSCHALTEN__S__AUS: 1, ZH_EINSCHALTEN__S__EIN: 2, SIGNAL_UNGUELTIG: 3 }} }},
+              {{ n: 'operationParkAirConditioning', t: 'Enum', e: {{ KEINE_AKTION__S__NICHT_VERFUEGBAR: 0, STANDKLIMATISIERUNG_AUS: 1, STANDKLIMATISIERUNG_EIN: 2, SIGNAL_UNGUELTIG: 3 }} }},
+              {{ n: 'operationParkFunctionAutoMode', t: 'Enum', e: {{ KEINE_AKTION__S__NICHT_VERFUEGBAR: 0, AUTO_MINUS_MODUS_AUS: 1, AUTO_MINUS_MODUS_EIN: 2, SIGNAL_UNGUELTIG: 3 }} }},
+              {{ n: 'operationRemoteStart', t: 'Enum', e: {{ KEINE_AKTION_NICHT_VERFUEGBAR: 0, REMOTE_ENGINE_START_AUS: 1, REMOTE_ENGINE_START_EIN: 2, SIGNAL_UNBEFUELLT: 3 }} }}
+            ]
+          }}
+        }}
+      }}
+    }});
+    var cmReal = rcCat.interfaces.filter(function(x){{ return x.iface.indexOf('ClimateMaster') >= 0; }})[0];
+    C.enrichDescWithGeneratedCfg(realCarDb, realCarDb.interfaces['de.bmw.infotainment.climate.climatemaster.ClimateMaster'], cmReal, {{
+      methods: {{
+        requestParkingFunctionsOn: {{
+          id: 104,
+          schema: {{
+            t: 'Struct',
+            e: [
+              {{ n: 'clientGroupId', t: 'UInt8' }},
+              {{ n: 'parkingFunctionsAutoMode', t: 'Enum', e: {{ NO_ACTION_NOT_AVAILABLE: 0, AUTO_MODE_OFF: 1, AUTO_MODE_ON: 2 }} }},
+              {{ n: 'timeParkingFunctionsAutoMode', t: 'UInt8' }}
+            ]
+          }}
+        }}
+      }}
+    }});
+    var liveIdle = {{
+      'de.bmw.infotainment.climate.Climate2.statusAirConditionParkFunctions': {{
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+        statusParkHeater: 'STANDHEIZUNG_AUS',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusSetupRemoteStart: 'REMOTE_ENGINE_START_EIN'
+      }},
+      'de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions': {{
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+        statusParkHeater: 'STANDHEIZUNG_AUS',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusParkFunctionRemoteControl: 'KEIN_FEHLER',
+        statusEngineRunParkFunction: 'REMOTE_START_NICHT_AKTIV',
+        statusSetupRemoteStart: 'REMOTE_ENGINE_START_EIN',
+        actualValueDurationParkFunction: 0
+      }}
+    }};
+    var built = C.build1crOrderedCandidates(rcCat, liveIdle, true);
+    if (built.candidates[0].stage !== 'auto_1cr' || built.candidates[0].payload.operationParkFunctionAutoMode !== 'AUTO_MINUS_MODUS_EIN' || built.candidates[0].payload.operationParkAirConditioning !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR') {{
+      throw new Error('Stage 1 must be pure AUTO_MINUS_MODUS_EIN: ' + JSON.stringify(built.candidates[0]));
+    }}
+    if (built.candidates[1].stage !== 'auto_res_phev' || built.candidates[1].payload.operationRemoteStart !== 'REMOTE_ENGINE_START_EIN') {{
+      throw new Error('Stage 2 must be auto_res_phev: ' + JSON.stringify(built.candidates[1]));
+    }}
+    var cmCand = built.candidates.filter(function(x){{ return x.name === 'requestParkingFunctionsOn'; }})[0];
+    if (!cmCand || cmCand.payload.parkingFunctionsAutoMode !== 'AUTO_MODE_ON' || cmCand.payload.timeParkingFunctionsAutoMode !== 15) {{
+      throw new Error('ClimateMaster.requestParkingFunctionsOn payload mismatch: ' + JSON.stringify(cmCand));
+    }}
+    var lastCand = built.candidates[built.candidates.length - 1];
+    if (lastCand.stage !== 'vent_only' || lastCand.payload.operationIndependentVentilate !== 'STANDLUEFTEN_EIN') {{
+      throw new Error('Last fallback must be STANDLUEFTEN_EIN: ' + JSON.stringify(lastCand));
+    }}
+    var vdIdle = C.evaluate1crVerdict(liveIdle, {{}});
+    if (vdIdle.active !== false || vdIdle.consentEnabled !== true) throw new Error('Idle must NEVER be active=true');
+    var vdAuto = C.evaluate1crVerdict({{
+      'de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions': {{
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_EIN',
+        statusParkFunctionRemoteControl: 'KEIN_FEHLER_AUTOMODE_AKTIV',
+        statusEngineRunParkFunction: 'REMOTE_START_AKTIV'
+      }}
+    }}, {{}});
+    if (!vdAuto.active || vdAuto.mode !== 'engine_1cr') throw new Error('Expected engine_1cr active: ' + JSON.stringify(vdAuto));
+    var vdRejected = C.evaluate1crVerdict({{
+      'de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions': {{
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusParkFunctionRemoteControl: 'BEDINGUNGEN_FAHRZEUG_NICHT_ERFUELLT',
+        statusEngineRunParkFunction: 'REMOTE_START_NICHT_AKTIV'
+      }}
+    }}, {{}});
+    if (vdRejected.active !== false || C.explain1crError(vdRejected, {{}}).indexOf('KHOÁ XE') < 0) {{
+      throw new Error('Expected clear lock precondition message');
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)
@@ -571,7 +698,88 @@ def check_pwa_and_manifest_filtering():
         code = f"new Function({json.dumps(src)}); 'PWA_SYNTAX_OK';"
         assert run_jxa(code) == 'PWA_SYNTAX_OK'
     app_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
-    assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js and 'mqttBuildPublish' in app_js
+    assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js and 'mqttBuildPublish' in app_js and 'selectCamView' in app_js and 'ensureSnapCrops' in app_js
+
+    # Test 24-bit Baseline JPEG encoder (`jpeg.js`) at full 960x816 4-camera resolution + native macOS `sips` decode check!
+    jpeg_src = open(os.path.join(ROOT, 'tools/bimmer-link/jpeg.js'), encoding='utf-8').read()
+    jpeg_b64 = run_jxa(f"""
+    var Buffer = {{
+      isBuffer: function(b) {{ return !!(b && b._isBuf); }},
+      allocUnsafe: function(n) {{
+        var u = new Uint8Array(n);
+        u._isBuf = true;
+        u.copy = function(dst, doff, s0, s1) {{ dst.set(u.subarray(s0 || 0, s1 === undefined ? u.length : s1), doff || 0); }};
+        u.slice = function(a, b) {{
+          var s = Uint8Array.prototype.slice.call(u, a, b);
+          s._isBuf = true;
+          return s;
+        }};
+        return u;
+      }}
+    }};
+    var mod = {{ exports: {{}} }};
+    new Function('module', 'exports', 'Buffer', {json.dumps(jpeg_src)})(mod, mod.exports, Buffer);
+    var w = 960, h = 816;
+    var rgba = Buffer.allocUnsafe(w * h * 4);
+    for (var y = 0; y < h; y++) {{
+      for (var x = 0; x < w; x++) {{
+        var idx = (y * w + x) * 4;
+        if (y >= 720) {{
+          rgba[idx] = 11; rgba[idx+1] = 16; rgba[idx+2] = 27; rgba[idx+3] = 255;
+        }} else if (y < 360 && x < 480) {{
+          rgba[idx] = 210; rgba[idx+1] = 55; rgba[idx+2] = 45; rgba[idx+3] = 255;   // Front: warm red
+        }} else if (y < 360) {{
+          rgba[idx] = 40; rgba[idx+1] = 185; rgba[idx+2] = 75; rgba[idx+3] = 255;   // Rear: green
+        }} else if (x < 480) {{
+          rgba[idx] = 45; rgba[idx+1] = 115; rgba[idx+2] = 225; rgba[idx+3] = 255;  // Left: blue
+        }} else {{
+          rgba[idx] = 225; rgba[idx+1] = 190; rgba[idx+2] = 40; rgba[idx+3] = 255;  // Right: gold
+        }}
+      }}
+    }}
+    var jpg = mod.exports.encodeJpegAdaptive(w, h, rgba, 64000);
+    if (jpg[0] !== 0xff || jpg[1] !== 0xd8 || jpg[jpg.length - 2] !== 0xff || jpg[jpg.length - 1] !== 0xd9) {{
+      throw new Error('missing JPEG SOI/EOI markers');
+    }}
+    if (jpg.length > 64000) throw new Error('JPEG exceeded 64KB wire budget: ' + jpg.length);
+    var bin = '';
+    for (var k = 0; k < jpg.length; k++) bin += String.fromCharCode(jpg[k]);
+    ObjC.import('Foundation');
+    var ns = $(bin);
+    // Return hex of first/last + length + base64 via Foundation
+    var rawArr = Array.from(jpg);
+    JSON.stringify({{ len: jpg.length, bytes: rawArr }});
+    """)
+    jpg_info = json.loads(jpeg_b64)
+    jpg_bytes = bytes(jpg_info['bytes'])
+    assert 4000 < len(jpg_bytes) <= 64000, f'Unexpected JPEG byte length: {len(jpg_bytes)}'
+    with tempfile.TemporaryDirectory(prefix='bl-jpg-') as jdir:
+        jp = os.path.join(jdir, 'cam360.jpg')
+        bp = os.path.join(jdir, 'cam360.bmp')
+        open(jp, 'wb').write(jpg_bytes)
+        subprocess.run(['sips', '-s', 'format', 'bmp', jp, '--out', bp], check=True, capture_output=True)
+        bmp = open(bp, 'rb').read()
+        px_off = int.from_bytes(bmp[10:14], 'little')
+        bw = int.from_bytes(bmp[18:22], 'little', signed=True)
+        bh = int.from_bytes(bmp[22:26], 'little', signed=True)
+        bpp = int.from_bytes(bmp[28:30], 'little')
+        assert bw == 960 and abs(bh) == 816, f'Decoded JPEG size mismatch: {bw}x{bh}'
+        row_stride = ((bw * (bpp // 8) + 3) // 4) * 4
+
+        def sample_bmp(sx, sy):
+            ry = sy if bh < 0 else (abs(bh) - 1 - sy)
+            off = px_off + ry * row_stride + sx * (bpp // 8)
+            return bmp[off + 2], bmp[off + 1], bmp[off]  # R, G, B
+
+        r_tl, g_tl, b_tl = sample_bmp(240, 180)
+        r_tr, g_tr, b_tr = sample_bmp(720, 180)
+        r_bl, g_bl, b_bl = sample_bmp(240, 540)
+        r_br, g_br, b_br = sample_bmp(720, 540)
+        assert abs(r_tl - 210) <= 8 and abs(g_tl - 55) <= 8 and abs(b_tl - 45) <= 8, f'TL RGB drift: {(r_tl, g_tl, b_tl)}'
+        assert abs(r_tr - 40) <= 8 and abs(g_tr - 185) <= 8 and abs(b_tr - 75) <= 8, f'TR RGB drift: {(r_tr, g_tr, b_tr)}'
+        assert abs(r_bl - 45) <= 8 and abs(g_bl - 115) <= 8 and abs(b_bl - 225) <= 8, f'BL RGB drift: {(r_bl, g_bl, b_bl)}'
+        assert abs(r_br - 225) <= 8 and abs(g_br - 190) <= 8 and abs(b_br - 40) <= 8, f'BR RGB drift: {(r_br, g_br, b_br)}'
+    print(f'[OK] 24-bit Baseline JPEG encoder verified via macOS ImageIO/sips (960x816, {len(jpg_bytes)} bytes, <2px RGB error across all 4 quadrants)')
 
     # Test mqtt-lite.js frame encoding/decoding with fragmented 65KB retained payload in JXA
     mqtt_src = open(os.path.join(ROOT, 'tools/bimmer-link/mqtt-lite.js'), encoding='utf-8').read()

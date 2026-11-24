@@ -130,12 +130,14 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 /* ---------------- Catalog Introspection (`db.datatypes`) & 1CR Payload Synthesis ---------------- */
 
 const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|stationary|precond|parkheat|parkclim|remotestart|independent|departure/i;
-const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|parkclim|park.*func|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt/i;
+const NON_CLIMATE_IFACE_RE = /^de\.bmw\.(dass\.parking|parking|infotainment\.(video|navigation|media|audio|tuner|speech|map))\./i;
+const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|parkclim|airCondition(?:ing)?ParkFunctions|parkingFunctions(?:On|RES)|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt|einschaltzeit|switchontime|zeitvorwahl|timer.*park|park.*timer/i;
 const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
-const NON_1CR_MEMBER_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|seatAuto|sitzheiz|sitzklima|armSupport|massage|fragrance|scent|ionis|ioniz|aura|acFond|climateFond|2Tier|3Tier|rearClimate|rearWindow|heckscheib|defrost|stratification|surfaceHeating|airDistribution|airBlow|airQuality|sync|functionECO|climateEco|climateSystemOn|intelligentPassenger|telephone|swipe|residualHeat|restwaerme/i;
+const NON_1CR_MEMBER_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|seatAuto|sitzheiz|sitzklima|armSupport|massage|fragrance|scent|ionis|ioniz|aura|acFond|climateFond|2Tier|3Tier|rearClimate|rearWindow|heckscheib|defrost|stratification|surfaceHeating|airDistribution|airBlow|airQuality|sync|functionECO|climateEco|climateSystemOn|intelligentPassenger|telephone|swipe|residualHeat|restwaerme|acSpecialFunction|extendedClimateFunctionalities/i;
 
 /** Classify a Climate / 1CR field or method into semantic roles for automatic invocation. */
 function classifyClimateMember(ifaceName, memberName, kind, meta) {
+    if (NON_CLIMATE_IFACE_RE.test(ifaceName)) return [];
     const full = ifaceName + '.' + memberName;
     const roles = [];
     const writable = kind === 'method' || !!(meta && meta.setter);
@@ -146,17 +148,17 @@ function classifyClimateMember(ifaceName, memberName, kind, meta) {
     if (!/^statusAvailable/i.test(memberName) && /remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|setupRemoteStart|parkingFunctionsRES|motorstart|climatis.*engine|climatiz.*engine|1cr/i.test(full)) {
         roles.push(writable ? 'consent_write' : 'consent_read');
     }
-    if (/airConditionParkFunctions|parkingFunctionsOn|requestParkingFunctionsOn|parkAirCond|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|independent.*clim|precond|direct.*oper|immediate|sofort|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatis.*now|climatiz.*now|instant.*clim|activate.*aux|start.*aux|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatis|set.*climatiz|switch.*climat|activate.*clim|start.*clim|stop.*clim/i.test(full)) {
-        if (!/timer|schedule|weekly|abfahrt|departure|zeitplan|^statusAvailable|controlClimateCompressor/i.test(memberName)) {
+    if (/airCondition(?:ing)?ParkFunctions|parkingFunctionsOn|requestParkingFunctionsOn|parkAirCond|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|independent.*clim|precond|direct.*oper|immediate|sofort|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatis.*now|climatiz.*now|instant.*clim|activate.*aux|start.*aux|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatis|set.*climatiz|switch.*climat|activate.*clim|start.*clim|stop.*clim/i.test(full)) {
+        if (!/timer|schedule|weekly|abfahrt|departure|zeitplan|einschaltzeit|switchontime|zeitvorwahl|^statusAvailable|controlClimateCompressor/i.test(memberName)) {
             roles.push(writable ? 'direct_write' : 'direct_read');
         }
     }
-    if (/timer|departure|abfahrt|schedule|weekly|zeitplan|startzeit/i.test(full)) {
+    if (/timer|departure|abfahrt|schedule|weekly|zeitplan|startzeit|einschaltzeit|switchontime|zeitvorwahl/i.test(full)) {
         roles.push(writable ? 'timer_write' : 'timer_read');
     }
     if (/temp/i.test(memberName) && !writable) roles.push('temp_read');
     if (/status|state|active|on|mode/i.test(memberName) && !writable && !roles.length) roles.push('state_read');
-    if (writable && !roles.length && (/acSpecialFunction|extendedClimateFunctionalities/i.test(memberName) || /Auxiliary|Stand|PreCond|ParkClim|Independent|Remote/i.test(ifaceName))) {
+    if (writable && !roles.length && /Auxiliary|Stand|PreCond|ParkClim|Independent|Remote/i.test(ifaceName)) {
         if (!/temp|setpoint|soll|fan|blower|geblaese|intensity|flap|distribution|defrost|recirc|sync|auto.*program|filter|style|front$/i.test(memberName)) {
             roles.push('master_candidate');
         }
@@ -319,8 +321,52 @@ function summarizeType(db, iv, t, depth) {
     return { kind: String(t.kind || t.type || (typeof ref === 'string' ? ref : 'primitive')) };
 }
 
+/** Parse IFConfigGenerator compact wire schema (`{ t: 'Struct'|'Enum'|'Union'|'UInt8'|'Bool', e: ... }`). */
+function parseCompactSchema(s, depth) {
+    if (!s || typeof s !== 'object' || (depth || 0) > 6) return null;
+    const tp = String(s.t || '');
+    if (!tp) return null;
+    if (/^enum$/i.test(tp) && s.e && typeof s.e === 'object') {
+        const values = [];
+        const valueMap = {};
+        Object.keys(s.e).forEach((nm) => {
+            values.push(nm);
+            valueMap[nm] = typeof s.e[nm] === 'number' ? s.e[nm] : Number(s.e[nm]) || 0;
+        });
+        return { kind: 'enum', values, valueMap };
+    }
+    if (/^struct$/i.test(tp) && Array.isArray(s.e)) {
+        return {
+            kind: 'struct',
+            fields: s.e.map((f) => ({
+                name: f && (f.n || f.name),
+                type: f && (f.t || f.type || null),
+                typeDef: parseCompactSchema(f, (depth || 0) + 1),
+            })),
+        };
+    }
+    if (/^union$/i.test(tp) && Array.isArray(s.e)) {
+        return {
+            kind: 'union',
+            branches: s.e.map((b) => ({
+                name: b && (b.n || b.name),
+                type: b && (b.t || b.type || null),
+                typeDef: parseCompactSchema(b, (depth || 0) + 1),
+            })),
+        };
+    }
+    if (/^array$/i.test(tp)) {
+        return { kind: 'array', elem: s.e ? parseCompactSchema(s.e, (depth || 0) + 1) : null };
+    }
+    return { kind: 'primitive', name: tp };
+}
+
 function parseMethodInArgs(db, iv, mm) {
     if (!mm || typeof mm !== 'object') return [];
+    if (mm.schema && typeof mm.schema === 'object') {
+        const cs = parseCompactSchema(mm.schema, 0);
+        if (cs && cs.kind === 'struct' && Array.isArray(cs.fields)) return cs.fields;
+    }
     const rawIn = mm.inArgs || mm.in || mm.parameters || mm.args || mm.input || mm.request;
     if (!rawIn) return [];
     if (Array.isArray(rawIn)) {
@@ -355,9 +401,17 @@ function enrichDescWithGeneratedCfg(db, iv, desc, cfg) {
     });
     const cfgFields = cfg.fields || cfg.attributes || {};
     (desc.fields || []).forEach((f) => {
-        if (f.typeDef && f.typeDef.kind !== 'primitive') return;
         const cf = cfgFields[f.name];
         if (!cf) return;
+        if (cf.schema && (!f.typeDef || f.typeDef.kind === 'primitive')) {
+            const parsedSchema = parseCompactSchema(cf.schema, 0);
+            if (parsedSchema) {
+                f.type = f.type || String(cf.schema.t || 'Struct');
+                f.typeDef = parsedSchema;
+                return;
+            }
+        }
+        if (f.typeDef && f.typeDef.kind !== 'primitive') return;
         const ftype = extractTypeRef(db, mergedIv, cf, 0);
         if (ftype) {
             f.type = typeof ftype === 'string' ? ftype : (f.type || null);
@@ -384,6 +438,7 @@ function discoverClimateCatalog(db) {
     const found = [];
 
     Object.keys(interfaces).sort().forEach((ifaceName) => {
+        if (NON_CLIMATE_IFACE_RE.test(ifaceName)) return;
         const iv = interfaces[ifaceName] || {};
         const fields = iv.fields || {};
         const methods = iv.methods || {};
@@ -540,37 +595,68 @@ function lookupSampleField(sample, fname) {
 }
 
 /**
- * Build a payload for a direct Start/Stop setter or method, guided by `typeDef` and any live `sample` struct.
+ * Build a payload for a direct Start/Stop setter or method, guided by `typeDef`, any live `sample` struct,
+ * and optional `opts` (`{ mode: 'auto_1cr' | 'auto_res_phev' | 'vent_only', clientGroupId, durationMin }`).
  */
-function buildDirectPayload(meta, wantOn, sample, numericEnum) {
+function buildDirectPayload(meta, wantOn, sample, numericEnum, opts) {
+    opts = opts || {};
+    const mode = opts.mode || 'auto_1cr';
+    const fnameSelf = (meta && meta.name) || '';
     const td = meta && meta.typeDef;
+    if (/clientGroupId/i.test(fnameSelf)) {
+        return opts.clientGroupId !== undefined ? opts.clientGroupId : 0;
+    }
+    if (/^timeParking|duration/i.test(fnameSelf)) {
+        return wantOn ? (opts.durationMin || 15) : 0;
+    }
     if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
         const out = {};
         const hasParkAc = td.fields.some((x) => x && /parkAirCond|standklima|precond/i.test(x.name || ''));
+        const hasAutoMode = td.fields.some((x) => x && /autoMode|automatik/i.test(x.name || ''));
         td.fields.forEach((f) => {
             if (!f || !f.name) return;
             const cur = lookupSampleField(sample, f.name);
-            if (/zone|id|index|slot|seat/i.test(f.name)) {
+            if (/clientGroupId/i.test(f.name)) {
+                out[f.name] = opts.clientGroupId !== undefined ? opts.clientGroupId : 0;
+            } else if (/^timeParking|duration/i.test(f.name)) {
+                out[f.name] = wantOn ? (opts.durationMin || 15) : 0;
+            } else if (/zone|id|index|slot|seat/i.test(f.name)) {
                 out[f.name] = cur !== undefined ? cur : (f.typeDef && f.typeDef.kind === 'enum' && f.typeDef.values[0] ? (numericEnum ? 0 : f.typeDef.values[0]) : 0);
-            } else if (/heater|standheiz|zuheiz|extraHeater/i.test(f.name)) {
+            } else if (/heater|standheiz|zuheiz|extraHeater|blower|geblaese/i.test(f.name)) {
                 out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
             } else if (/remoteStart|motorstart|res$/i.test(f.name)) {
-                out[f.name] = pickConsentKeepOrOn(f.typeDef, wantOn, cur, numericEnum);
-            } else if (/ventilat|standlueft/i.test(f.name) && hasParkAc && wantOn) {
-                out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
-            } else if (/blower|geblaese/i.test(f.name)) {
-                out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+                if (!wantOn) {
+                    out[f.name] = pickConsentKeepOrOn(f.typeDef, false, cur, numericEnum);
+                } else if (mode === 'vent_only') {
+                    out[f.name] = pickConsentKeepOrOn(f.typeDef, false, cur, numericEnum);
+                } else if (mode === 'auto_1cr' && hasAutoMode && typeof cur === 'string' && ENUM_ON_TOKEN_RE.test(cur) && !ENUM_OFF_TOKEN_RE.test(cur)) {
+                    // Consent is already active in iDrive (`REMOTE_ENGINE_START_EIN`); send clean NO_ACTION on settings bit in pure AutoMode command
+                    out[f.name] = pickConsentKeepOrOn(f.typeDef, false, cur, numericEnum);
+                } else {
+                    out[f.name] = pickEnumOrBool(f.typeDef, true, cur, numericEnum);
+                }
             } else if (/autoMode|automatik/i.test(f.name)) {
-                out[f.name] = hasParkAc ? pickNoActionOrOff(f.typeDef, cur, numericEnum) : (wantOn ? pickEnumOrBool(f.typeDef, true, cur, numericEnum) : pickNoActionOrOff(f.typeDef, cur, numericEnum));
+                if (!wantOn) out[f.name] = pickEnumOrBool(f.typeDef, false, cur, numericEnum);
+                else if (mode === 'vent_only') out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+                else out[f.name] = pickEnumOrBool(f.typeDef, true, cur, numericEnum);
+            } else if (/parkAirCond|standklima|precond/i.test(f.name)) {
+                if (!wantOn) out[f.name] = pickEnumOrBool(f.typeDef, false, cur, numericEnum);
+                else if (hasAutoMode && mode !== 'auto_res_phev') out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+                else out[f.name] = pickEnumOrBool(f.typeDef, true, cur, numericEnum);
+            } else if (/ventilat|standlueft/i.test(f.name)) {
+                if (!wantOn) out[f.name] = pickEnumOrBool(f.typeDef, false, cur, numericEnum);
+                else if (mode === 'vent_only') out[f.name] = pickEnumOrBool(f.typeDef, true, cur, numericEnum);
+                else if (hasParkAc || hasAutoMode) out[f.name] = pickNoActionOrOff(f.typeDef, cur, numericEnum);
+                else out[f.name] = pickEnumOrBool(f.typeDef, true, cur, numericEnum);
             } else {
-                out[f.name] = buildDirectPayload(f, wantOn, cur, numericEnum);
+                out[f.name] = buildDirectPayload(f, wantOn, cur, numericEnum, opts);
             }
         });
         return out;
     }
     if (td && td.kind === 'union' && Array.isArray(td.branches) && td.branches.length) {
         const br = td.branches[0];
-        const inner = buildDirectPayload(br, wantOn, undefined, numericEnum);
+        const inner = buildDirectPayload(br, wantOn, undefined, numericEnum, opts);
         const uObj = {};
         if (br && br.name) uObj[br.name] = inner;
         return uObj;
@@ -582,17 +668,255 @@ function buildDirectPayload(meta, wantOn, sample, numericEnum) {
         const out = {};
         const keys = Object.keys(sample);
         const hasParkAc = keys.some((k) => /parkAirCond|standklima|precond/i.test(k));
+        const hasAutoMode = keys.some((k) => /autoMode|automatik/i.test(k));
         keys.forEach((k) => {
-            const outKey = /^status[A-Z]/.test(k) ? (k[6].toLowerCase() + k.slice(7)) : k;
+            const outKey = /^status[A-Z]/.test(k) ? ('operation' + k.slice(6)) : k;
             if (/zone|slot|id|index/i.test(k)) out[outKey] = sample[k];
             else if (/heater|standheiz|zuheiz|extraHeater|blower|geblaese/i.test(k)) out[outKey] = pickNoActionOrOff(null, sample[k], numericEnum);
-            else if (/remoteStart|motorstart|res$/i.test(k)) out[outKey] = pickConsentKeepOrOn(null, wantOn, sample[k], numericEnum);
-            else if (/ventilat|standlueft/i.test(k) && hasParkAc && wantOn) out[outKey] = pickNoActionOrOff(null, sample[k], numericEnum);
+            else if (/remoteStart|motorstart|res$/i.test(k)) out[outKey] = pickConsentKeepOrOn(null, wantOn && mode !== 'vent_only', sample[k], numericEnum);
+            else if (/autoMode|automatik/i.test(k)) out[outKey] = mode === 'vent_only' ? pickNoActionOrOff(null, sample[k], numericEnum) : pickEnumOrBool(null, wantOn, sample[k], numericEnum);
+            else if (/parkAirCond|standklima|precond/i.test(k)) out[outKey] = (wantOn && hasAutoMode && mode !== 'auto_res_phev') ? pickNoActionOrOff(null, sample[k], numericEnum) : pickEnumOrBool(null, wantOn, sample[k], numericEnum);
+            else if (/ventilat|standlueft/i.test(k) && (hasParkAc || hasAutoMode) && wantOn && mode !== 'vent_only') out[outKey] = pickNoActionOrOff(null, sample[k], numericEnum);
             else out[outKey] = pickEnumOrBool(null, wantOn, sample[k], numericEnum);
         });
         return out;
     }
     return pickEnumOrBool(td, wantOn, sample, numericEnum);
+}
+
+/**
+ * Evaluate ground-truth 1CR / Park Climate state from live SOME/IP status structs (`LSCDataSink`, `Climate2`, `ClimateMaster`).
+ * Never guesses `active: true` unless an actual BMW ECU status field confirms activation.
+ */
+function evaluate1crVerdict(liveMap, telState) {
+    const lv = liveMap || {};
+    const tel = telState || {};
+    const lscPf = lv['de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions'] || {};
+    const c2Pf = lv['de.bmw.infotainment.climate.Climate2.statusAirConditionParkFunctions'] || {};
+    const cmPf = lv['de.bmw.infotainment.climate.climatemaster.ClimateMaster.statusParkingFunctionsOn'] || {};
+    const cmRes = lv['de.bmw.infotainment.climate.climatemaster.ClimateMaster.parkingFunctionsRES'] || {};
+    const dwa = lv['de.bmw.infotainment.lsc.LSCDataSink.dWAStatus'] || {};
+
+    const isEin = (v) => {
+        if (v === true) return true;
+        if (typeof v === 'string') return ENUM_ON_TOKEN_RE.test(v) && !ENUM_OFF_TOKEN_RE.test(v) && !ENUM_INVALID_RE.test(v);
+        return false;
+    };
+
+    const engRunRaw = String(lscPf.statusEngineRunParkFunction !== undefined ? lscPf.statusEngineRunParkFunction : '');
+    const rcStatus = String(lscPf.statusParkFunctionRemoteControl !== undefined ? lscPf.statusParkFunctionRemoteControl : '');
+    const engineRemoteActive = engRunRaw === 'REMOTE_START_AKTIV' || lscPf.statusEngineRunParkFunction === 2 || tel.condition === 3;
+    const autoModeActive = isEin(c2Pf.statusParkFunctionAutoMode) || isEin(lscPf.statusParkFunctionAutoMode) ||
+        rcStatus === 'KEIN_FEHLER_AUTOMODE_AKTIV' || lscPf.statusParkFunctionRemoteControl === 8 ||
+        cmPf.parkingFunctionsAutoMode === 'AUTO_MODE_ON' || cmPf.parkingFunctionsAutoMode === 2;
+    const parkAcActive = isEin(c2Pf.statusParkAirConditioning) || isEin(lscPf.statusParkAirConditioning);
+    const ventActive = isEin(c2Pf.statusIndependentVentilate) || isEin(lscPf.statusIndependentVentilate) || isEin(c2Pf.statusBlower);
+    const heaterActive = isEin(c2Pf.statusParkHeater) || isEin(lscPf.statusParkHeater);
+    const duration = typeof lscPf.actualValueDurationParkFunction === 'number' && lscPf.actualValueDurationParkFunction < 250
+        ? lscPf.actualValueDurationParkFunction : 0;
+
+    let consentEnabled = null;
+    const resStr = String(c2Pf.statusSetupRemoteStart || lscPf.statusSetupRemoteStart || '');
+    if (resStr) {
+        if (isEin(resStr)) consentEnabled = true;
+        else if (ENUM_OFF_TOKEN_RE.test(resStr)) consentEnabled = false;
+    } else if (typeof cmRes.remoteEngineStartEnabled === 'boolean') {
+        consentEnabled = cmRes.remoteEngineStartEnabled;
+    }
+
+    // Also inspect any other custom direct_read status field in liveMap (for non-G30 I-Steps)
+    let customActive = false;
+    Object.keys(lv).forEach((k) => {
+        if (/directOperationPark|statusPreconditioningParkAirConditioning/i.test(k)) {
+            const sv = lv[k];
+            if (typeof sv === 'string' && isEin(sv)) customActive = true;
+            else if (sv && typeof sv === 'object') {
+                Object.keys(sv).forEach((sk) => { if (isEin(sv[sk])) customActive = true; });
+            }
+        }
+    });
+
+    const active = !!(engineRemoteActive || autoModeActive || parkAcActive || ventActive || heaterActive || customActive);
+    let mode = 'off';
+    if (engineRemoteActive) mode = 'engine_1cr';
+    else if (autoModeActive || parkAcActive || heaterActive || customActive) mode = 'auto_precond';
+    else if (ventActive) mode = 'vent_only';
+
+    const dwaDisarmed = dwa.statusDWAArming === 'DWA_ENTSCHAERFT';
+    const hasRejectionCode = /^(BEDINGUNGEN_FAHRZEUG_NICHT_ERFUELLT|TANKRESERVE|BATTERIE|SPERRE_NACHLAUFZEIT|HEIZGERAETESTOERUNG|KOMPONENTENFEHLER)$/.test(rcStatus);
+
+    return {
+        active,
+        mode,
+        engineRemoteActive,
+        autoModeActive,
+        parkAcActive,
+        ventActive,
+        heaterActive,
+        duration,
+        consentEnabled,
+        remoteControlStatus: rcStatus,
+        hasRejectionCode,
+        dwaDisarmed,
+    };
+}
+
+function explain1crError(verdict, telState) {
+    const v = verdict || {};
+    const t = telState || {};
+    const rc = String(v.remoteControlStatus || '');
+    if (rc === 'TANKRESERVE') {
+        return 'Xe đang báo mức xăng dự trữ (TANKRESERVE) — BMW tự khoá đề nổ từ xa 1CR khi ít xăng.';
+    }
+    if (rc === 'BATTERIE') {
+        return 'Điện áp ắc quy 12V thấp (BATTERIE) — BMW tạm khoá 1CR để giữ điện đề máy.';
+    }
+    if (rc === 'SPERRE_NACHLAUFZEIT') {
+        return 'Đã chạy tối đa 2 chu kỳ đề nổ 1CR liên tiếp (SPERRE_NACHLAUFZEIT) — hãy bấm nổ máy trong xe 1 lần để reset.';
+    }
+    if (rc === 'HEIZGERAETESTOERUNG' || rc === 'KOMPONENTENFEHLER') {
+        return 'Hộp điều hoà IHKA báo lỗi phần cứng (' + rc + ').';
+    }
+    if (rc === 'BEDINGUNGEN_FAHRZEUG_NICHT_ERFUELLT') {
+        return 'Hộp BDC từ chối nổ máy (BEDINGUNGEN_FAHRZEUG_NICHT_ERFUELLT): hãy đóng kín 4 cửa/capo/cốp, cần số P, mang chìa ra ngoài và bấm KHOÁ XE trước!';
+    }
+    if (t.engineRunning) {
+        return 'Động cơ đang nổ máy sẵn — để dùng đề nổ từ xa 1CR hãy tắt máy, ra ngoài và bấm Khoá xe.';
+    }
+    if ((t.doorsOpen && t.doorsOpen.length) || t.trunkOpen || t.hoodOpen) {
+        return 'Cửa / cốp / nắp capo đang mở — BMW yêu cầu đóng kín và bấm Khoá xe từ bên ngoài mới cho kích 1CR.';
+    }
+    if (t.locked === false || v.dwaDisarmed) {
+        return 'Xe chưa khoá từ bên ngoài (đang ngồi trong xe / mở khoá) nên hộp IHKA/BDC giữ trạng thái AUS. Hãy tắt điện, ra ngoài đóng cửa & bấm KHOÁ XE rồi thử lại!';
+    }
+    return 'Hộp IHKA/BDC giữ trạng thái AUS (chưa kích hoạt). Hãy chắc chắn xe đã khoá từ bên ngoài (chìa ở ngoài xe) và đã có FSC 1CR trong DME/BDC.';
+}
+
+/**
+ * Build prioritized, non-destructive candidate calls for `start1cr` / `stop1cr` across SP15 (`Climate2`) & SP18 (`ClimateMaster`).
+ */
+function build1crOrderedCandidates(climateCatalog, liveMap, wantOn) {
+    const ifs = (climateCatalog && climateCatalog.interfaces) || [];
+    const lv = liveMap || {};
+    const out = [];
+    const consent = [];
+
+    const sampleFor = (iface, fname) => {
+        if (lv[iface + '.' + fname] !== undefined) return lv[iface + '.' + fname];
+        const bare = String(fname || '').replace(/^(operation|control|request|set)/i, '');
+        if (bare && lv[iface + '.status' + bare[0].toUpperCase() + bare.slice(1)] !== undefined) {
+            return lv[iface + '.status' + bare[0].toUpperCase() + bare.slice(1)];
+        }
+        return undefined;
+    };
+
+    const ifaceHasLive = (iface) => {
+        const p = iface + '.';
+        return Object.keys(lv).some((k) => k.indexOf(p) === 0);
+    };
+
+    // Sort live interfaces first (e.g. Climate2 on SP15 G30, ClimateMaster on SP18 G20/G05)
+    const sorted = ifs.slice().sort((a, b) => (ifaceHasLive(b.iface) ? 1 : 0) - (ifaceHasLive(a.iface) ? 1 : 0));
+
+    // Consent candidates (only if Remote Engine Start checkbox was unchecked)
+    if (wantOn) {
+        sorted.forEach((d) => {
+            (d.fields || []).forEach((f) => {
+                if (f.setter && f.roles.indexOf('consent_write') >= 0) {
+                    const sm = sampleFor(d.iface, f.name);
+                    consent.push({
+                        iface: d.iface, kind: 'setter', name: f.name, stage: 'consent',
+                        payload: buildDirectPayload(f, true, sm, false),
+                        altPayload: buildDirectPayload(f, true, sm, true),
+                    });
+                }
+            });
+            (d.methods || []).forEach((m) => {
+                if (m.roles.indexOf('consent_write') >= 0 && m.inArgs && m.inArgs.length) {
+                    const mk = (num) => {
+                        const o = {};
+                        m.inArgs.forEach((a) => { if (a && a.name) o[a.name] = buildDirectPayload(a, true, undefined, num, { clientGroupId: 0 }); });
+                        return o;
+                    };
+                    consent.push({
+                        iface: d.iface, kind: 'method', name: m.name, stage: 'consent',
+                        payload: mk(false), altPayload: mk(true),
+                    });
+                }
+            });
+        });
+    }
+
+    const ventFallbacks = [];
+    sorted.forEach((d) => {
+        (d.fields || []).forEach((f) => {
+            if (!f.setter || f.roles.indexOf('direct_write') < 0) return;
+            const sm = sampleFor(d.iface, f.name);
+            const td = f.typeDef;
+            const hasAuto = td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.some((x) => x && /autoMode|automatik/i.test(x.name || ''));
+            const hasVent = td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.some((x) => x && /ventilat|standlueft/i.test(x.name || ''));
+
+            if (!wantOn) {
+                out.push({
+                    iface: d.iface, kind: 'setter', name: f.name, stage: 'stop',
+                    payload: buildDirectPayload(f, false, sm, false),
+                    altPayload: buildDirectPayload(f, false, sm, true),
+                });
+                return;
+            }
+
+            // Stage 1: Clean single-flag AutoMode ON (exact BMW iDrive / RCN 1CR trigger)
+            out.push({
+                iface: d.iface, kind: 'setter', name: f.name, stage: 'auto_1cr',
+                payload: buildDirectPayload(f, true, sm, false, { mode: 'auto_1cr' }),
+                altPayload: buildDirectPayload(f, true, sm, true, { mode: 'auto_1cr' }),
+            });
+
+            // Stage 2: Combined AutoMode ON + RemoteStart EIN + ParkAC EIN (covers explicit consent + PHEV 530e/330e)
+            if (hasAuto) {
+                const p2 = buildDirectPayload(f, true, sm, false, { mode: 'auto_res_phev' });
+                if (JSON.stringify(p2) !== JSON.stringify(out[out.length - 1].payload)) {
+                    out.push({
+                        iface: d.iface, kind: 'setter', name: f.name, stage: 'auto_res_phev',
+                        payload: p2,
+                        altPayload: buildDirectPayload(f, true, sm, true, { mode: 'auto_res_phev' }),
+                    });
+                }
+            }
+
+            // Deferred Stage 4: Independent cabin blower (`STANDLUEFTEN_EIN`) ONLY if AutoMode / 1CR stayed completely AUS
+            if (hasVent && hasAuto) {
+                ventFallbacks.push({
+                    iface: d.iface, kind: 'setter', name: f.name, stage: 'vent_only',
+                    payload: buildDirectPayload(f, true, sm, false, { mode: 'vent_only' }),
+                    altPayload: buildDirectPayload(f, true, sm, true, { mode: 'vent_only' }),
+                });
+            }
+        });
+
+        (d.methods || []).forEach((m) => {
+            if (m.roles.indexOf('direct_write') < 0) return;
+            const groupIds = wantOn && (m.inArgs || []).some((a) => a && /clientGroupId/i.test(a.name || '')) ? [0, 1] : [0];
+            groupIds.forEach((gid) => {
+                const mk = (num) => {
+                    const o = {};
+                    (m.inArgs || []).forEach((a) => {
+                        if (a && a.name) o[a.name] = buildDirectPayload(a, wantOn, undefined, num, { clientGroupId: gid, durationMin: 15 });
+                    });
+                    return o;
+                };
+                out.push({
+                    iface: d.iface, kind: 'method', name: m.name,
+                    stage: wantOn ? 'climatemaster' : 'stop',
+                    hasLiveProvider: ifaceHasLive(d.iface),
+                    payload: mk(false),
+                    altPayload: mk(true),
+                });
+            });
+        });
+    });
+
+    return { consentCandidates: consent, candidates: out.concat(ventFallbacks) };
 }
 
 /**
@@ -682,6 +1006,7 @@ class TelemetryTracker {
             climate1cr: {
                 consentEnabled: null,
                 active: false,
+                mode: 'off',
                 rawState: '',
                 timerText: '',
                 lastAction: '',
@@ -1107,7 +1432,7 @@ async function runWorker() {
                     const key = desc.iface + '.' + f.name;
                     const onVal = (val) => {
                         climateLive[key] = val;
-                        interpretClimateField(desc.iface, f, val, pushPatch, tracker.state);
+                        interpretClimateField(desc.iface, f, val, pushPatch, tracker.state, climateLive);
                     };
                     if (f.notifier) { try { px.subscribe({ name: f.name, onReceive: onVal }); } catch (e) {} }
                     if (f.getter) { try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {} }
@@ -1278,7 +1603,39 @@ async function runWorker() {
         if (Object.keys(patch).length) pushPatch(patch);
     }
 
-    /** Execute 1CR Start / Stop / Schedule or Raw Inspector test across all live instances & both enum encodings */
+    const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    /** Perform fresh SOME/IP getValue reads on all live 1CR status fields and return ground-truth verdict. */
+    async function refreshLive1crVerdict() {
+        const probes = [
+            ['de.bmw.infotainment.lsc.LSCDataSink', 'statusAirConditioningParkFunctions'],
+            ['de.bmw.infotainment.lsc.LSCDataSink', 'dWAStatus'],
+            ['de.bmw.infotainment.climate.Climate2', 'statusAirConditionParkFunctions'],
+            ['de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'statusParkingFunctionsOn'],
+        ];
+        for (let i = 0; i < probes.length; i++) {
+            const ifn = probes[i][0], fn = probes[i][1];
+            const holder = climateProxies[ifn];
+            if (!holder || !holder.list || !holder.list.length) continue;
+            const hasLive = Object.keys(climateLive).some((k) => k.indexOf(ifn + '.') === 0);
+            if (!hasLive && !holder.list[0].available) continue;
+            try {
+                const v = await nativeTick(() => within(holder.list[0].proxy.getValue(fn, 650), 750, fn));
+                if (v !== undefined && v !== null) climateLive[ifn + '.' + fn] = v;
+            } catch (e) {}
+        }
+        const verdict = evaluate1crVerdict(climateLive, tracker.state);
+        tracker.state.climate1cr.active = verdict.active;
+        tracker.state.climate1cr.mode = verdict.mode || 'off';
+        if (verdict.consentEnabled !== null) tracker.state.climate1cr.consentEnabled = verdict.consentEnabled;
+        const lscRaw = climateLive['de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions'] ||
+            climateLive['de.bmw.infotainment.climate.Climate2.statusAirConditionParkFunctions'];
+        if (lscRaw) tracker.state.climate1cr.rawState = JSON.stringify(lscRaw).slice(0, 120);
+        pushPatch({});
+        return verdict;
+    }
+
+    /** Execute 1CR Prepare / InvokeOne / Verify / Start / Stop / Schedule or Raw Inspector test */
     async function execute1CR(action, params) {
         params = params || {};
         const trace = [];
@@ -1289,18 +1646,7 @@ async function runWorker() {
             return Object.keys(climateLive).some((k) => k.indexOf(prefix) === 0);
         };
 
-        const sampleForMember = (iface, fname) => {
-            const exact = climateLive[iface + '.' + fname];
-            if (exact !== undefined) return exact;
-            const bare = String(fname || '').replace(/^(operation|control|request|set)/i, '');
-            if (bare) {
-                const stKey = iface + '.status' + bare[0].toUpperCase() + bare.slice(1);
-                if (climateLive[stKey] !== undefined) return climateLive[stKey];
-            }
-            return undefined;
-        };
-
-        const callOne = async (iface, kind, name, payload) => {
+        const callOne = async (iface, kind, name, payload, customTmo) => {
             const holder = climateProxies[iface];
             if (!holder || !holder.list || !holder.list.length) throw new Error('Proxy not open: ' + iface);
             const hasLive = ifaceHasLive(iface);
@@ -1308,13 +1654,13 @@ async function runWorker() {
             let lastErr = null;
             for (let i = 0; i < sorted.length; i++) {
                 const inst = sorted[i];
-                const tmo = (inst.available || hasLive) ? 3500 : 1500;
+                const tmo = customTmo || ((inst.available || hasLive) ? 2600 : 1100);
                 try {
                     if (kind === 'setter') {
-                        await nativeTick(() => within(inst.proxy.setValue(name, payload, tmo), tmo + 400, iface + '.' + name));
+                        await nativeTick(() => within(inst.proxy.setValue(name, payload, tmo), tmo + 300, iface + '.' + name));
                         return { ok: true, iface, inst: inst.inst, kind, name, payload };
                     }
-                    const res = await nativeTick(() => within(inst.proxy.callMethod(name, payload || {}, tmo), tmo + 400, iface + '.' + name));
+                    const res = await nativeTick(() => within(inst.proxy.callMethod(name, payload || {}, tmo), tmo + 300, iface + '.' + name));
                     return { ok: true, iface, inst: inst.inst, kind, name, payload, response: res };
                 } catch (e) {
                     lastErr = e;
@@ -1323,63 +1669,76 @@ async function runWorker() {
             throw lastErr || new Error('No instance answered for ' + iface + '.' + name);
         };
 
-        const callSmart = async (iface, kind, meta, buildFn) => {
-            const pStr = buildFn(false);
+        const callWithAlt = async (iface, kind, name, payload, altPayload, customTmo) => {
             try {
-                return await callOne(iface, kind, meta.name, pStr);
+                return await callOne(iface, kind, name, payload, customTmo);
             } catch (e1) {
-                const pNum = buildFn(true);
-                if (JSON.stringify(pNum) !== JSON.stringify(pStr)) {
-                    try {
-                        return await callOne(iface, kind, meta.name, pNum);
-                    } catch (e2) {
-                        lastErrAttach(e1, e2);
-                    }
-                }
-                // Extra struct key prefix fallback if typeDef was absent and sample came from status*
-                if (kind === 'setter' && (!meta.typeDef || meta.typeDef.kind === 'primitive') && pStr && typeof pStr === 'object' && !Array.isArray(pStr)) {
-                    const opObj = {};
-                    Object.keys(pStr).forEach((k) => {
-                        const opKey = /^operation[A-Z]/.test(k) ? k : ('operation' + k[0].toUpperCase() + k.slice(1));
-                        opObj[opKey] = pStr[k];
-                    });
-                    if (JSON.stringify(opObj) !== JSON.stringify(pStr)) {
-                        return await callOne(iface, kind, meta.name, opObj);
-                    }
+                if (altPayload !== undefined && JSON.stringify(altPayload) !== JSON.stringify(payload)) {
+                    return await callOne(iface, kind, name, altPayload, customTmo);
                 }
                 throw e1;
             }
         };
 
-        function lastErrAttach(e1, e2) {
-            if (e1 && e2 && e2.message && String(e1.message).indexOf(e2.message) < 0) {
-                e1.message = e1.message + ' | ' + e2.message;
-            }
+        const callSmart = async (iface, kind, meta, buildFn) => {
+            const pStr = buildFn(false);
+            const pNum = buildFn(true);
+            return callWithAlt(iface, kind, meta.name, pStr, pNum);
+        };
+
+        if (action === 'prepare_1cr') {
+            const wantOn = !!params.wantOn;
+            const roleKey = wantOn ? 'start' : 'stop';
+            const verdict = await refreshLive1crVerdict();
+            const built = build1crOrderedCandidates(climateCatalog, climateLive, wantOn);
+            const rawPin = savedProfile && savedProfile[roleKey];
+            const isLegacyBadPin = wantOn && rawPin && rawPin.payload &&
+                rawPin.payload.operationParkAirConditioning === 'STANDKLIMATISIERUNG_EIN' &&
+                rawPin.payload.operationParkFunctionAutoMode === 'KEINE_AKTION__S__NICHT_VERFUEGBAR' &&
+                rawPin.payload.operationIndependentVentilate === 'KEINE_AKTION__S__NICHT_VERFUEGBAR';
+            const pinned = (rawPin && !isLegacyBadPin) ? [Object.assign({ stage: 'pinned' }, rawPin)] : [];
+            return {
+                ok: true,
+                verdict,
+                consentCandidates: built.consentCandidates,
+                candidates: pinned.concat(built.candidates),
+            };
         }
 
-        const orderedCatalogInterfaces = () => climateCatalog.interfaces.slice().sort((a, b) => {
-            const score = (d) => {
-                let sc = 0;
-                if (ifaceHasLive(d.iface)) sc += 100;
-                const h = climateProxies[d.iface];
-                if (h && h.list && h.list.some((x) => x.available)) sc += 50;
-                if ((d.fields || []).some((f) => f.setter && f.roles.indexOf('direct_write') >= 0)) sc += 25;
-                if ((d.methods || []).some((m) => m.roles.indexOf('direct_write') >= 0)) sc += 10;
-                return sc;
+        if (action === 'verify_1cr') {
+            if (params.waitMs > 0) await sleepMs(Math.min(2500, Number(params.waitMs) || 0));
+            const verdict = await refreshLive1crVerdict();
+            if (params.lastAction) tracker.state.climate1cr.lastAction = String(params.lastAction);
+            if (params.lastResult) tracker.state.climate1cr.lastResult = String(params.lastResult);
+            if (params.lastAction || params.lastResult) pushPatch({});
+            return {
+                ok: true,
+                verdict,
+                explanation: verdict.active ? '' : explain1crError(verdict, tracker.state),
             };
-            return score(b) - score(a);
-        });
+        }
+
+        if (action === 'invoke_one') {
+            try {
+                const r = await callWithAlt(params.iface, params.kind, params.name, params.payload, params.altPayload, params.timeoutMs || 2200);
+                return { ok: true, trace: [r], response: r.response || null };
+            } catch (e) {
+                return { ok: false, error: e.message };
+            }
+        }
 
         if (action === 'invoke_raw') {
             try {
                 const r = await callOne(params.iface, params.kind, params.name, params.payload);
+                await sleepMs(650);
+                const verdict = await refreshLive1crVerdict();
                 if (params.saveAsDefault) {
                     const cur = savedProfile || {};
                     cur[params.role || 'start'] = { iface: params.iface, kind: params.kind, name: params.name, payload: params.payload };
                     writeJsonSafe(PROFILE_PATH, cur);
                 }
-                emit({ ev: 'log', level: 'info', text: '1CR raw ok: ' + params.iface + '.' + params.name });
-                return { ok: true, trace: [r], saved: !!params.saveAsDefault };
+                emit({ ev: 'log', level: 'info', text: '1CR raw sent: ' + params.iface + '.' + params.name + ' -> active=' + verdict.active + ' (' + verdict.mode + ')' });
+                return { ok: true, verified: verdict.active, verdict, trace: [r], saved: !!params.saveAsDefault };
             } catch (e) {
                 emit({ ev: 'log', level: 'warn', text: '1CR raw err (' + params.iface + '.' + params.name + '): ' + e.message });
                 return { ok: false, error: e.message, trace: [{ ok: false, error: e.message }] };
@@ -1388,149 +1747,54 @@ async function runWorker() {
 
         if (action === 'start1cr' || action === 'stop1cr') {
             const wantOn = action === 'start1cr';
-            const roleKey = wantOn ? 'start' : 'stop';
-            const sortedIfs = orderedCatalogInterfaces();
-
-            if (savedProfile && savedProfile[roleKey]) {
-                const p = savedProfile[roleKey];
+            const prep = await execute1CR('prepare_1cr', { wantOn });
+            if (wantOn && prep.verdict.consentEnabled === false) {
+                for (let ci = 0; ci < prep.consentCandidates.length; ci++) {
+                    const cc = prep.consentCandidates[ci];
+                    if (!climateProxies[cc.iface]) continue;
+                    try { trace.push(await callWithAlt(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 1800)); } catch (e) {}
+                }
+            }
+            let verifiedMethod = '';
+            let finalVerdict = prep.verdict;
+            for (let i = 0; i < prep.candidates.length; i++) {
+                const cd = prep.candidates[i];
+                if (!climateProxies[cd.iface]) continue;
+                if (cd.kind === 'method' && cd.hasLiveProvider === false) continue;
                 try {
-                    const r = await callOne(p.iface, p.kind, p.name, p.payload);
+                    const r = await callWithAlt(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 2000);
                     trace.push(r);
-                    tracker.state.climate1cr.active = wantOn;
-                    tracker.state.climate1cr.lastAction = wantOn ? 'Kích nổ 1CR (Ghim)' : 'Tắt 1CR (Ghim)';
-                    tracker.state.climate1cr.lastResult = 'Đã gửi tới ' + p.iface.split('.').pop() + '.' + p.name;
-                    pushPatch({});
-                    return { ok: true, method: p.iface.split('.').pop() + '.' + p.name, trace };
+                    await sleepMs(750);
+                    finalVerdict = await refreshLive1crVerdict();
+                    if (wantOn && finalVerdict.active) {
+                        verifiedMethod = cd.iface.split('.').pop() + '.' + cd.name + ' (' + cd.stage + ')';
+                        break;
+                    }
+                    if (!wantOn && !finalVerdict.active) {
+                        verifiedMethod = cd.iface.split('.').pop() + '.' + cd.name;
+                    }
                 } catch (e) {
-                    trace.push({ ok: false, step: 'pinned', error: e.message });
+                    trace.push({ ok: false, iface: cd.iface, name: cd.name, error: e.message });
                 }
             }
-
-            // Enable 1CR Remote Engine Start consent flag first when starting (unless already confirmed ON on live bus)
-            const consentCandidates = [];
-            if (wantOn && tracker.state.climate1cr.consentEnabled !== true) {
-                for (let i = 0; i < sortedIfs.length; i++) {
-                    const d = sortedIfs[i];
-                    for (let k = 0; k < d.fields.length; k++) {
-                        const f = d.fields[k];
-                        if (f.setter && f.roles.indexOf('consent_write') >= 0) {
-                            const sample = sampleForMember(d.iface, f.name);
-                            consentCandidates.push({
-                                iface: d.iface,
-                                kind: 'setter',
-                                name: f.name,
-                                payload: buildDirectPayload(f, true, sample, false),
-                                altPayload: buildDirectPayload(f, true, sample, true),
-                            });
-                            if (!climateProxies[d.iface]) continue;
-                            try { trace.push(await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, true, sample, num))); } catch (e) {
-                                trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
-                            }
-                        }
-                    }
-                    for (let k = 0; k < d.methods.length; k++) {
-                        const m = d.methods[k];
-                        if (m.roles.indexOf('consent_write') >= 0) {
-                            const mkConsent = (num) => {
-                                const argObj = {};
-                                m.inArgs.forEach((a) => {
-                                    if (a && a.name) argObj[a.name] = buildDirectPayload(a, true, undefined, num);
-                                });
-                                return argObj;
-                            };
-                            consentCandidates.push({
-                                iface: d.iface,
-                                kind: 'method',
-                                name: m.name,
-                                payload: mkConsent(false),
-                                altPayload: mkConsent(true),
-                            });
-                            if (!climateProxies[d.iface] || !ifaceHasLive(d.iface)) continue;
-                            try { trace.push(await callSmart(d.iface, 'method', m, mkConsent)); } catch (e) {
-                                trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Try all discovered direct-operation setters & methods on LIVE interfaces first, then fallbacks
-            let succeeded = null;
-            const attemptedCalls = [];
-            const rolePasses = ['direct_write', 'master_candidate'];
-            for (let rp = 0; rp < rolePasses.length && !succeeded; rp++) {
-                const targetRole = rolePasses[rp];
-                for (let i = 0; i < sortedIfs.length && !succeeded; i++) {
-                    const d = sortedIfs[i];
-                    const pStrSetter = (f) => buildDirectPayload(f, wantOn, sampleForMember(d.iface, f.name), false);
-                    const pNumSetter = (f) => buildDirectPayload(f, wantOn, sampleForMember(d.iface, f.name), true);
-                    for (let k = 0; k < d.fields.length; k++) {
-                        const f = d.fields[k];
-                        if (!f.setter || f.roles.indexOf(targetRole) < 0) continue;
-                        const p1 = pStrSetter(f);
-                        const p2 = pNumSetter(f);
-                        attemptedCalls.push({ iface: d.iface, kind: 'setter', name: f.name, payload: p1, altPayload: p2 });
-                        if (!climateProxies[d.iface]) continue;
-                        try {
-                            const r = await callSmart(d.iface, 'setter', f, (num) => (num ? p2 : p1));
-                            trace.push(r);
-                            emit({ ev: 'log', level: 'info', text: '1CR ' + action + ' ok via ' + d.iface + '.' + f.name });
-                            if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
-                        } catch (e) {
-                            trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
-                            emit({ ev: 'log', level: 'warn', text: '1CR ' + d.iface.split('.').pop() + '.' + f.name + ' err: ' + e.message });
-                        }
-                    }
-                    for (let k = 0; k < d.methods.length; k++) {
-                        const m = d.methods[k];
-                        if (m.roles.indexOf(targetRole) < 0) continue;
-                        const makeArgs = (num) => {
-                            const argObj = {};
-                            m.inArgs.forEach((a) => {
-                                if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
-                            });
-                            return argObj;
-                        };
-                        attemptedCalls.push({ iface: d.iface, kind: 'method', name: m.name, payload: makeArgs(false), altPayload: makeArgs(true) });
-                        if (!climateProxies[d.iface]) continue;
-                        try {
-                            const r = await callSmart(d.iface, 'method', m, makeArgs);
-                            trace.push(r);
-                            emit({ ev: 'log', level: 'info', text: '1CR ' + action + ' ok via ' + d.iface + '.' + m.name + '()' });
-                            if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
-                        } catch (e) {
-                            trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
-                            emit({ ev: 'log', level: 'warn', text: '1CR ' + d.iface.split('.').pop() + '.' + m.name + '() err: ' + e.message });
-                        }
-                    }
-                }
-            }
-
             tracker.state.climate1cr.lastAction = wantOn ? 'Kích nổ / Làm mát 1CR' : 'Tắt làm mát 1CR';
-            if (succeeded) {
-                tracker.state.climate1cr.active = wantOn;
-                const lockHint = (wantOn && (tracker.state.locked === false || (tracker.state.condition && tracker.state.condition >= 5)))
-                    ? ' (Lưu ý: đang ngồi trong xe / chưa khoá ngoài nên quạt làm mát chạy; muốn đề nổ động cơ 1CR hãy ra ngoài bấm Khoá xe)'
-                    : '';
-                tracker.state.climate1cr.lastResult = 'Đã kích qua ' + succeeded + lockHint;
+            if ((wantOn && finalVerdict.active) || (!wantOn && !finalVerdict.active)) {
+                tracker.state.climate1cr.lastResult = wantOn ? ('Đang chạy: ' + (verifiedMethod || finalVerdict.mode)) : 'Đã tắt 1CR';
                 pushPatch({});
-                return { ok: true, method: succeeded + lockHint, trace };
+                return { ok: true, verified: true, method: verifiedMethod || finalVerdict.mode, verdict: finalVerdict, trace };
             }
-            const openNames = Object.keys(climateProxies).map((x) => x.split('.').pop());
-            const discoveredMembers = {};
-            Object.keys(climateProxies).forEach((ifn) => {
-                const d = climateProxies[ifn].desc;
-                discoveredMembers[ifn] = {
-                    setters: (d.fields || []).filter((f) => f.setter).map((f) => f.name),
-                    methods: (d.methods || []).map((m) => m.name),
-                    getters: (d.fields || []).filter((f) => !f.setter).map((f) => f.name),
-                };
-            });
-            tracker.state.climate1cr.lastResult = !climateCatalog.interfaces.length
-                ? 'Không tìm thấy giao diện Climate trong catalog xe'
-                : ('Đã mở ' + openNames.length + '/' + climateCatalog.interfaces.length + ' cổng (' + openNames.slice(0, 5).join(', ') + ') — mở tab Dò 1CR để bấm thử 1 chạm');
+            const errMsg = explain1crError(finalVerdict, tracker.state);
+            tracker.state.climate1cr.lastResult = errMsg.slice(0, 90);
             pushPatch({});
-            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers, consentCandidates, candidates: attemptedCalls };
+            return {
+                ok: false,
+                verified: false,
+                error: errMsg,
+                verdict: finalVerdict,
+                trace,
+                consentCandidates: prep.consentCandidates,
+                candidates: prep.candidates,
+            };
         }
 
         if (action === 'schedule1cr') {
@@ -1731,7 +1995,7 @@ async function runWorker() {
         } else if (cmd.op === 'cam_release') {
             const r = await releaseCam360();
             emit({ ev: 'reply', reqId, ok: true, result: r });
-        } else if (cmd.op === 'start1cr' || cmd.op === 'stop1cr' || cmd.op === 'schedule1cr' || cmd.op === 'invoke_raw') {
+        } else if (cmd.op === 'start1cr' || cmd.op === 'stop1cr' || cmd.op === 'schedule1cr' || cmd.op === 'invoke_raw' || cmd.op === 'prepare_1cr' || cmd.op === 'verify_1cr' || cmd.op === 'invoke_one') {
             const res = await execute1CR(cmd.op, cmd.params);
             emit({ ev: 'reply', reqId, ok: res.ok, result: res, state: tracker.state });
         } else if (cmd.op === 'schema') {
@@ -1886,7 +2150,7 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
     }
 }
 
-function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
+function interpretClimateField(iface, fieldDesc, val, pushPatch, curState, liveMap) {
     if (val === undefined || val === null) return;
     const s = JSON.stringify(val);
     const c1 = Object.assign({}, curState.climate1cr);
@@ -1894,7 +2158,7 @@ function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
     // Check embedded 1CR setup consent inside structs such as `statusAirConditionParkFunctions.statusSetupRemoteStart`
     if (val && typeof val === 'object' && !Array.isArray(val)) {
         Object.keys(val).forEach((k) => {
-            if (/remoteStart|motorstart|RES$/i.test(k) && !/Available/i.test(k)) {
+            if (/remoteStart|motorstart|RES$/i.test(k) && !/Available|EngineRun/i.test(k)) {
                 const sv = String(val[k]);
                 if (ENUM_ON_TOKEN_RE.test(sv) && !ENUM_OFF_TOKEN_RE.test(sv)) c1.consentEnabled = true;
                 else if (ENUM_OFF_TOKEN_RE.test(sv)) c1.consentEnabled = false;
@@ -1907,14 +2171,19 @@ function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
 
     if (fieldDesc.roles.indexOf('direct_read') >= 0 || fieldDesc.roles.indexOf('direct_write') >= 0) {
         c1.rawState = fieldDesc.name + '=' + s.slice(0, 80);
-        if (val && typeof val === 'object' && !Array.isArray(val)) {
-            const opKeys = Object.keys(val).filter((k) => /parkAirCond|standklima|independentVent|standlueft|parkHeat|standheiz|parkingFunctionsOn|precond/i.test(k) && !/remoteStart|autoMode|Available/i.test(k));
+        if (liveMap && typeof liveMap === 'object') {
+            const vd = evaluate1crVerdict(liveMap, curState);
+            c1.active = vd.active;
+            c1.mode = vd.mode || 'off';
+            if (vd.consentEnabled !== null) c1.consentEnabled = vd.consentEnabled;
+        } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+            const opKeys = Object.keys(val).filter((k) => /parkAirCond|standklima|independentVent|standlueft|parkHeat|standheiz|parkingFunctions|autoMode|EngineRunParkFunction|RemoteControl|precond|blower/i.test(k) && !/setupRemoteStart|Available/i.test(k));
             if (opKeys.length) {
                 let anyOn = false;
                 let anyOff = false;
                 opKeys.forEach((k) => {
                     const sv = String(val[k]);
-                    if (ENUM_ON_TOKEN_RE.test(sv) && !ENUM_OFF_TOKEN_RE.test(sv) && !ENUM_INVALID_RE.test(sv)) anyOn = true;
+                    if ((ENUM_ON_TOKEN_RE.test(sv) || sv === 'KEIN_FEHLER_AUTOMODE_AKTIV') && !ENUM_OFF_TOKEN_RE.test(sv) && !ENUM_INVALID_RE.test(sv)) anyOn = true;
                     else if (ENUM_OFF_TOKEN_RE.test(sv)) anyOff = true;
                 });
                 if (anyOn) c1.active = true;
@@ -1927,7 +2196,7 @@ function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
         }
     }
     if (fieldDesc.roles.indexOf('temp_read') >= 0 && /interior|cabin|innen/i.test(fieldDesc.name)) {
-        const n = pickNamedNum(val, /temp|value/i, [255, 65535]);
+        const n = pickNamedNum(val, /temp|value/i, [204, 254, 255, 65535]);
         if (n !== null && n >= -15 && n <= 60) pushPatch({ cabinC: +n.toFixed(1) });
     }
     pushPatch({ climate1cr: c1 });
@@ -1951,12 +2220,16 @@ module.exports = {
     extractPlaceText,
     haversineKm,
     classifyClimateMember,
+    parseCompactSchema,
     discoverClimateCatalog,
     enrichDescWithGeneratedCfg,
     resolveTypeDef,
     pickEnumOrBool,
     pickNoActionOrOff,
     buildDirectPayload,
+    build1crOrderedCandidates,
+    evaluate1crVerdict,
+    explain1crError,
     buildTimerPayload,
     interpretClimateField,
     decodeChassisFromVinOrFa,

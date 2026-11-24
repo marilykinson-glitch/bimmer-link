@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const cp = require('child_process');
+const Jpeg = require('./jpeg');
 
 /* ---------------- Minimal fast CRC32 & PNG encoder (Node 8 Buffer + zlib) ---------------- */
 
@@ -253,14 +254,15 @@ function tryCapture4Cam(opts) {
     const bin = opts.camshotBin || path.join(__dirname, 'mgu-camshot');
     if (fs.existsSync(bin)) {
         try {
-            cp.execFileSync(bin, ['-o', rawFile, '-w', '960', '-h', '440', '-t', '1800'], { timeout: 2500 });
+            cp.execFileSync(bin, ['-o', rawFile, '-w', '960', '-h', '720', '-t', '1800'], { timeout: 2500 });
         } catch (e) { /* camera bus asleep or car has no 360 camera */ }
     }
     try {
         const st = fs.statSync(rawFile);
         const mtime = st.mtime ? st.mtime.getTime() : st.mtimeMs;
-        if (Math.abs(Date.now() - mtime) < 25000 && st.size === 960 * 440 * 4) {
-            return { w: 960, h: 440, rgba: fs.readFileSync(rawFile) };
+        if (Math.abs(Date.now() - mtime) < 25000) {
+            if (st.size === 960 * 720 * 4) return { w: 960, h: 720, rgba: fs.readFileSync(rawFile) };
+            if (st.size === 960 * 440 * 4) return { w: 960, h: 440, rgba: fs.readFileSync(rawFile) };
         }
     } catch (e) { /* absent */ }
     return null;
@@ -289,32 +291,35 @@ function renderSnapshotPng(telemetry, extra, opts) {
     const cam = tryCapture4Cam(opts);
 
     if (cam) {
-        const s = new MiniSurface(640, 416, '#070a10');
-        s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 640, 288);
-        // Crosshairs & camera labels for 2x2 quad view
-        s.fillRect(319, 0, 2, 288, '#1e293b');
-        s.fillRect(0, 143, 640, 2, '#1e293b');
-        const labels = [['CAM TRUOC', 10, 8], ['CAM SAU', 330, 8], ['GUONG TRAI', 10, 152], ['GUONG PHAI', 330, 152]];
-        labels.forEach((lb) => {
-            s.fillRect(lb[1] - 4, lb[2] - 4, 132, 22, [8, 11, 18, 195]);
-            s.text(lb[0], lb[1], lb[2], 2, '#4da6ff');
-        });
-        // Telemetry HUD bar underneath
-        s.fillRect(0, 288, 640, 128, '#0b101b');
-        s.fillRect(0, 288, 640, 3, '#2fd27a');
+        // Full 960x720 (4:3) 24-bit True-Color 2x2 Mosaic (4 crisp 480x360 cameras, ZERO overlays on camera pixels!) + 96px HUD footer
+        const s = new MiniSurface(960, 816, '#070a10');
+        if (cam.w === 960 && cam.h === 720 && cam.rgba.length >= 960 * 720 * 4) {
+            cam.rgba.copy(s.buf, 0, 0, 960 * 720 * 4);
+        } else {
+            s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 960, 720);
+        }
+        // Clean telemetry HUD bar exclusively below y=720 so all 4 quadrants crop cleanly in the mobile app
+        s.fillRect(0, 720, 960, 96, '#0b101b');
+        s.fillRect(0, 720, 960, 3, '#2fd27a');
         const carHdr = ex.modelTitle ? (ex.modelTitle + ' - ') : 'BMW 360 - ';
-        s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 12, 300, 2, '#2fd27a', 35);
-        s.text(formatClock(ex.at), 434, 300, 2, '#94a3b8', 18);
+        s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 16, 732, 2, '#2fd27a', 56);
+        s.text(formatClock(ex.at), 724, 732, 2, '#94a3b8', 18);
         const loc = t.pos
             ? ((t.pos.street ? t.pos.street + ', ' : '') + (t.pos.district ? t.pos.district + ', ' : '') + (t.pos.city || '') + ' (' + t.pos.lat.toFixed(5) + ', ' + t.pos.lon.toFixed(5) + ')')
             : 'CHUA CO TOA DO GPS';
-        s.text('VI TRI: ' + loc, 12, 330, 2, '#f8fafc', 51);
-        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ') | 12V: ' + fmtVal(t.battery12v, 'V') +
-            ' | NHIET: ' + fmtVal(t.ambientC, '*C') + '/' + fmtVal(t.coolantC, '*C');
-        s.text(line2, 12, 360, 2, '#cbd5e1', 51);
+        s.text('VI TRI: ' + loc, 16, 758, 2, '#f8fafc', 77);
         const doorsWarn = (t.doorsOpen && t.doorsOpen.length) || t.trunkOpen || t.hoodOpen || t.locked === false;
-        s.text(doorsWarn ? 'CANH BAO: KIEM TRA CUA / COP / KHOA XE!' : 'AN TOAN: CUA & COP DONG KIN | 1CR SAN SANG', 12, 390, 2, doorsWarn ? '#ffb020' : '#2fd27a', 51);
-        return { png: encodeIndexedPngRgba(s.w, s.h, s.buf), hasCamera: true };
+        const secTag = doorsWarn ? 'KIEM TRA CUA/KHOA!' : 'KHOA AN TOAN';
+        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ') | 12V: ' + fmtVal(t.battery12v, 'V') +
+            ' | NHIET: ' + fmtVal(t.ambientC, '*C') + '/' + fmtVal(t.coolantC, '*C') + ' | ' + secTag;
+        s.text(line2, 16, 784, 2, doorsWarn ? '#ffb020' : '#cbd5e1', 77);
+        const jpgBuf = Jpeg.encodeJpegAdaptive(s.w, s.h, s.buf, 64000);
+        return {
+            png: jpgBuf,
+            mime: 'image/jpeg',
+            hasCamera: true,
+            camMeta: { grid: '2x2', camW: 960, camH: 720, totalW: 960, totalH: 816 },
+        };
     }
 
     // Pure Dark-Metallic BMW ConnectedDrive Telemetry Card (880x500)

@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.5.1">
+<link rel="stylesheet" href="styles.css?v=0.5.2">
 <title>MyBMW</title>
 </head>
 <body>
@@ -195,13 +195,32 @@
     <!-- Latest Parked Snapshot Card -->
     <div class="glass-card" id="latestSnapCard">
       <div class="card-head">
-        <span>📸 Ảnh chụp 360° / Chỗ đỗ gần nhất</span>
-        <span id="snapTime" style="color:var(--dim)">--</span>
+        <span>📸 Ảnh Camera 360° / Chỗ đỗ</span>
+        <span style="display:flex;align-items:center;gap:7px">
+          <span id="snapTime" style="color:var(--dim);text-transform:none;font-weight:600">--</span>
+          <button id="btnZoomSnap" class="mini-refresh hidden" onclick="openSnapModal()" title="Xem toàn màn hình">🔍</button>
+        </span>
       </div>
       <div id="noSnapHint" style="font-size:13px;color:var(--dim);padding:10px 0">
         Tự động chụp 4 camera 360° (hoặc thẻ trạng thái đỗ hầm) khi tắt máy, hoặc bấm nút <b>Chụp xe</b> ở trên.
       </div>
-      <img id="latestSnapImg" class="snap-img hidden" alt="Vehicle snapshot" onclick="openSnapModal()">
+      <div id="camViewTabs" class="cam-tabs hidden">
+        <button type="button" class="cam-tab active" data-cam="all" onclick="selectCamView('all')">4 Cam</button>
+        <button type="button" class="cam-tab" data-cam="front" onclick="selectCamView('front')">Trước</button>
+        <button type="button" class="cam-tab" data-cam="rear" onclick="selectCamView('rear')">Sau</button>
+        <button type="button" class="cam-tab" data-cam="left" onclick="selectCamView('left')">Trái</button>
+        <button type="button" class="cam-tab" data-cam="right" onclick="selectCamView('right')">Phải</button>
+      </div>
+      <div class="snap-stage" id="snapStage">
+        <img id="latestSnapImg" class="snap-img hidden" alt="Vehicle snapshot" onclick="openSnapModal()">
+        <div id="camQuadOverlay" class="cam-quad-overlay hidden">
+          <div class="cam-quad-cell" onclick="selectCamView('front')"><span class="cam-quad-tag">Cam Trước ⤢</span></div>
+          <div class="cam-quad-cell" onclick="selectCamView('rear')"><span class="cam-quad-tag">Cam Sau ⤢</span></div>
+          <div class="cam-quad-cell" onclick="selectCamView('left')"><span class="cam-quad-tag">Gương Trái ⤢</span></div>
+          <div class="cam-quad-cell" onclick="selectCamView('right')"><span class="cam-quad-tag">Gương Phải ⤢</span></div>
+        </div>
+        <div id="camSingleBadge" class="cam-single-badge hidden" onclick="openSnapModal()">Cam Trước · Chạm để phóng to 🔍</div>
+      </div>
     </div>
   </section>
 
@@ -338,8 +357,19 @@
 
 <!-- Fullscreen Snapshot Lightbox -->
 <div id="snapModal" class="snap-modal hidden" onclick="closeSnapModal()">
-  <img id="snapModalImg" src="" alt="Snapshot Zoom">
-  <div style="margin-top:12px;font-size:12.5px;color:#cbd5e1">Chạm bất kỳ đâu để đóng</div>
+  <div class="snap-modal-top" onclick="event.stopPropagation()">
+    <span id="snapModalTitle" style="font-size:14px;font-weight:700;color:#f8fafc">Ảnh Camera 360°</span>
+    <button type="button" class="mini-refresh" style="padding:4px 11px" onclick="closeSnapModal()">✕ Đóng</button>
+  </div>
+  <img id="snapModalImg" src="" alt="Snapshot Zoom" onclick="toggleModalZoom(event)">
+  <div id="snapModalTabs" class="cam-tabs modal-cam-tabs hidden" onclick="event.stopPropagation()">
+    <button type="button" class="cam-tab active" data-cam="all" onclick="selectCamView('all')">4 Cam</button>
+    <button type="button" class="cam-tab" data-cam="front" onclick="selectCamView('front')">Cam Trước</button>
+    <button type="button" class="cam-tab" data-cam="rear" onclick="selectCamView('rear')">Cam Sau</button>
+    <button type="button" class="cam-tab" data-cam="left" onclick="selectCamView('left')">Gương Trái</button>
+    <button type="button" class="cam-tab" data-cam="right" onclick="selectCamView('right')">Gương Phải</button>
+  </div>
+  <div style="margin-top:8px;font-size:12px;color:#94a3b8">Chạm vào ảnh để thu/phóng 2x · Bấm các nút trên để xem riêng từng cam</div>
 </div>
 
 <!-- Web Camera QR Modal (for browsers without AndroidBridge) -->
@@ -350,6 +380,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.5.1"></script>
+<script src="app.js?v=0.5.2"></script>
 </body>
 </html>

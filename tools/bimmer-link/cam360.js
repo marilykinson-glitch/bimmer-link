@@ -116,14 +116,15 @@ function findSidecamBin(customBin) {
 }
 
 /**
- * Attempt to grab a fresh 4-camera Surround View RGBA frame (`960x440`).
+ * Attempt to grab a fresh 4-camera Surround View RGBA frame (`960x720` exact 4:3 = four `480x360` cameras).
  * Resolves `{ ok: true, width, height, rgba }` or `{ ok: false, reason }` — never rejects.
  */
 function capture360Frame(opts) {
     opts = opts || {};
     const W = (opts.width || 960) & ~3;
-    const H = (opts.height || 440) & ~1;
-    const timeoutMs = opts.timeoutMs || 4200;
+    const H = (opts.height || 720) & ~1;
+    const minFrames = opts.minFrames || 5;
+    const timeoutMs = opts.timeoutMs || 4500;
     const runDir = opts.runDir || '/run/bimmer-link';
     const sockPath = opts.sockPath || path.join(runDir, 'cam360-' + process.pid + '.sock');
     const rawOutFile = opts.rawOutFile || path.join(runDir, 'cam4.rgba');
@@ -259,14 +260,14 @@ function capture360Frame(opts) {
                             if (!hasLiveLuma(f.pixels, lay.vw, lay.vh)) continue;
                             bestAtlas = { pixels: Buffer.from(f.pixels), vw: lay.vw, vh: lay.vh };
                             validCount++;
-                            if (validCount >= 2) {
+                            if (validCount >= minFrames) {
                                 finalizeFromAtlas(bestAtlas);
                                 return;
                             }
                             if (!settleTimer) {
                                 settleTimer = setTimeout(() => {
                                     if (bestAtlas) finalizeFromAtlas(bestAtlas);
-                                }, 260);
+                                }, 650);
                             }
                         }
                     }
@@ -314,13 +315,13 @@ function capture360Frame(opts) {
 
                 const cfgMsg = JSON.stringify({
                     op: 'config',
-                    target: 'map',
+                    target: 'panel',
                     klass: 'overlay',
                     w: W,
                     h: H,
                     x: 0,
                     y: 0,
-                    fps: 10,
+                    fps: 15,
                     exclusive: 0,
                     contend: 1,
                     persist: 1,

@@ -316,7 +316,7 @@ class CloudBridge {
         return true;
     }
 
-    /** Publish encrypted PNG snapshot in 1 retained MQTT packet + 1 single `PUT` attachment on `ntfy.sh` (ZERO chunk flood!). */
+    /** Publish encrypted JPEG/PNG snapshot in 1 retained MQTT packet + 1 single `PUT` attachment on `ntfy.sh` (ZERO chunk flood!). */
     async publishSnapshot(pngBuf, meta) {
         if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
         const now = (meta && meta.at) || Date.now();
@@ -326,6 +326,7 @@ class CloudBridge {
             at: now,
             title: (meta && meta.title) || '',
             alert: !!(meta && meta.alert),
+            camMeta: (meta && meta.camMeta) || null,
             b64: pngBuf.toString('base64'),
         });
         this.latestSnapWire = fullPacket;

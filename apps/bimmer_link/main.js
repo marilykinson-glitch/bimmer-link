@@ -228,6 +228,7 @@ mgu.run({
             'de.bmw.infotainment.climate.Climate2',
             'de.bmw.infotainment.climate.Climate',
             'de.bmw.infotainment.climate.climatemaster.ClimateMaster',
+            'de.bmw.infotainment.lsc.LSCDataSink',
         ].forEach((ifn) => { getOapInstances(ifn).catch(() => {}); });
 
         async function attachOrDetachCam(wantOn) {
@@ -301,19 +302,21 @@ mgu.run({
                 for (let i = 0; i < list.length; i++) {
                     const it = list[i];
                     try {
-                        const res = req.kind === 'setter'
-                            ? await signals.set(it.px, req.name, req.payload, 3500)
-                            : await signals.call(it.px, req.name, req.payload, 3500);
-                        writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res || null });
+                        const res = req.kind === 'getter'
+                            ? await it.px.getValue(req.name, 2500)
+                            : (req.kind === 'setter'
+                                ? await signals.set(it.px, req.name, req.payload, 3500)
+                                : await signals.call(it.px, req.name, req.payload, 3500));
+                        writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res === undefined ? null : res });
                         return;
                     } catch (e) {
                         lastErr = e;
-                        if (req.altPayload !== undefined) {
+                        if (req.altPayload !== undefined && req.kind !== 'getter') {
                             try {
                                 const res2 = req.kind === 'setter'
                                     ? await signals.set(it.px, req.name, req.altPayload, 3500)
                                     : await signals.call(it.px, req.name, req.altPayload, 3500);
-                                writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res2 || null });
+                                writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res2 === undefined ? null : res2 });
                                 return;
                             } catch (e2) { lastErr = e2; }
                         }

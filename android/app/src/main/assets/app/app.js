@@ -25,8 +25,17 @@ let pendingAckTimers = {};
 let stateWs = null;
 let diagWs = null;
 let vehicleData = loadLocal('mybmw_state') || null;
-let latestSnap = loadLocal('mybmw_snap') || null;   // { dataUrl, at, title }
+let latestSnap = loadLocal('mybmw_snap') || null;   // { id, dataUrl, at, rxAt, title, camMeta }
 let factoryHero = loadLocal('mybmw_hero') || null;  // { dataUrl, at, title, paint }
+let activeCamView = 'all';
+let snapCropCache = { id: '', loading: false, has2x2: false, camRatioPct: 88.235, crops: {} };
+const CAM_VIEW_LABELS = {
+  all: '4 Camera 360°',
+  front: 'Cam Trước',
+  rear: 'Cam Sau',
+  left: 'Gương Trái',
+  right: 'Gương Phải',
+};
 let localAppearance = loadLocal('mybmw_appearance') || { chassis: '', trimLine: '', colour: '' };
 let lastSchema = null;
 let photoBuckets = {};
@@ -845,16 +854,25 @@ function onStatePacket(pkt, ts, isLive) {
   }
 }
 
-function commitReceivedPhoto(fullB64, at, title, id, isLive) {
+function commitReceivedPhoto(fullB64, at, title, id, isLive, camMeta) {
   if (!fullB64) return;
   const mime = fullB64.indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
   const isNewId = !latestSnap || !id || latestSnap.id !== id;
   const dispAt = normalizeCarTime(at, Date.now(), isLive);
   if (!latestSnap || dispAt >= (latestSnap.rxAt || latestSnap.at || 0) || isLive) {
-    latestSnap = { id: id || String(dispAt), dataUrl: 'data:' + mime + ';base64,' + fullB64, at: at || dispAt, rxAt: dispAt, title: title || '' };
+    latestSnap = {
+      id: id || String(dispAt),
+      dataUrl: 'data:' + mime + ';base64,' + fullB64,
+      at: at || dispAt,
+      rxAt: dispAt,
+      title: title || '',
+      camMeta: camMeta || null,
+    };
+    snapCropCache = { id: '', loading: false, has2x2: false, camRatioPct: 88.235, crops: {} };
     saveLocal('mybmw_snap', latestSnap);
+    ensureSnapCrops();
     if (isLive && isNewId) {
-      showToast('📸 Đã nhận ảnh chụp từ xe: ' + (title || 'Chạm vào ảnh để phóng to'), '#2fd27a', 6500);
+      showToast('📸 Đã nhận ảnh sắc nét từ xe — chạm từng góc hoặc tab để xem riêng từng cam!', '#2fd27a', 6500);
       setTimeout(() => {
         const card = document.getElementById('latestSnapCard');
         if (card && !document.getElementById('view-home').classList.contains('hidden')) {
@@ -868,7 +886,7 @@ function commitReceivedPhoto(fullB64, at, title, id, isLive) {
 function onPhotoPacket(pkt, ts, isLive) {
   if (!pkt) return;
   if (pkt.t === 'photo_full' && pkt.b64) {
-    commitReceivedPhoto(pkt.b64, pkt.at || ts, pkt.title || '', pkt.id || '', isLive);
+    commitReceivedPhoto(pkt.b64, pkt.at || ts, pkt.title || '', pkt.id || '', isLive, pkt.camMeta || null);
     return;
   }
   if (pkt.t !== 'photo_chunk' || !pkt.id) return;
@@ -886,17 +904,134 @@ function onPhotoPacket(pkt, ts, isLive) {
     let fullB64 = '';
     for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
     delete photoBuckets[pkt.id];
-    commitReceivedPhoto(fullB64, b.at, b.title, pkt.id, isLive);
+    commitReceivedPhoto(fullB64, b.at, b.title, pkt.id, isLive, null);
+  }
+}
+
+function ensureSnapCrops() {
+  if (!latestSnap || !latestSnap.dataUrl) return;
+  const sid = latestSnap.id || latestSnap.dataUrl.slice(-32);
+  if (snapCropCache.id === sid || snapCropCache.loading) return;
+  snapCropCache.loading = true;
+  const im = new Image();
+  im.onload = () => {
+    const build = () => {
+      snapCropCache.loading = false;
+      const nw = im.naturalWidth || 0;
+      const nh = im.naturalHeight || 0;
+      const cm = latestSnap.camMeta;
+      const is2x2 = !!(
+        (cm && cm.grid === '2x2') ||
+        (nw === 960 && nh === 816) ||
+        (nw === 640 && nh === 416)
+      );
+      const crops = { all: latestSnap.dataUrl };
+      let ratioPct = 88.235;
+      if (is2x2 && nw >= 320 && nh >= 240) {
+        const cw = (cm && cm.camW) ? Math.min(nw, cm.camW) : nw;
+        const ch = (cm && cm.camH) ? Math.min(nh, cm.camH) : (nh === 816 ? 720 : (nh === 416 ? 288 : Math.round(nw * 0.75)));
+        ratioPct = +((ch / nh) * 100).toFixed(3);
+        const qw = cw >> 1;
+        const qh = ch >> 1;
+        const defs = [
+          ['front', 0, 0],
+          ['rear', qw, 0],
+          ['left', 0, qh],
+          ['right', qw, qh],
+        ];
+        try {
+          const cv = document.createElement('canvas');
+          cv.width = qw;
+          cv.height = qh;
+          const ctx = cv.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          for (let i = 0; i < defs.length; i++) {
+            ctx.clearRect(0, 0, qw, qh);
+            ctx.drawImage(im, defs[i][1], defs[i][2], qw, qh, 0, 0, qw, qh);
+            crops[defs[i][0]] = cv.toDataURL('image/jpeg', 0.95);
+          }
+        } catch (e) {}
+      }
+      snapCropCache = { id: sid, loading: false, has2x2: is2x2 && !!crops.front, camRatioPct: ratioPct, crops };
+      if (!snapCropCache.has2x2) activeCamView = 'all';
+      updateSnapDisplay();
+    };
+    if (typeof im.decode === 'function') im.decode().then(build, build);
+    else build();
+  };
+  im.onerror = () => { snapCropCache.loading = false; };
+  im.src = latestSnap.dataUrl;
+}
+
+function selectCamView(view) {
+  activeCamView = CAM_VIEW_LABELS[view] ? view : 'all';
+  const mImg = document.getElementById('snapModalImg');
+  if (mImg) mImg.classList.remove('zoomed');
+  updateSnapDisplay();
+}
+
+function updateSnapDisplay() {
+  if (!latestSnap || !latestSnap.dataUrl) return;
+  document.getElementById('noSnapHint').classList.add('hidden');
+  const zoomBtn = document.getElementById('btnZoomSnap');
+  if (zoomBtn) zoomBtn.classList.remove('hidden');
+
+  const has2x2 = !!snapCropCache.has2x2;
+  const view = has2x2 && snapCropCache.crops[activeCamView] ? activeCamView : 'all';
+  const shownUrl = (has2x2 && snapCropCache.crops[view]) ? snapCropCache.crops[view] : latestSnap.dataUrl;
+
+  const img = document.getElementById('latestSnapImg');
+  if (img.src !== shownUrl) img.src = shownUrl;
+  img.classList.remove('hidden');
+
+  const tabs = document.getElementById('camViewTabs');
+  const modalTabs = document.getElementById('snapModalTabs');
+  const quadOverlay = document.getElementById('camQuadOverlay');
+  const singleBadge = document.getElementById('camSingleBadge');
+
+  if (tabs) tabs.classList.toggle('hidden', !has2x2);
+  if (modalTabs) modalTabs.classList.toggle('hidden', !has2x2);
+
+  Array.prototype.forEach.call(document.querySelectorAll('.cam-tab'), (btn) => {
+    btn.classList.toggle('active', btn.getAttribute('data-cam') === view);
+  });
+
+  if (quadOverlay) {
+    quadOverlay.style.height = snapCropCache.camRatioPct + '%';
+    quadOverlay.classList.toggle('hidden', !(has2x2 && view === 'all'));
+  }
+  if (singleBadge) {
+    singleBadge.textContent = (CAM_VIEW_LABELS[view] || view) + ' · Chạm ảnh để phóng to 🔍';
+    singleBadge.classList.toggle('hidden', !(has2x2 && view !== 'all'));
+  }
+
+  const mModal = document.getElementById('snapModal');
+  if (mModal && !mModal.classList.contains('hidden')) {
+    const mImg = document.getElementById('snapModalImg');
+    if (mImg && mImg.src !== shownUrl) mImg.src = shownUrl;
+    const mTitle = document.getElementById('snapModalTitle');
+    if (mTitle) mTitle.textContent = has2x2 ? (CAM_VIEW_LABELS[view] || 'Ảnh Camera 360°') : (latestSnap.title || 'Ảnh chụp từ xe');
   }
 }
 
 function openSnapModal() {
   if (!latestSnap || !latestSnap.dataUrl) return;
-  document.getElementById('snapModalImg').src = latestSnap.dataUrl;
+  ensureSnapCrops();
+  const mImg = document.getElementById('snapModalImg');
+  if (mImg) mImg.classList.remove('zoomed');
   document.getElementById('snapModal').classList.remove('hidden');
+  updateSnapDisplay();
+}
+
+function toggleModalZoom(ev) {
+  if (ev) ev.stopPropagation();
+  const mImg = document.getElementById('snapModalImg');
+  if (mImg) mImg.classList.toggle('zoomed');
 }
 
 function closeSnapModal() {
+  const mImg = document.getElementById('snapModalImg');
+  if (mImg) mImg.classList.remove('zoomed');
   document.getElementById('snapModal').classList.add('hidden');
 }
 
@@ -1313,7 +1448,10 @@ function renderAll() {
     sec.textContent = tel.trunkOpen ? '⚠️ CỐP SAU ĐANG MỞ' : (tel.locked === false ? '🔓 XE CHƯA KHOÁ (KHOÁ CỬA ĐỂ ĐỀ NỔ 1CR)' : '⚠️ CÓ CỬA CHƯA ĐÓNG KÍN');
   } else {
     sec.className = 'lock-banner';
-    sec.textContent = c1.active ? '❄️ ĐANG NỔ MÁY / LÀM MÁT 1CR' : (tel.engineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN');
+    const c1Banner = c1.mode === 'engine_1cr'
+      ? '🔥 ĐỘNG CƠ 1CR ĐANG NỔ LÀM MÁT'
+      : (c1.mode === 'vent_only' ? '🌬️ QUẠT THÔNG GIÓ CABIN ĐANG CHẠY' : '❄️ ĐANG CHẠY LÀM MÁT TỪ XA (AUTOMODE)');
+    sec.textContent = c1.active ? c1Banner : (tel.engineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN');
   }
 
   // Show 1-tap hint if head unit is Kombi-coded to F90LCI (M5 CS) and owner hasn't picked their true chassis yet
@@ -1357,13 +1495,14 @@ function renderAll() {
   document.getElementById('mBat').textContent = tel.battery12v != null ? (tel.battery12v + ' V') : 'Ổn định';
   document.getElementById('mTemp').textContent = (tel.ambientC != null ? tel.ambientC + '°C' : '--') + (tel.cabinC != null ? (' / ' + tel.cabinC + '°C') : '');
   document.getElementById('mEngTemp').textContent = (tel.coolantC != null ? tel.coolantC + '°C' : '--') + (tel.oilC != null ? (' / ' + tel.oilC + '°C') : '');
-  document.getElementById('m1cr').textContent = c1.active ? 'Đang chạy' : (hasTimer ? ('Hẹn ' + c1.timerText) : (c1.discoveredCount ? ('Sẵn sàng (' + c1.discoveredCount + ' cổng)') : 'Sẵn sàng'));
+  const c1BoxText = c1.active
+    ? (c1.mode === 'engine_1cr' ? 'Đang nổ 1CR' : (c1.mode === 'vent_only' ? 'Quạt cabin' : 'Đang chạy'))
+    : (hasTimer ? ('Hẹn ' + c1.timerText) : (c1.discoveredCount ? ('Sẵn sàng (' + c1.discoveredCount + ' cổng)') : 'Sẵn sàng'));
+  document.getElementById('m1cr').textContent = c1BoxText;
 
   if (latestSnap && latestSnap.dataUrl) {
-    document.getElementById('noSnapHint').classList.add('hidden');
-    const img = document.getElementById('latestSnapImg');
-    img.src = latestSnap.dataUrl;
-    img.classList.remove('hidden');
+    ensureSnapCrops();
+    updateSnapDisplay();
     document.getElementById('snapTime').textContent = relTime(latestSnap.rxAt || latestSnap.at);
   }
 
@@ -1457,7 +1596,10 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
   if (w.kind === 'method' && Array.isArray(w.inArgs)) {
     const obj = {};
     w.inArgs.forEach((a) => {
-      if (a && a.name) obj[a.name] = pickCardEnum(a.typeDef, wantOn, undefined, false);
+      if (!a || !a.name) return;
+      if (/clientGroupId/i.test(a.name)) obj[a.name] = 0;
+      else if (/^timeParking|duration/i.test(a.name)) obj[a.name] = wantOn ? 15 : 0;
+      else obj[a.name] = pickCardEnum(a.typeDef, wantOn, undefined, false);
     });
     return obj;
   }
@@ -1465,13 +1607,16 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
   if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
     const out = {};
     const hasParkAc = td.fields.some((f) => f && /parkAirCond|standklima/i.test(f.name || ''));
+    const hasAutoMode = td.fields.some((f) => f && /autoMode|automatik/i.test(f.name || ''));
     td.fields.forEach((f) => {
       if (!f || !f.name) return;
       const fb = f.name.replace(/^(operation|control|request|set|status)/i, '');
       const cur = (stSample && typeof stSample === 'object') ? (stSample[f.name] !== undefined ? stSample[f.name] : stSample['status' + (fb ? fb[0].toUpperCase() + fb.slice(1) : '')]) : undefined;
       if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
       else if (/remoteStart|motorstart|res$/i.test(f.name)) out[f.name] = wantOn ? pickCardEnum(f.typeDef, true, cur, false) : pickCardEnum(f.typeDef, true, cur, true);
-      else if (/ventilat|standlueft/i.test(f.name) && hasParkAc && wantOn) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
+      else if (/autoMode|automatik/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, wantOn, cur, false);
+      else if (/parkAirCond|standklima/i.test(f.name) && hasAutoMode && wantOn) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
+      else if (/ventilat|standlueft/i.test(f.name) && (hasParkAc || hasAutoMode) && wantOn) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
       else out[f.name] = pickCardEnum(f.typeDef, wantOn, cur, false);
     });
     return out;
@@ -1480,11 +1625,14 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
     const out = {};
     const keys = Object.keys(stSample);
     const hasParkAc = keys.some((k) => /parkAirCond|standklima/i.test(k));
+    const hasAutoMode = keys.some((k) => /autoMode|automatik/i.test(k));
     keys.forEach((k) => {
-      const ok = /^status[A-Z]/.test(k) ? (k[6].toLowerCase() + k.slice(7)) : k;
+      const ok = /^status[A-Z]/.test(k) ? ('operation' + k.slice(6)) : k;
       if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(k)) out[ok] = pickCardEnum(null, false, stSample[k], true);
       else if (/remoteStart|motorstart|res$/i.test(k)) out[ok] = pickCardEnum(null, true, stSample[k], !wantOn);
-      else if (/ventilat|standlueft/i.test(k) && hasParkAc && wantOn) out[ok] = pickCardEnum(null, false, stSample[k], true);
+      else if (/autoMode|automatik/i.test(k)) out[ok] = pickCardEnum(null, wantOn, stSample[k], false);
+      else if (/parkAirCond|standklima/i.test(k) && hasAutoMode && wantOn) out[ok] = pickCardEnum(null, false, stSample[k], true);
+      else if (/ventilat|standlueft/i.test(k) && (hasParkAc || hasAutoMode) && wantOn) out[ok] = pickCardEnum(null, false, stSample[k], true);
       else out[ok] = pickCardEnum(null, wantOn, stSample[k], false);
     });
     return out;
@@ -1680,7 +1828,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.5.1').catch(() => {});
+      navigator.serviceWorker.register('./sw.js?v=0.5.2').catch(() => {});
     }
   }
   const healConnection = () => {

@@ -154,13 +154,18 @@ function draw(cv, G, t, v, act) {
 
     // Card 1: Option 1CR Remote Start & Departure Timer
     const c1Active = !!c1.active;
+    const c1Head = c1.mode === 'engine_1cr'
+        ? 'Đang nổ máy 1CR'
+        : (c1.mode === 'vent_only'
+            ? 'Quạt cabin đang chạy'
+            : (c1Active ? 'Đang chạy AutoMode' : (c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn ' + c1.timerText) : 'Sẵn sàng kích hoạt')));
     const timerStr = c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn BDC: ' + c1.timerText) : 'Hẹn giờ: Tắt';
     infoCard(cv, G, t, rx, cy, cw, ch, {
         key: 'blCard1cr',
         title: 'Đề nổ từ xa 1CR',
         active: c1Active || !!(c1.timerText && c1.timerText !== 'Tắt'),
-        accent: c1Active ? (t.go || '#2fd27a') : '#a78bfa',
-        headline: c1Active ? 'Đang nổ làm mát' : (c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn ' + c1.timerText) : 'Sẵn sàng kích hoạt'),
+        accent: c1Active ? (c1.mode === 'vent_only' ? (t.warn || '#ffb020') : (t.go || '#2fd27a')) : '#a78bfa',
+        headline: c1Head,
         line1: timerStr + (c1.discoveredCount ? (' · ' + c1.discoveredCount + ' cổng Climate') : ''),
         line2: c1.lastResult || 'Hỗ trợ kích trực tiếp & hẹn giờ BDC',
         hint: c1Active ? ' Tắt 1CR' : 'Thử nổ',

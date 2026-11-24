@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -392,19 +392,21 @@ function createService(customCfg) {
                 return;
             }
             if (c === 'invoke_raw') {
-                let rep = await callWorker('invoke_raw', a, 5000);
-                let res = (rep && rep.result) || rep;
-                if (!res || !res.ok) {
-                    const oapRes = await callOapBridge(a.iface, a.kind, a.name, a.payload, undefined, 4200);
-                    if (oapRes && oapRes.ok) {
-                        res = { ok: true, via: 'OAP-ACL', trace: [oapRes], saved: !!a.saveAsDefault };
-                        if (a.saveAsDefault) {
-                            const profFile = path.join(C.state, '1cr-profile.json');
-                            const cur = readJson(profFile) || {};
-                            cur[a.role || 'start'] = { iface: a.iface, kind: a.kind, name: a.name, payload: a.payload };
-                            writeAtomic(profFile, JSON.stringify(cur, null, 2) + '\n', 0o600);
-                        }
+                let res = null;
+                const oapRes = await callOapBridge(a.iface, a.kind, a.name, a.payload, undefined, 3200);
+                if (oapRes && oapRes.ok) {
+                    const vRep = await callWorker('verify_1cr', { waitMs: 700 }, 3500);
+                    const vd = (vRep && vRep.result && vRep.result.verdict) || null;
+                    res = { ok: true, via: 'OAP-ACL', verified: !!(vd && vd.active), verdict: vd, trace: [oapRes], saved: !!a.saveAsDefault };
+                    if (a.saveAsDefault) {
+                        const profFile = path.join(C.state, '1cr-profile.json');
+                        const cur = readJson(profFile) || {};
+                        cur[a.role || 'start'] = { iface: a.iface, kind: a.kind, name: a.name, payload: a.payload };
+                        writeAtomic(profFile, JSON.stringify(cur, null, 2) + '\n', 0o600);
                     }
+                } else {
+                    const rep = await callWorker('invoke_raw', a, 5000);
+                    res = (rep && rep.result) || rep;
                 }
                 await cloud.publishDiag({ t: 'raw_result', reqId: cmdObj.id, result: res });
                 syncCloudState(true);
@@ -540,31 +542,37 @@ function createService(customCfg) {
         }
     }
 
+    let oapChain = Promise.resolve();
     function callOapBridge(iface, kind, name, payload, altPayload, timeoutMs) {
-        const app = ensureAppRamDir(C.run, C.oap, C.proc);
-        if (!app) return Promise.resolve({ ok: false, error: 'OAP app not installed' });
-        const seq = ++S.oapSeq;
-        S.oapReq = { seq, iface, kind, name, payload, altPayload, at: Date.now() };
-        writeStatus();
-        const deadline = Date.now() + (timeoutMs || 4200);
-        const f1 = path.join(C.run, 'app', 'oap-reply.json');
-        const f2 = path.join(app.root, 'data', 'oap-reply.json');
-        return new Promise((resolve) => {
-            const iv = setInterval(() => {
-                const r = readJson(f1) || readJson(f2);
-                if (r && r.seq === seq) {
-                    clearInterval(iv);
-                    if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
-                    resolve(r);
-                    return;
-                }
-                if (Date.now() >= deadline) {
-                    clearInterval(iv);
-                    if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
-                    resolve({ ok: false, error: 'OAP bridge timeout' });
-                }
-            }, 120);
-        });
+        const runOne = () => {
+            const app = ensureAppRamDir(C.run, C.oap, C.proc);
+            if (!app) return Promise.resolve({ ok: false, error: 'OAP app not installed' });
+            const seq = ++S.oapSeq;
+            S.oapReq = { seq, iface, kind, name, payload, altPayload, at: Date.now() };
+            writeStatus();
+            const deadline = Date.now() + (timeoutMs || 4200);
+            const f1 = path.join(C.run, 'app', 'oap-reply.json');
+            const f2 = path.join(app.root, 'data', 'oap-reply.json');
+            return new Promise((resolve) => {
+                const iv = setInterval(() => {
+                    const r = readJson(f1) || readJson(f2);
+                    if (r && r.seq === seq) {
+                        clearInterval(iv);
+                        if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
+                        resolve(r);
+                        return;
+                    }
+                    if (Date.now() >= deadline) {
+                        clearInterval(iv);
+                        if (S.oapReq && S.oapReq.seq === seq) { S.oapReq = null; writeStatus(); }
+                        resolve({ ok: false, error: 'OAP bridge timeout' });
+                    }
+                }, 90);
+            });
+        };
+        const p = oapChain.then(runOne, runOne);
+        oapChain = p.catch(() => {});
+        return p;
     }
 
     async function tryGrab360(timeoutMs) {
@@ -608,11 +616,11 @@ function createService(customCfg) {
         }
 
         if (config.parkSnapshot) {
-            const camGrab = await tryGrab360(4000);
+            const camGrab = await tryGrab360(4800);
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
             const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { event: 'parked' });
-            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', at: Date.now() }).then((ok) => {
+            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', camMeta: snap.camMeta || null, at: Date.now() }).then((ok) => {
                 log('park snapshot: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + ok);
             }).catch(() => {});
             if (config.botToken && config.chatId) {
@@ -643,7 +651,7 @@ function createService(customCfg) {
             tell('CẢNH BÁO VALET: ' + reason, 'crit');
             const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { alert: { kind, reason, at: now } });
-            cloud.publishSnapshot(snap.png, { title: 'Cảnh báo Valet: ' + reason, alert: true, at: now }).catch(() => {});
+            cloud.publishSnapshot(snap.png, { title: 'Cảnh báo Valet: ' + reason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('🚨 CẢNH BÁO VALET: ' + reason, t, { valet: v });
                 tg.sendSnapshotPhoto(snap.png, cap, t, true).catch((e) => log('valet alert err: ' + e.message));
@@ -692,14 +700,14 @@ function createService(customCfg) {
         if (action === 'snap_now') {
             const pairRes = await Promise.all([
                 callWorker('refresh_vitals', {}, 3500),
-                tryGrab360(4200),
+                tryGrab360(4800),
             ]);
             const camGrab = pairRes[1];
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
             const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true);
             const snapLabel = snap.hasCamera ? '4 camera 360° quanh xe' : 'thẻ trạng thái đỗ xe';
-            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
+            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', camMeta: snap.camMeta || null, at: Date.now() }).catch(() => false);
             log('snap_now: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + cloudSent);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
@@ -713,47 +721,134 @@ function createService(customCfg) {
 
         if (action === 'start1cr' || action === 'stop1cr') {
             const wantOn = action === 'start1cr';
-            const rep = await callWorker(action, {}, 8000);
-            const resObj = (rep && rep.result) || {};
-            if (rep && rep.ok) {
-                const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + (resObj.method || 'SOME/IP');
-                tell(plain, 'go');
-                if (config.botToken && config.chatId) {
-                    tg.sendMessage((wantOn ? '🔥 ' : '⏹ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
+            const prepRep = await callWorker('prepare_1cr', { wantOn }, 4500);
+            if (!prepRep || !prepRep.ok || !prepRep.result) {
+                const fallbackErr = (prepRep && prepRep.error) || 'Trợ thủ tín hiệu xe chưa sẵn sàng';
+                tell('1CR: ' + fallbackErr, 'warn');
+                return { ok: false, error: fallbackErr };
+            }
+            const prep = prepRep.result;
+            let verdict = prep.verdict || { active: false, mode: 'off' };
+            const trace = [];
+
+            if (wantOn && verdict.consentEnabled === false && Array.isArray(prep.consentCandidates)) {
+                for (let ci = 0; ci < prep.consentCandidates.length; ci++) {
+                    const cc = prep.consentCandidates[ci];
+                    const oc = await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2000);
+                    if (!oc || !oc.ok) await callWorker('invoke_one', cc, 2000);
                 }
-                return { ok: true, message: plain, detail: resObj };
             }
-            const consentList = wantOn && Array.isArray(resObj.consentCandidates) ? resObj.consentCandidates.slice(0, 3) : [];
-            for (let ci = 0; ci < consentList.length; ci++) {
-                const cc = consentList[ci];
-                await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2500);
-            }
-            const cands = Array.isArray(resObj.candidates) ? resObj.candidates.slice(0, 8) : [];
-            const hitNames = [];
+
+            const cands = Array.isArray(prep.candidates) ? prep.candidates : [];
+            let hitLabel = '';
+            let lastVerifyRes = null;
+
             for (let i = 0; i < cands.length; i++) {
                 const cd = cands[i];
-                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3200);
-                log('1CR OAP ' + cd.iface.split('.').pop() + '.' + cd.name + ': ' + (oapRes && oapRes.ok ? 'ok' : ((oapRes && oapRes.error) || 'fail')));
+                const shortName = cd.iface.split('.').pop() + '.' + cd.name + (cd.stage ? ('[' + cd.stage + ']') : '');
+                const oapTmo = cd.hasLiveProvider === false ? 1200 : 2500;
+                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, oapTmo);
+                let sentAny = !!(oapRes && oapRes.ok);
                 if (oapRes && oapRes.ok) {
-                    hitNames.push(cd.iface.split('.').pop() + '.' + cd.name);
-                    if (hitNames.length >= 2) break;
+                    const respNote = oapRes.response ? (' resp=' + JSON.stringify(oapRes.response)) : '';
+                    log('1CR OAP ' + shortName + ': ok' + respNote);
+                    trace.push({ via: 'OAP-ACL', step: shortName, response: oapRes.response || null });
+                    if (oapRes.response && oapRes.response.accepted && /NOT_ACCEPTED/.test(String(oapRes.response.accepted))) {
+                        continue;
+                    }
+                } else if (cd.hasLiveProvider !== false) {
+                    const wkRes = await callWorker('invoke_one', cd, 2200);
+                    if (wkRes && wkRes.ok && wkRes.result && wkRes.result.ok) {
+                        sentAny = true;
+                        log('1CR Worker ' + shortName + ': ok');
+                        trace.push({ via: 'worker', step: shortName, response: wkRes.result.response || null });
+                    } else {
+                        log('1CR ' + shortName + ' err: ' + ((oapRes && oapRes.error) || (wkRes && wkRes.result && wkRes.result.error) || 'fail'));
+                    }
+                }
+                if (!sentAny) continue;
+
+                if (!wantOn) {
+                    hitLabel = shortName;
+                    continue;
+                }
+
+                let vRep = await callWorker('verify_1cr', { waitMs: 800 }, 3500);
+                lastVerifyRes = vRep && vRep.result;
+                if (lastVerifyRes && lastVerifyRes.verdict) verdict = lastVerifyRes.verdict;
+
+                if (!verdict.active && oapRes && oapRes.ok && cd.hasLiveProvider !== false) {
+                    const wkTry = await callWorker('invoke_one', cd, 2000);
+                    if (wkTry && wkTry.ok && wkTry.result && wkTry.result.ok) {
+                        vRep = await callWorker('verify_1cr', { waitMs: 650 }, 3200);
+                        lastVerifyRes = vRep && vRep.result;
+                        if (lastVerifyRes && lastVerifyRes.verdict) verdict = lastVerifyRes.verdict;
+                    }
+                }
+
+                if (verdict.active) {
+                    hitLabel = shortName;
+                    if (verdict.mode === 'auto_precond' && !verdict.engineRemoteActive) {
+                        const crankCheck = await callWorker('verify_1cr', { waitMs: 1300 }, 3500);
+                        if (crankCheck && crankCheck.result && crankCheck.result.verdict) {
+                            verdict = crankCheck.result.verdict;
+                        }
+                    }
+                    break;
                 }
             }
-            if (hitNames.length) {
-                S.telemetry.climate1cr.active = wantOn;
-                const extraNote = wantOn && S.telemetry.engineRunning
-                    ? ' (Xe đang nổ máy sẵn; để thử đề nổ từ xa hãy tắt máy & khoá xe từ bên ngoài)'
-                    : (wantOn && S.telemetry.locked === false ? ' (Xe chưa khoá nên quạt làm mát cabin chạy)' : '');
-                const plain = (wantOn ? 'Đã kích hoạt 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + hitNames.join(', ') + extraNote;
-                tell(plain, 'go');
-                return { ok: true, message: plain, detail: { ok: true, methods: hitNames } };
+
+            if (!wantOn) {
+                const offRep = await callWorker('verify_1cr', {
+                    waitMs: 700,
+                    lastAction: 'Tắt làm mát 1CR',
+                    lastResult: 'Đã tắt 1CR',
+                }, 3500);
+                if (offRep && offRep.result && offRep.result.verdict) verdict = offRep.result.verdict;
+                S.telemetry.climate1cr.active = !!verdict.active;
+                const stopMsg = verdict.active
+                    ? 'Đã gửi lệnh tắt 1CR nhưng hộp điều hoà vẫn báo đang chạy — hãy bấm thêm lần nữa.'
+                    : ('Đã tắt đề nổ / làm mát 1CR' + (hitLabel ? (' (' + hitLabel + ')') : '') + '.');
+                tell(stopMsg, verdict.active ? 'warn' : 'go');
+                if (config.botToken && config.chatId) {
+                    tg.sendMessage('⏹ ' + stopMsg, S.telemetry, config.valet.enabled).catch(() => {});
+                }
+                return { ok: !verdict.active, verified: !verdict.active, message: stopMsg, detail: { verdict, trace } };
             }
-            const errText = (resObj && resObj.error) || (rep && rep.error) || 'Chưa nhận được phản hồi từ hộp điều hoà';
-            tell('1CR: ' + errText, 'warn');
+
+            S.telemetry.climate1cr.active = !!verdict.active;
+            if (verdict.active) {
+                let startMsg;
+                if (verdict.mode === 'engine_1cr') {
+                    startMsg = '🔥 Đã đề nổ động cơ 1CR & bật điều hoà làm mát cabin (' + hitLabel + ')!';
+                } else if (verdict.mode === 'vent_only') {
+                    startMsg = '🌬️ Đã bật quạt thông gió cabin (' + hitLabel + '), nhưng động cơ chưa nổ — muốn nổ máy 1CR hãy ra ngoài bấm KHOÁ XE (hoặc kiểm tra FSC 1CR trong DME/BDC).';
+                } else {
+                    startMsg = '❄️ Đã bật chế độ làm mát từ xa AutoMode (' + hitLabel + ')!';
+                }
+                await callWorker('verify_1cr', {
+                    waitMs: 0,
+                    lastAction: 'Kích nổ / Làm mát 1CR',
+                    lastResult: startMsg.slice(0, 90),
+                }, 2000);
+                tell(startMsg, verdict.mode === 'vent_only' ? 'warn' : 'go');
+                if (config.botToken && config.chatId) {
+                    tg.sendMessage(startMsg, S.telemetry, config.valet.enabled).catch(() => {});
+                }
+                return { ok: true, verified: true, mode: verdict.mode, message: startMsg, detail: { method: hitLabel, verdict, trace } };
+            }
+
+            const errText = (lastVerifyRes && lastVerifyRes.explanation) || CarLink.explain1crError(verdict, S.telemetry);
+            await callWorker('verify_1cr', {
+                waitMs: 0,
+                lastAction: 'Kích nổ 1CR (Chưa bật)',
+                lastResult: errText.slice(0, 90),
+            }, 2000);
+            tell('1CR chưa bật: ' + errText, 'warn');
             if (source === 'Telegram' && config.botToken && config.chatId) {
-                tg.sendMessage('⚠️ 1CR: ' + errText, S.telemetry, config.valet.enabled).catch(() => {});
+                tg.sendMessage('⚠️ 1CR chưa bật: ' + errText, S.telemetry, config.valet.enabled).catch(() => {});
             }
-            return { ok: false, error: errText, detail: resObj };
+            return { ok: false, verified: false, error: errText, detail: { verdict, trace } };
         }
 
         if (action === 'timer_set' || action === 'timer_off') {
@@ -1000,7 +1095,7 @@ function createService(customCfg) {
 
         if (req.method === 'GET' && pathname === '/api/snapshot.png') {
             const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'XEM TRUOC ANH TRANG THAI', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
-            res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Content-Length': snap.png.length });
+            res.writeHead(200, { 'Content-Type': snap.mime || 'image/png', 'Cache-Control': 'no-store', 'Content-Length': snap.png.length });
             res.end(snap.png);
             return;
         }
