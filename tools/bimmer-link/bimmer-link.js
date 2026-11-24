@@ -27,8 +27,9 @@ const Tg = require('./telegram');
 const CarLink = require('./car-link');
 const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
+const Cam360 = require('./cam360');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -296,14 +297,20 @@ function createService(customCfg) {
     const identity = Cloud.loadOrCreateIdentity(path.join(C.state, 'cloud-identity.json'));
     let heroData = { detected: false, meta: { chassis: '', modelTitle: 'BMW iDrive 7', series: 'BMW', trimLabel: '', paintLabel: '', paintRgb: null, availableModels: [] }, png: null };
     let heroConfirmedSig = '';
+    let lastTrueChassis = '';
 
     function computeHeroSig() {
-        return JSON.stringify([heroData.meta.chassis, heroData.meta.trimLine, heroData.meta.colour]) + '|' + (heroData.png ? heroData.png.length : 0);
+        return JSON.stringify([heroData.meta.chassis, heroData.meta.trimLine, heroData.meta.colour, heroData.meta.renderSource]) + '|' + (heroData.png ? heroData.png.length : 0);
     }
 
     function refreshFactoryHero(forcePush) {
         try {
-            const scanned = CarHero.scanFactoryVehicle({ procDir: C.proc, override: config.appearance });
+            const scanned = CarHero.scanFactoryVehicle({
+                procDir: C.proc,
+                override: config.appearance,
+                trueChassis: S.telemetry && S.telemetry.trueChassis,
+                kombiSpoofed: !!(S.telemetry && S.telemetry.kombiSpoofed),
+            });
             if (scanned && (scanned.detected || scanned.png)) {
                 heroData = scanned;
                 if (scanned.png) {
@@ -404,6 +411,9 @@ function createService(customCfg) {
                 return;
             }
 
+            if (c === 'snap_now') {
+                await ack(true, '📸 Xe đang chụp ảnh 360° & đọc thông số — chờ ~3 giây…');
+            }
             const out = await executeAction(c, a, cmdObj.device || 'MyBMW App');
             syncCloudState(true);
             await ack(out && out.ok, (out && (out.message || out.error)) || 'Đã xử lý lệnh.', out && out.detail);
@@ -490,6 +500,11 @@ function createService(customCfg) {
             if (msg.state) S.telemetry = msg.state;
             S.activeTrip = msg.activeTrip || null;
             if (msg.lastTrip) S.lastTrip = msg.lastTrip;
+            if (S.telemetry && S.telemetry.trueChassis && S.telemetry.trueChassis !== lastTrueChassis) {
+                lastTrueChassis = S.telemetry.trueChassis;
+                refreshFactoryHero(true);
+                syncCloudState(true);
+            }
             checkValetViolations();
             writeStatus();
             syncCloudState(false);
@@ -507,6 +522,22 @@ function createService(customCfg) {
         }
     }
 
+    async function tryGrab360(timeoutMs) {
+        if (C.noWorker) return null;
+        try {
+            return await Cam360.capture360Frame({
+                runDir: C.run,
+                rawOutFile: path.join(C.run, 'cam4.rgba'),
+                timeoutMs: timeoutMs || 3800,
+                wakeCam: () => callWorker('cam_wake', {}, 4000),
+                releaseCam: () => callWorker('cam_release', {}, 3000),
+                log,
+            });
+        } catch (e) {
+            return null;
+        }
+    }
+
     async function onCarParked(trip) {
         if (trip && trip.distanceKm >= 0.1) {
             trips.unshift(trip);
@@ -518,13 +549,14 @@ function createService(customCfg) {
 
         if (config.autoSyncTimer && /^\d{2}:\d{2}$/.test(config.dailyTimer)) {
             const parts = config.dailyTimer.split(':');
-            await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true }, 4500);
+            await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true, userInitiated: true }, 4500);
         }
 
         if (config.parkSnapshot) {
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ĐÃ ĐỖ XE AN TOAN', trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            await tryGrab360(3600);
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { event: 'parked' });
-            cloud.publishSnapshot(snap.png, { title: 'Đã đỗ xe', at: Date.now() }).catch(() => {});
+            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', at: Date.now() }).catch(() => {});
             if (config.botToken && config.chatId) {
                 try {
                     const cap = Tg.formatStatusCaption('XE VỪA ĐỖ XONG', S.telemetry, { trip, valet: config.valet });
@@ -600,18 +632,22 @@ function createService(customCfg) {
         }
 
         if (action === 'snap_now') {
-            await callWorker('refresh_vitals', {}, 3500);
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRANG THAI TRUC TIEP', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            await Promise.all([
+                callWorker('refresh_vitals', {}, 3500),
+                tryGrab360(3800),
+            ]);
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true);
-            const cloudSent = await cloud.publishSnapshot(snap.png, { title: 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
+            const snapLabel = snap.hasCamera ? '4 camera 360° quanh xe' : 'thẻ trạng thái đỗ xe';
+            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
                 await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
-                tell('Đã chụp và đồng bộ lên App MyBMW & Telegram!', 'go');
-                return { ok: true, message: S.message };
+                tell('Đã chụp ' + snapLabel + ' & gửi lên App MyBMW + Telegram!', 'go');
+                return { ok: true, hasCamera: snap.hasCamera, message: S.message };
             }
-            tell(cloudSent ? 'Đã chụp và đồng bộ ảnh lên App MyBMW!' : 'Đã chụp trạng thái xe.', 'go');
-            return { ok: true, message: S.message };
+            tell(cloudSent ? ('Đã chụp ' + snapLabel + ' & gửi về App MyBMW!') : ('Đã chụp ' + snapLabel + '.'), 'go');
+            return { ok: true, hasCamera: snap.hasCamera, message: S.message };
         }
 
         if (action === 'start1cr' || action === 'stop1cr') {
@@ -641,7 +677,7 @@ function createService(customCfg) {
             if (en) config.dailyTimer = hhmm;
             else config.autoSyncTimer = false;
             saveConfig();
-            const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en }, 6000);
+            const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en, userInitiated: true }, 6000);
             S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
             const plain = en
                 ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? (' (' + ((rep.result && rep.result.method) || 'BDC/IHKA') + ')') : ' (đã lưu lịch)'))

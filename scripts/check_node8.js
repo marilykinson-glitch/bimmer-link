@@ -17,6 +17,7 @@ const FILES = [
     'tools/bimmer-link/bimmer-link.js',
     'tools/bimmer-link/car-link.js',
     'tools/bimmer-link/car-hero.js',
+    'tools/bimmer-link/cam360.js',
     'tools/bimmer-link/carpaint.js',
     'tools/bimmer-link/wbm.js',
     'tools/bimmer-link/cloud.js',

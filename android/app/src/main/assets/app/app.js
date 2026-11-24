@@ -85,6 +85,7 @@ function switchView(name, btn) {
   Array.prototype.forEach.call(document.querySelectorAll('.nav-tab'), (b) => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   if (name === 'map') setTimeout(refreshMap, 80);
+  if (name === '1cr' && identity && !lastSchema) requestSchema();
 }
 
 /* ---------------- Photorealistic Studio Bodywork Carpaint Shader (Fallback & Instant Preview) ---------------- */
@@ -139,33 +140,33 @@ function shadeFallbackStudioCar(rgb) {
   const isLightPaint = tLum > 0.65;
   const isDarkPaint = tLum < 0.14;
 
-  // Preserve front & rear alloy wheel circles so rims and blue M brake calipers stay 100% untouched
-  const w1x = 0.502 * w, w1y = 0.655 * h, w1r2 = Math.pow(0.082 * w, 2);
-  const w2x = 0.768 * w, w2y = 0.608 * h, w2r2 = Math.pow(0.058 * w, 2);
+  // Preserve 3/4-perspective elliptical alloy wheel rims & blue brake calipers without eating into fenders!
+  const w1x = 0.496 * w, w1y = 0.635 * h, w1rx = 0.033 * w, w1ry = 0.105 * h;
+  const w2x = 0.766 * w, w2y = 0.594 * h, w2rx = 0.023 * w, w2ry = 0.082 * h;
 
   for (let y = 0; y < h; y++) {
     const ny = y / h;
-    if (ny < 0.20 || ny > 0.76) continue;
-    const vyMask = smoothstep(0.21, 0.27, ny) * (1 - smoothstep(0.69, 0.75, ny));
+    if (ny < 0.22 || ny > 0.80) continue;
+    const vyMask = smoothstep(0.23, 0.28, ny) * (1 - smoothstep(0.73, 0.79, ny));
     if (vyMask <= 0.001) continue;
 
     for (let x = 0; x < w; x++) {
       const nx = x / w;
-      if (nx < 0.16 || nx > 0.82) continue;
-      const vxMask = smoothstep(0.17, 0.22, nx) * (1 - smoothstep(0.78, 0.82, nx));
+      if (nx < 0.17 || nx > 0.83) continue;
+      const vxMask = smoothstep(0.175, 0.21, nx) * (1 - smoothstep(0.79, 0.825, nx));
 
-      // Skip wheel circles
-      const dx1 = x - w1x, dy1 = y - w1y;
-      if (dx1 * dx1 + dy1 * dy1 < w1r2) continue;
-      const dx2 = x - w2x, dy2 = y - w2y;
-      if (dx2 * dx2 + dy2 * dy2 < w2r2) continue;
+      // Skip elliptical wheel openings smoothly
+      const e1 = Math.pow((x - w1x) / w1rx, 2) + Math.pow((y - w1y) / w1ry, 2);
+      if (e1 < 1.0) continue;
+      const e2 = Math.pow((x - w2x) / w2rx, 2) + Math.pow((y - w2y) / w2ry, 2);
+      if (e2 < 1.0) continue;
 
       // Skip upper greenhouse window glass area
       let glassPenalty = 1;
-      if (nx > 0.36 && nx < 0.73 && ny > 0.25 && ny < 0.44) {
+      if (nx > 0.36 && nx < 0.74 && ny > 0.26 && ny < 0.435) {
         const i = (y * w + x) * 4;
         const lumG = (d[i] + d[i + 1] + d[i + 2]) / (3 * 255);
-        if (lumG < 0.28) glassPenalty = 0.15;
+        if (lumG < 0.32) glassPenalty = 0.08;
       }
 
       const idx = (y * w + x) * 4;
@@ -174,10 +175,10 @@ function shadeFallbackStudioCar(rgb) {
       const lum = 0.299 * r + 0.587 * g + 0.114 * b;
       const sat = maxC > 0.02 ? (maxC - minC) / maxC : 0;
 
-      // Keep dark grille/tires/background (lum < 0.11), bright DRL headlights (lum > 0.83), and colored lights/badges (sat > 0.18) untouched
-      const lowKeep = smoothstep(0.10, 0.17, lum);
+      // Paint all shadowed lower bodywork down to lum 0.055 while keeping pitch-black grille/intakes/tires & DRL white untouched
+      const lowKeep = smoothstep(0.052, 0.105, lum);
       const highKeep = 1 - smoothstep(0.76, 0.86, lum);
-      const neutralKeep = 1 - smoothstep(0.12, 0.22, sat);
+      const neutralKeep = 1 - smoothstep(0.13, 0.24, sat);
       const mask = vxMask * vyMask * lowKeep * highKeep * neutralKeep * glassPenalty;
       if (mask <= 0.01) continue;
 
@@ -436,7 +437,7 @@ function openLiveSockets() {
       if (ev && ev.event === 'message' && ev.message) {
         const dec = await decryptJson(ev.message);
         if (dec) {
-          handler(dec, Date.now());
+          handler(dec, Date.now(), true);
           renderAll();
         }
       }
@@ -485,7 +486,7 @@ function onStatePacket(pkt, ts) {
   }
 }
 
-function onPhotoPacket(pkt) {
+function onPhotoPacket(pkt, ts, isLive) {
   if (!pkt || pkt.t !== 'photo_chunk' || !pkt.id) return;
   let b = photoBuckets[pkt.id];
   if (!b) b = photoBuckets[pkt.id] = { total: pkt.total || 1, parts: {}, got: 0, at: pkt.at || Date.now(), title: pkt.title || '' };
@@ -493,15 +494,39 @@ function onPhotoPacket(pkt) {
     b.parts[pkt.idx] = pkt.b64 || '';
     b.got++;
   }
+  if (isLive && b.got < b.total) {
+    const st = document.getElementById('snapTime');
+    if (st) st.textContent = 'Đang tải ảnh (' + b.got + '/' + b.total + ')…';
+  }
   if (b.got >= b.total) {
     let fullB64 = '';
     for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
     delete photoBuckets[pkt.id];
+    const mime = fullB64.indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
     if (!latestSnap || b.at >= (latestSnap.at || 0)) {
-      latestSnap = { dataUrl: 'data:image/png;base64,' + fullB64, at: b.at, title: b.title };
+      latestSnap = { dataUrl: 'data:' + mime + ';base64,' + fullB64, at: b.at, title: b.title };
       saveLocal('mybmw_snap', latestSnap);
+      if (isLive) {
+        showToast('📸 Đã nhận ảnh chụp từ xe: ' + (b.title || 'Chạm vào ảnh để phóng to'), '#2fd27a', 6500);
+        setTimeout(() => {
+          const card = document.getElementById('latestSnapCard');
+          if (card && !document.getElementById('view-home').classList.contains('hidden')) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 120);
+      }
     }
   }
+}
+
+function openSnapModal() {
+  if (!latestSnap || !latestSnap.dataUrl) return;
+  document.getElementById('snapModalImg').src = latestSnap.dataUrl;
+  document.getElementById('snapModal').classList.remove('hidden');
+}
+
+function closeSnapModal() {
+  document.getElementById('snapModal').classList.add('hidden');
 }
 
 function onHeroPacket(pkt) {
@@ -646,18 +671,41 @@ function requestSchema() {
 }
 
 function sendRaw1cr(saveAsDefault, role) {
+  const iface = document.getElementById('inpIface').value.trim();
+  const kind = document.getElementById('inpKind').value.trim() || 'setter';
+  const name = document.getElementById('inpMember').value.trim();
+  if (!iface || !name) {
+    requestSchema();
+    showToast('Đang tải danh sách hàm Climate từ xe — hãy bấm thẳng nút ⚡ Bật trên thẻ hiện ra bên trên!', '#ffb020', 6000);
+    return;
+  }
   let payload = null;
   try { payload = JSON.parse(document.getElementById('inpPayload').value); } catch (e) {
     showToast('Payload JSON không hợp lệ', '#ef4444');
     return;
   }
   sendCmd('invoke_raw', {
-    iface: document.getElementById('inpIface').value.trim(),
-    kind: document.getElementById('inpKind').value.trim(),
-    name: document.getElementById('inpMember').value.trim(),
+    iface,
+    kind,
+    name,
     payload,
     saveAsDefault: !!saveAsDefault,
     role: role || 'start',
+  });
+}
+
+function quickInvoke1cr(iface, kind, name, payload, saveRole) {
+  document.getElementById('inpIface').value = iface;
+  document.getElementById('inpKind').value = kind;
+  document.getElementById('inpMember').value = name;
+  document.getElementById('inpPayload').value = JSON.stringify(payload);
+  sendCmd('invoke_raw', {
+    iface,
+    kind,
+    name,
+    payload,
+    saveAsDefault: !!saveRole,
+    role: saveRole || 'start',
   });
 }
 
@@ -800,9 +848,22 @@ function renderAll() {
     sec.textContent = c1.active ? '❄️ ĐANG NỔ MÁY / LÀM MÁT 1CR' : (tel.engineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN');
   }
 
-  // Fuel & Range (guard against pre-0.4.0 unscaled range/odo artifacts until car updates to 0.4.0)
-  const validRange = (tel.rangeKm != null && !(isLegacy03 && tel.fuelPct == null && tel.rangeKm === 20)) ? tel.rangeKm : null;
-  document.getElementById('rangeKm').innerHTML = (validRange != null ? validRange : '--') + ' <span>km</span>';
+  // Show 1-tap hint if head unit is Kombi-coded to F90LCI (M5 CS) and owner hasn't picked their true chassis yet
+  const kombiHint = document.getElementById('kombiHint');
+  if (kombiHint) {
+    const showHint = !localAppearance.chassis && !prof.trueChassis && (effChassis === 'F90LCI' || prof.codedChassis === 'F90LCI');
+    kombiHint.classList.toggle('hidden', !showHint);
+  }
+
+  // Fuel & Range (with client-side tank estimation fallback if car hasn't broadcast KOMBI range yet)
+  let dispRange = (tel.rangeKm != null && !(isLegacy03 && tel.fuelPct == null && tel.rangeKm === 20)) ? tel.rangeKm : null;
+  let isEstRange = !!tel.rangeEstimated;
+  if (dispRange == null && tel.fuelPct != null && tel.fuelPct > 0) {
+    const fullTankKm = /^G0[567]/.test(effChassis) ? 690 : (/^G0[12]/.test(effChassis) ? 620 : (/^G2/.test(effChassis) ? 610 : 650));
+    dispRange = Math.round((tel.fuelPct / 100) * fullTankKm);
+    isEstRange = true;
+  }
+  document.getElementById('rangeKm').innerHTML = (dispRange != null ? ((isEstRange ? '~' : '') + dispRange) : '--') + ' <span>km</span>';
   document.getElementById('fuelPct').textContent = tel.fuelPct != null ? (tel.fuelPct + '%') : (tel.fuelLiters != null ? (tel.fuelLiters + ' L') : '--%');
   document.getElementById('fuelFill').style.width = Math.max(0, Math.min(100, tel.fuelPct || 0)) + '%';
 
@@ -910,15 +971,30 @@ function renderSchemaCards(schema) {
     card.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--cyan);margin-bottom:6px">' + iv.iface + '</div>' +
       (writables.length ? writables.map((w) => {
         const liveVal = schema.live && schema.live[iv.iface + '.' + w.name];
-        let defaultSample = liveVal !== undefined ? liveVal : 1;
-        if (liveVal === undefined && w.typeDef && w.typeDef.kind === 'enum' && w.typeDef.values && w.typeDef.values.length > 1) {
-          defaultSample = w.typeDef.values[1];
+        let onPayload = 1, offPayload = 0;
+        if (w.kind === 'method' && Array.isArray(w.inArgs)) {
+          onPayload = {}; offPayload = {};
+          w.inArgs.forEach((a) => {
+            if (!a || !a.name) return;
+            const vals = a.typeDef && a.typeDef.kind === 'enum' && a.typeDef.values ? a.typeDef.values : null;
+            onPayload[a.name] = vals && vals.length > 1 ? vals[1] : 1;
+            offPayload[a.name] = vals && vals.length > 0 ? vals[0] : 0;
+          });
+        } else if (w.typeDef && w.typeDef.kind === 'enum' && w.typeDef.values && w.typeDef.values.length >= 2) {
+          onPayload = w.typeDef.values[1];
+          offPayload = w.typeDef.values[0];
+        } else if (typeof liveVal === 'boolean') {
+          onPayload = true; offPayload = false;
         }
-        return '<div style="padding:6px;background:#0f172a;border-radius:8px;margin-bottom:5px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:6px">' +
+        return '<div style="padding:8px;background:#0f172a;border-radius:9px;margin-bottom:6px;font-size:12px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px">' +
           '<div style="min-width:0;overflow:hidden;text-overflow:ellipsis"><b>' + w.name + '</b> <span style="color:var(--dim)">(' + w.kind + (w.roles && w.roles.length ? ' · ' + w.roles.join(',') : '') + ')</span></div>' +
-          '<button class="btn" style="flex:0;min-width:64px;padding:5px 10px;font-size:11px" onclick=\'fillRaw(' +
-          JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(defaultSample) +
-          ')\'>Chọn</button></div>';
+          '</div>' +
+          '<div style="display:flex;gap:6px">' +
+          '<button class="btn warn" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(onPayload) + ',null)\'>⚡ Thử Bật</button>' +
+          '<button class="btn" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(offPayload) + ',null)\'>⏹ Thử Tắt</button>' +
+          '<button class="btn go" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(onPayload) + ',"start")\'>📌 Ghim 1CR</button>' +
+          '</div></div>';
       }).join('') : '<div style="font-size:11.5px;color:var(--dim)">Chỉ đọc (' + readables.map((r) => r.name).join(', ') + ')</div>');
     box.appendChild(card);
   });
@@ -972,7 +1048,7 @@ window.injectPairCodeFromNative = function (raw) {
 (function init() {
   initSwatches();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('./sw.js?v=0.4.0').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=0.4.1').catch(() => {});
   }
   renderAll();
   const initialCode = extractPairCode(location.hash) || extractPairCode(location.search) || localStorage.getItem('mybmw_pair') || '';

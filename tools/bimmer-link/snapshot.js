@@ -48,17 +48,71 @@ function encodePngRgba(w, h, rgba) {
     const raw = Buffer.allocUnsafe(stride * h);
     for (let y = 0; y < h; y++) {
         const rowStart = y * stride;
-        raw[rowStart] = 0; // filter None
-        rgba.copy(raw, rowStart + 1, y * w * 4, (y + 1) * w * 4);
+        const srcOff = y * w * 4;
+        raw[rowStart] = 1; // PNG Sub filter for ~3x smaller UI card files
+        for (let x = 0; x < w * 4; x++) {
+            const prev = x >= 4 ? rgba[srcOff + x - 4] : 0;
+            raw[rowStart + 1 + x] = (rgba[srcOff + x] - prev) & 255;
+        }
     }
     const ihdr = Buffer.alloc(13);
     ihdr.writeUInt32BE(w, 0);
     ihdr.writeUInt32BE(h, 4);
     ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-    const idat = zlib.deflateSync(raw, { level: 6 });
+    const idat = zlib.deflateSync(raw, { level: 9 });
     return Buffer.concat([
         Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
         pngChunk('IHDR', ihdr),
+        pngChunk('IDAT', idat),
+        pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+}
+
+/**
+ * Encode photographic 360-camera RGBA composites as an 8-bit indexed PNG (6x7x6 RGB cube + 2x2 ordered dither)
+ * so real camera snapshots stay ~35-48 KB (~13 chunks = ~1.7s over ntfy.sh) with zero external libraries.
+ */
+function encodeIndexedPngRgba(w, h, rgba) {
+    const plte = Buffer.alloc(256 * 3);
+    let pi = 0;
+    for (let r = 0; r < 6; r++) {
+        for (let g = 0; g < 7; g++) {
+            for (let b = 0; b < 6; b++) {
+                plte[pi] = Math.round((r * 255) / 5);
+                plte[pi + 1] = Math.round((g * 255) / 6);
+                plte[pi + 2] = Math.round((b * 255) / 5);
+                pi += 3;
+            }
+        }
+    }
+    const stride = w + 1;
+    const raw = Buffer.allocUnsafe(stride * h);
+    const bayer = [-3, 1, 3, -1];
+    for (let y = 0; y < h; y++) {
+        const rowOff = y * stride;
+        raw[rowOff] = 0;
+        let si = y * w * 4;
+        const by = (y & 1) << 1;
+        for (let x = 0; x < w; x++, si += 4) {
+            const d = bayer[by | (x & 1)];
+            const r = Math.max(0, Math.min(255, rgba[si] + d));
+            const g = Math.max(0, Math.min(255, rgba[si + 1] + d));
+            const b = Math.max(0, Math.min(255, rgba[si + 2] + d));
+            const ri = Math.round((r * 5) / 255);
+            const gi = Math.round((g * 6) / 255);
+            const bi = Math.round((b * 5) / 255);
+            raw[rowOff + 1 + x] = ri * 42 + gi * 6 + bi;
+        }
+    }
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(w, 0);
+    ihdr.writeUInt32BE(h, 4);
+    ihdr[8] = 8; ihdr[9] = 3; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    const idat = zlib.deflateSync(raw, { level: 9 });
+    return Buffer.concat([
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        pngChunk('IHDR', ihdr),
+        pngChunk('PLTE', plte),
         pngChunk('IDAT', idat),
         pngChunk('IEND', Buffer.alloc(0)),
     ]);
@@ -230,32 +284,32 @@ function renderSnapshotPng(telemetry, extra, opts) {
     const cam = tryCapture4Cam(opts);
 
     if (cam) {
-        const s = new MiniSurface(960, 600, '#070a10');
-        s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 960, 440);
+        const s = new MiniSurface(768, 496, '#070a10');
+        s.blitRgbaScaled(cam.rgba, cam.w, cam.h, 0, 0, 768, 352);
         // Crosshairs & camera labels for 2x2 quad view
-        s.fillRect(479, 0, 2, 440, '#1e293b');
-        s.fillRect(0, 219, 960, 2, '#1e293b');
-        const labels = [['CAM TRUOC', 12, 10], ['CAM SAU', 492, 10], ['GUONG TRAI', 12, 230], ['GUONG PHAI', 492, 230]];
+        s.fillRect(383, 0, 2, 352, '#1e293b');
+        s.fillRect(0, 175, 768, 2, '#1e293b');
+        const labels = [['CAM TRUOC', 10, 8], ['CAM SAU', 394, 8], ['GUONG TRAI', 10, 184], ['GUONG PHAI', 394, 184]];
         labels.forEach((lb) => {
-            s.fillRect(lb[1] - 4, lb[2] - 4, 140, 22, [8, 11, 18, 190]);
+            s.fillRect(lb[1] - 4, lb[2] - 4, 132, 22, [8, 11, 18, 195]);
             s.text(lb[0], lb[1], lb[2], 2, '#4da6ff');
         });
         // Telemetry HUD bar underneath
-        s.fillRect(0, 440, 960, 160, '#0b101b');
-        s.fillRect(0, 440, 960, 3, '#2fd27a');
-        s.text('BMW MGU 360 SNAPSHOT  -  ' + (ex.title || t.conditionLabel || 'DA DO XE'), 20, 456, 2, '#2fd27a', 68);
-        s.text(formatClock(ex.at), 700, 456, 2, '#94a3b8', 24);
+        s.fillRect(0, 352, 768, 144, '#0b101b');
+        s.fillRect(0, 352, 768, 3, '#2fd27a');
+        const carHdr = ex.modelTitle ? (ex.modelTitle + '  -  ') : 'BMW 360  -  ';
+        s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 16, 366, 2, '#2fd27a', 46);
+        s.text(formatClock(ex.at), 548, 366, 2, '#94a3b8', 20);
         const loc = t.pos
             ? ((t.pos.street ? t.pos.street + ', ' : '') + (t.pos.district ? t.pos.district + ', ' : '') + (t.pos.city || '') + ' (' + t.pos.lat.toFixed(5) + ', ' + t.pos.lon.toFixed(5) + ')')
             : 'CHUA CO TOA DO GPS';
-        s.text('VI TRI: ' + loc, 20, 492, 2, '#f8fafc', 74);
-        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ')   |   12V: ' + fmtVal(t.battery12v, 'V') +
-            '   |   NHIET DO: ' + fmtVal(t.ambientC, '*C') + ' / MAY ' + fmtVal(t.coolantC, '*C') +
-            '   |   1CR: ' + (c1.active ? 'DANG NO LAM MAT' : (c1.timerText ? 'HEN ' + c1.timerText : 'SAN SANG'));
-        s.text(line2, 20, 526, 2, '#cbd5e1', 76);
+        s.text('VI TRI: ' + loc, 16, 398, 2, '#f8fafc', 61);
+        const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ')  |  12V: ' + fmtVal(t.battery12v, 'V') +
+            '  |  NHIET: ' + fmtVal(t.ambientC, '*C') + ' / ' + fmtVal(t.coolantC, '*C');
+        s.text(line2, 16, 430, 2, '#cbd5e1', 62);
         const doorsWarn = (t.doorsOpen && t.doorsOpen.length) || t.trunkOpen || t.hoodOpen || t.locked === false;
-        s.text(doorsWarn ? 'CANH BAO: KIEM TRA CUA / COP / KHOA XE!' : 'AN TOAN: CUA & COP DONG KIN', 20, 560, 2, doorsWarn ? '#ffb020' : '#2fd27a', 70);
-        return { png: s.png(), hasCamera: true };
+        s.text(doorsWarn ? 'CANH BAO: KIEM TRA CUA / COP / KHOA XE!' : 'AN TOAN: CUA & COP DONG KIN  |  1CR SAN SANG', 16, 462, 2, doorsWarn ? '#ffb020' : '#2fd27a', 60);
+        return { png: encodeIndexedPngRgba(s.w, s.h, s.buf), hasCamera: true };
     }
 
     // Pure Dark-Metallic BMW ConnectedDrive Telemetry Card (880x500)
@@ -266,7 +320,7 @@ function renderSnapshotPng(telemetry, extra, opts) {
     s.fillRect(586, 0, 294, 5, '#ef4444');
 
     const badgeColor = ex.alert ? '#ef4444' : (c1.active ? '#2fd27a' : '#38bdf8');
-    s.text('MYBMW MGU LINK & 1CR', 28, 26, 3, '#f8fafc');
+    s.text(ex.modelTitle || 'MYBMW MGU LINK & 1CR', 28, 26, 3, '#f8fafc', 31);
     s.text(formatClock(ex.at), 610, 30, 2, '#94a3b8');
 
     // Status banner
@@ -341,6 +395,7 @@ function renderSnapshotPng(telemetry, extra, opts) {
 module.exports = {
     MiniSurface,
     encodePngRgba,
+    encodeIndexedPngRgba,
     foldAscii,
     renderSnapshotPng,
     tryCapture4Cam,

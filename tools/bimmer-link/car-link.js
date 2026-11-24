@@ -129,19 +129,24 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 /* ---------------- Catalog Introspection (`db.datatypes`) & 1CR Payload Synthesis ---------------- */
 
-const CLIMATE_IFACE_RE = /climate|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|stationary|precond|parkheat|remotestart|independentvent|departure/i;
-const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|stationary.*clim|climatization.*now|climate.*now|direct.*oper.*clim|departure.*timer|abfahrt/i;
+const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|stationary|precond|parkheat|parkclim|remotestart|independent|departure/i;
+const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|parkclim|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt/i;
 const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
+const STEERING_OR_SEAT_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|sitzheiz|sitzklima|massage|fragrance|ionis/i;
 
 /** Classify a Climate / 1CR field or method into semantic roles for automatic invocation. */
 function classifyClimateMember(ifaceName, memberName, kind, meta) {
     const full = ifaceName + '.' + memberName;
     const roles = [];
     const writable = kind === 'method' || !!(meta && meta.setter);
-    if (/remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|motorstart|climatization.*engine|1cr/i.test(full)) {
+    if (STEERING_OR_SEAT_RE.test(full)) {
+        if (/status|state|active|on|mode/i.test(memberName) && !writable) roles.push('state_read');
+        return roles;
+    }
+    if (/remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|motorstart|climatis.*engine|climatiz.*engine|1cr/i.test(full)) {
         roles.push(writable ? 'consent_write' : 'consent_read');
     }
-    if (/direct.*oper|immediate|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatization.*now|instant.*clim|activate.*aux|start.*aux|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|precond|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatization|switch.*climat/i.test(full)) {
+    if (/direct.*oper|immediate|sofort|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatis.*now|climatiz.*now|instant.*clim|activate.*aux|start.*aux|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|independent.*clim|precond|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatis|set.*climatiz|switch.*climat|climate.*on.*off|air.*cond.*on.*off|activate.*clim|request.*clim|start.*clim|stop.*clim/i.test(full)) {
         if (!/timer|schedule|weekly|abfahrt|departure|zeitplan/i.test(memberName)) {
             roles.push(writable ? 'direct_write' : 'direct_read');
         }
@@ -151,6 +156,12 @@ function classifyClimateMember(ifaceName, memberName, kind, meta) {
     }
     if (/temp/i.test(memberName) && !writable) roles.push('temp_read');
     if (/status|state|active|on|mode/i.test(memberName) && !writable && !roles.length) roles.push('state_read');
+    // Broad fallback role on ClimateMaster / Auxiliary / Standklima / PreConditioning for writable switches that aren't setpoints/zones
+    if (writable && !roles.length && /ClimateMaster|Auxiliary|Stand|PreCond|ParkClim|Independent|Remote/i.test(ifaceName)) {
+        if (!/temp|setpoint|soll|fan|blower|geblaese|intensity|flap|distribution|defrost|recirc|sync|auto.*program|filter|style/i.test(memberName)) {
+            roles.push('master_candidate');
+        }
+    }
     return roles;
 }
 
@@ -453,8 +464,12 @@ class TelemetryTracker {
             fuelPct: null,
             fuelLiters: null,
             rangeKm: null,
+            rangeEstimated: false,
             odometerKm: null,
             battery12v: null,
+            vin: '',
+            trueChassis: '',
+            kombiSpoofed: false,
             doorsOpen: [],
             windowsOpen: [],
             locked: null,
@@ -632,6 +647,7 @@ async function runWorker() {
     let climateCatalog = { interfaces: [] };
     let tasuProxy = null;
     const tasuListeners = [];
+    const camHolders = { icam: null, cam: null, xv: null, cookie: null, timer: null };
 
     let db = null, gen = null, someip = null;
     try { db = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8')); } catch (e) {
@@ -650,6 +666,29 @@ async function runWorker() {
         const p = chain.then(step, step);
         chain = p.catch(() => {});
         return p;
+    }
+
+    async function openWildcardProxies(ifaceName, maxInst) {
+        if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return { list: [], cfg: null };
+        const proxies = {};
+        proxies[ifaceName] = '*';
+        const generated = gen.generate(db, { proxies, services: {} });
+        const cfg = generated && generated[ifaceName];
+        if (!cfg) return { list: [], cfg: null };
+        const insts = Object.keys(cfg.instances || { '1': 1 }).slice(0, maxInst || 4);
+        const list = [];
+        for (let i = 0; i < insts.length; i++) {
+            const inst = insts[i];
+            try {
+                const px = await nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 5000, ifaceName + '@' + inst));
+                const entry = { inst, proxy: px, available: !!(px.isAvailable && px.isAvailable()) };
+                try { px.subscribeToAvailability((a) => { entry.available = !!a; }); } catch (e) {}
+                list.push(entry);
+            } catch (e) {
+                emit({ ev: 'log', level: 'warn', text: 'wildcard proxy ' + ifaceName + '@' + inst + ': ' + e.message });
+            }
+        }
+        return { list, cfg };
     }
 
     async function openDynamicProxies(ifaceName, attrMap, methods, broadcasts, maxInst) {
@@ -729,10 +768,9 @@ async function runWorker() {
             }
         }
 
-        // 2. Core driving signals (CDS, Vehicle2, VehicleInformation, VehicleCondition)
-        const coreSpecs = [
-            {
-                iface: 'de.bmw.infotainment.vehicle.CDS',
+        // 2 & 3. Unified single-proxy-per-interface Core + Body / Fuel / Range / Odometer / Door / Lock watchers
+        const coreMap = {
+            'de.bmw.infotainment.vehicle.CDS': {
                 fields: ['statusEngineSpeed2', 'statusEngineTemperature'],
                 onField: (f, v) => {
                     if (!v) return;
@@ -747,8 +785,7 @@ async function runWorker() {
                     }
                 },
             },
-            {
-                iface: 'de.bmw.infotainment.vehicle.Vehicle2',
+            'de.bmw.infotainment.vehicle.Vehicle2': {
                 fields: ['statusCarSpeed2'],
                 onField: (f, v) => {
                     if (v && v.speedVehicleCentreOfGravity !== undefined && v.speedVehicleCentreOfGravity !== 65535) {
@@ -756,16 +793,14 @@ async function runWorker() {
                     }
                 },
             },
-            {
-                iface: 'de.bmw.infrastructure.VehicleCondition',
+            'de.bmw.infrastructure.VehicleCondition': {
                 fields: ['VehicleCondition'],
                 onField: (f, v) => {
                     const c = parseCondition(v && v.statusConditionVehicle);
                     if (c !== null) pushPatch({ condition: c });
                 },
             },
-            {
-                iface: 'de.bmw.infrastructure.VehicleInformation',
+            'de.bmw.infrastructure.VehicleInformation': {
                 fields: ['statusGearboxDrive', 'DataPowerTrain2'],
                 onField: (f, v) => {
                     if (!v) return;
@@ -780,74 +815,64 @@ async function runWorker() {
                     }
                 },
             },
-        ];
+        };
 
-        for (let i = 0; i < coreSpecs.length; i++) {
-            const cs = coreSpecs[i];
-            const iv = db.interfaces && db.interfaces[cs.iface];
-            if (!iv) continue;
-            const attrs = {};
-            cs.fields.forEach((f) => { if (iv.fields && iv.fields[f]) attrs[f] = 'rs'; });
-            if (!Object.keys(attrs).length) continue;
-            try {
-                const opened = await openDynamicProxies(cs.iface, attrs, [], [], 1);
-                opened.list.forEach((item) => {
-                    const px = item.proxy;
-                    Object.keys(attrs).forEach((f) => {
-                        try { px.subscribe({ name: f, onReceive: (v) => cs.onField(f, v) }); } catch (e) {}
-                        try { px.getValue(f, 2500).then((v) => cs.onField(f, v)).catch(() => {}); } catch (e) {}
-                    });
-                });
-            } catch (e) {}
-        }
+        const BODY_FIELD_RE = /(^|status|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|window|centralLock|lockState|tailgate|trunk|bonnet|hood)/i;
+        const targetIfaces = {};
+        Object.keys(coreMap).forEach((k) => { targetIfaces[k] = true; });
+        allIfaces.forEach((k) => { if (BODY_IFACE_RE.test(k)) targetIfaces[k] = true; });
 
-        // 3. Single-proxy-per-interface Body / Fuel / Range / Odometer / Door / Lock watchers (no 12-field cutoff!)
-        const BODY_FIELD_RE = /(^|status|_)(tank|fuel|kraftstoff|fuellstand|cruisingRange|remainingRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|window|centralLock|lockState|tailgate|trunk|bonnet|hood)/i;
-        for (let i = 0; i < allIfaces.length; i++) {
-            const name = allIfaces[i];
-            if (!BODY_IFACE_RE.test(name)) continue;
-            const iv = db.interfaces[name] || {};
-            const fnames = Object.keys(iv.fields || {});
-            const want = fnames.filter((f) => BODY_FIELD_RE.test(f)).slice(0, 28);
-            if (!want.length) continue;
-            const attrs = {};
-            want.forEach((fname) => {
+        const targetList = Object.keys(targetIfaces);
+        for (let i = 0; i < targetList.length; i++) {
+            const name = targetList[i];
+            const iv = db.interfaces && db.interfaces[name];
+            if (!iv || !iv.fields) continue;
+            const cs = coreMap[name] || null;
+            const fnames = Object.keys(iv.fields);
+            const bodyWant = BODY_IFACE_RE.test(name) ? fnames.filter((f) => BODY_FIELD_RE.test(f) && !/dynamicRange|speedRange|scaleRange|freqRange|audio/i.test(f)).slice(0, 32) : [];
+            const coreWant = cs ? cs.fields.filter((f) => !!iv.fields[f]) : [];
+            const merged = {};
+            coreWant.concat(bodyWant).forEach((fname) => {
                 const fm = iv.fields[fname] || {};
-                attrs[fname] = (fm.getter !== false ? 'r' : '') + (fm.notifier !== false ? 's' : '') || 'r';
+                merged[fname] = (fm.getter !== false ? 'r' : '') + (fm.notifier !== false ? 's' : '') || 'r';
             });
+            const mergedKeys = Object.keys(merged);
+            if (!mergedKeys.length) continue;
             try {
-                const opened = await openDynamicProxies(name, attrs, [], [], 1);
+                let opened = await openDynamicProxies(name, merged, [], [], 1);
+                if (!opened.list.length) opened = await openWildcardProxies(name, 1);
                 if (!opened.list.length) continue;
                 const px = opened.list[0].proxy;
-                want.forEach((fname) => {
+                mergedKeys.forEach((fname) => {
                     const fm = iv.fields[fname] || {};
-                    const onBody = (val) => interpretBodyField(name, fname, val, pushPatch, tracker.state);
-                    if (fm.notifier !== false) { try { px.subscribe({ name: fname, onReceive: onBody }); } catch (e) {} }
-                    if (fm.getter !== false) { try { px.getValue(fname, 2500).then(onBody).catch(() => {}); } catch (e) {} }
+                    const isCore = cs && cs.fields.indexOf(fname) >= 0;
+                    const isBody = bodyWant.indexOf(fname) >= 0;
+                    const handler = (val) => {
+                        if (isCore) cs.onField(fname, val);
+                        if (isBody) interpretBodyField(name, fname, val, pushPatch, tracker.state);
+                    };
+                    if (fm.notifier !== false) { try { px.subscribe({ name: fname, onReceive: handler }); } catch (e) {} }
+                    if (fm.getter !== false) { try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {} }
                 });
             } catch (e) {}
         }
 
-        // 4. Discover & open ALL Climate / 1CR / Standklima / Pre-conditioning interfaces across all instances
+        // 4. Discover & open ALL Climate / 1CR / Standklima / Pre-conditioning interfaces using BMW wildcard '*' first!
         climateCatalog = discoverClimateCatalog(db);
         tracker.state.climate1cr.discoveredCount = climateCatalog.interfaces.length;
         for (let i = 0; i < climateCatalog.interfaces.length; i++) {
             const desc = climateCatalog.interfaces[i];
-            const attrs = {};
-            desc.fields.forEach((f) => {
-                attrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') + (f.notifier ? 's' : '');
-                if (!attrs[f.name]) attrs[f.name] = 'r';
-            });
-            const methods = desc.methods.map((m) => m.name);
             let opened = { list: [], cfg: null };
             try {
-                opened = await openDynamicProxies(desc.iface, attrs, methods, desc.broadcasts, 3);
-            } catch (e) {
-                const safeAttrs = {};
+                opened = await openWildcardProxies(desc.iface, 4);
+            } catch (e) {}
+            if (!opened.list.length) {
+                const attrs = {};
                 desc.fields.forEach((f) => {
-                    if (f.roles.length || f.setter) safeAttrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') + (f.notifier ? 's' : '') || 'r';
+                    attrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') + (f.notifier ? 's' : '') || 'r';
                 });
-                try { opened = await openDynamicProxies(desc.iface, safeAttrs, methods, [], 3); } catch (e2) {}
+                const methods = desc.methods.map((m) => m.name);
+                try { opened = await openDynamicProxies(desc.iface, attrs, methods, desc.broadcasts, 4); } catch (e2) {}
             }
             if (!opened.list.length) continue;
             const cfgSummary = opened.cfg ? {
@@ -940,10 +965,31 @@ async function runWorker() {
         });
     }
 
-    /** Read accurate 12V Voltage, Fuel %, Odometer km, Ambient °C, Coolant °C via ISO UDS 0x22 F4xx / OBD 0x01 on demand. */
+    let vinChecked = false;
+
+    /** Read accurate 12V Voltage, Fuel %, Odometer km, VIN/Chassis, Ambient °C, Coolant °C via ISO UDS 0x22 / OBD 0x01 on demand. */
     async function readVitalsUDS() {
         if (!tasuProxy) return;
         const patch = {};
+
+        // 0. Once per session: Read true un-spoofed 17-char VIN (0x22 F190) & VCM FA (0x22 3002) from BDC (0x40) / DME (0x12)
+        if (!vinChecked) {
+            vinChecked = true;
+            let vu = (await udsQuery(0x40, 0x22, [0xF1, 0x90], 1600)) || (await udsQuery(0x12, 0x22, [0xF1, 0x90], 1600));
+            let vinStr = '';
+            if (vu && vu.length >= 20) {
+                vinStr = Buffer.from(vu.slice(3, 20)).toString('ascii').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+                if (vinStr.length === 17) patch.vin = vinStr;
+            }
+            let faStr = '';
+            const fu = await udsQuery(0x40, 0x22, [0x30, 0x02], 1500);
+            if (fu && fu.length >= 10) {
+                faStr = Buffer.from(fu.slice(3)).toString('latin1');
+            }
+            const info = decodeChassisFromVinOrFa(vinStr, faStr);
+            if (info.trueChassis) patch.trueChassis = info.trueChassis;
+            if (info.notMCar) patch.kombiSpoofed = true;
+        }
 
         // 1. 12V Control Module Voltage (0x22 F442 on DME 0x12 / BDC 0x40, fallback OBD 0x01 42)
         let u = (await udsQuery(0x12, 0x22, [0xF4, 0x42], 1800)) || (await udsQuery(0x40, 0x22, [0xF4, 0x42], 1800));
@@ -967,7 +1013,15 @@ async function runWorker() {
         }
         if (rawFuel !== null && rawFuel >= 0 && rawFuel <= 255) {
             const pct = Math.round((rawFuel * 100) / 255);
-            if (pct >= 0 && pct <= 100) patch.fuelPct = pct;
+            if (pct >= 0 && pct <= 100) {
+                patch.fuelPct = pct;
+                // Provide realistic chassis-calibrated range estimate whenever live KOMBI range hasn't arrived yet
+                if (tracker.state.rangeKm === null || tracker.state.rangeEstimated) {
+                    const ch = patch.trueChassis || tracker.state.trueChassis || '';
+                    patch.rangeKm = estimateRangeFromFuel(pct, ch);
+                    patch.rangeEstimated = true;
+                }
+            }
         }
 
         // 3. Odometer km (0x22 F4A6 or OBD 0x01 A6 on DME 0x12: 4-byte unsigned * 0.1 km)
@@ -1095,49 +1149,43 @@ async function runWorker() {
                 }
             }
 
-            // Try all discovered direct-operation setters & methods
+            // Try all discovered direct-operation setters & methods first, then master_candidate switches on ClimateMaster
             let succeeded = null;
-            for (let i = 0; i < climateCatalog.interfaces.length; i++) {
-                const d = climateCatalog.interfaces[i];
-                if (!climateProxies[d.iface]) continue;
-                for (let k = 0; k < d.fields.length; k++) {
-                    const f = d.fields[k];
-                    if (!f.setter || f.roles.indexOf('direct_write') < 0) continue;
-                    const sample = climateLive[d.iface + '.' + f.name];
-                    try {
-                        const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, sample, num));
-                        trace.push(r);
-                        if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
-                    } catch (e) {
-                        trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
+            const rolePasses = ['direct_write', 'master_candidate'];
+            for (let rp = 0; rp < rolePasses.length && !succeeded; rp++) {
+                const targetRole = rolePasses[rp];
+                for (let i = 0; i < climateCatalog.interfaces.length; i++) {
+                    const d = climateCatalog.interfaces[i];
+                    if (!climateProxies[d.iface]) continue;
+                    for (let k = 0; k < d.fields.length; k++) {
+                        const f = d.fields[k];
+                        if (!f.setter || f.roles.indexOf(targetRole) < 0) continue;
+                        const sample = climateLive[d.iface + '.' + f.name];
+                        try {
+                            const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, sample, num));
+                            trace.push(r);
+                            if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
+                        } catch (e) {
+                            trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
+                        }
                     }
-                }
-                for (let k = 0; k < d.methods.length; k++) {
-                    const m = d.methods[k];
-                    if (m.roles.indexOf('direct_write') < 0) continue;
-                    try {
-                        const r = await callSmart(d.iface, 'method', m, (num) => {
-                            const argObj = {};
-                            m.inArgs.forEach((a) => {
-                                if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
+                    for (let k = 0; k < d.methods.length; k++) {
+                        const m = d.methods[k];
+                        if (m.roles.indexOf(targetRole) < 0) continue;
+                        try {
+                            const r = await callSmart(d.iface, 'method', m, (num) => {
+                                const argObj = {};
+                                m.inArgs.forEach((a) => {
+                                    if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
+                                });
+                                return argObj;
                             });
-                            return argObj;
-                        });
-                        trace.push(r);
-                        if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
-                    } catch (e) {
-                        trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
+                            trace.push(r);
+                            if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
+                        } catch (e) {
+                            trace.push({ ok: false, iface: d.iface, name: m.name, error: e.message });
+                        }
                     }
-                }
-            }
-
-            // Fallback on Start: program Departure Timer to Now + 2 min
-            if (!succeeded && wantOn) {
-                const target = new Date(Date.now() + 2 * 60000);
-                const sched = await execute1CR('schedule1cr', { hour: target.getHours(), minute: target.getMinutes(), enabled: true });
-                if (sched.ok) {
-                    succeeded = 'Hẹn giờ +2p (' + sched.method + ')';
-                    trace.push({ ok: true, fallback: 'near_now_timer', method: sched.method });
                 }
             }
 
@@ -1145,18 +1193,27 @@ async function runWorker() {
             if (succeeded) {
                 tracker.state.climate1cr.active = wantOn;
                 const lockHint = (wantOn && (tracker.state.locked === false || (tracker.state.condition && tracker.state.condition >= 5)))
-                    ? ' (Chú ý: cần khoá cửa xe từ bên ngoài để hộp BDC đề nổ máy; khi mở cửa xe chỉ chạy quạt làm mát)'
+                    ? ' (Lưu ý: đang ngồi trong xe / chưa khoá ngoài nên quạt làm mát chạy; muốn đề nổ động cơ 1CR hãy ra ngoài bấm Khoá xe)'
                     : '';
-                tracker.state.climate1cr.lastResult = 'Đã gửi qua ' + succeeded + lockHint;
+                tracker.state.climate1cr.lastResult = 'Đã kích qua ' + succeeded + lockHint;
                 pushPatch({});
                 return { ok: true, method: succeeded + lockHint, trace };
             }
             const openNames = Object.keys(climateProxies).map((x) => x.split('.').pop());
+            const discoveredMembers = {};
+            Object.keys(climateProxies).forEach((ifn) => {
+                const d = climateProxies[ifn].desc;
+                discoveredMembers[ifn] = {
+                    setters: (d.fields || []).filter((f) => f.setter).map((f) => f.name),
+                    methods: (d.methods || []).map((m) => m.name),
+                    getters: (d.fields || []).filter((f) => !f.setter).map((f) => f.name),
+                };
+            });
             tracker.state.climate1cr.lastResult = !climateCatalog.interfaces.length
                 ? 'Không tìm thấy giao diện Climate trong catalog xe'
-                : ('Đã quét ' + openNames.length + ' cổng (' + openNames.slice(0, 4).join(', ') + ') nhưng chưa khớp tự động — mở tab Dò 1CR để xem chi tiết');
+                : ('Đã mở ' + openNames.length + '/' + climateCatalog.interfaces.length + ' cổng (' + openNames.slice(0, 5).join(', ') + ') — mở tab Dò 1CR để bấm thử 1 chạm');
             pushPatch({});
-            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames };
+            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers };
         }
 
         if (action === 'schedule1cr') {
@@ -1205,7 +1262,9 @@ async function runWorker() {
                     } catch (e) { trace.push({ ok: false, iface: d.iface, name: mt.name, error: e.message }); }
                 }
             }
-            tracker.state.climate1cr.timerText = en ? hhmm : 'Tắt';
+            if (succeeded || params.userInitiated) {
+                tracker.state.climate1cr.timerText = en ? hhmm : 'Tắt';
+            }
             tracker.state.climate1cr.lastAction = (en ? 'Đặt hẹn giờ 1CR ' : 'Huỷ hẹn giờ 1CR ') + hhmm;
             tracker.state.climate1cr.lastResult = succeeded ? ('Đã lưu vào BDC/IHKA qua ' + succeeded) : 'Đã lưu lịch chờ đồng bộ xuống xe';
             pushPatch({});
@@ -1230,11 +1289,113 @@ async function runWorker() {
         }
     });
 
+    async function openWildcardProxy(ifaceName) {
+        if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return null;
+        const proxies = {};
+        proxies[ifaceName] = '*';
+        const generated = gen.generate(db, { proxies, services: {} });
+        const cfg = generated && generated[ifaceName];
+        if (!cfg) return null;
+        const inst = Object.keys(cfg.instances || { '1': 1 })[0] || '1';
+        return nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 4500, ifaceName));
+    }
+
+    async function releaseCam360() {
+        if (camHolders.timer) {
+            clearTimeout(camHolders.timer);
+            camHolders.timer = null;
+        }
+        if (camHolders.cookie === null || camHolders.cookie === undefined) return { ok: true, released: false };
+        const c = camHolders.cookie;
+        camHolders.cookie = null;
+        const target = camHolders.icam || camHolders.cam;
+        if (!target) return { ok: true, released: false };
+        try {
+            await nativeTick(() => within(target.callMethod('clientDetach', { cookie: c }, 3000), 3500, 'clientDetach'));
+        } catch (e) {
+            if (camHolders.cam && target !== camHolders.cam) {
+                try { await nativeTick(() => within(camHolders.cam.callMethod('clientDetach', { cookie: c }, 3000), 3500, 'clientDetach')); } catch (e2) {}
+            }
+        }
+        return { ok: true, released: true };
+    }
+
+    async function wakeCam360() {
+        if (!db || !gen || !someip) return { ok: false, note: 'someip unavailable' };
+        const ICAM_IF = 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy';
+        const CAM_IF = 'de.bmw.infotainment.video.cameraproxy.CameraProxy';
+        const XV_IF = 'de.bmw.dass.XView3D';
+        if (!db.interfaces || !db.interfaces[ICAM_IF]) return { ok: false, note: 'no ICAM2Proxy on car' };
+        try {
+            if (!camHolders.icam) camHolders.icam = await openWildcardProxy(ICAM_IF);
+        } catch (e) {
+            return { ok: false, note: 'ICAM2 open: ' + e.message };
+        }
+        if (!camHolders.icam) return { ok: false, note: 'ICAM2 null' };
+        if (!camHolders.xv && db.interfaces[XV_IF]) {
+            try { camHolders.xv = await openWildcardProxy(XV_IF); } catch (e) {}
+        }
+
+        // Check if Parking View or another Drive Recorder / Turn-Cam client already has 4-camera stream active
+        try {
+            const xvVal = camHolders.xv ? await nativeTick(() => within(camHolders.xv.getValue('CurrentState', 1500), 1800, 'xv')).catch(() => null) : null;
+            const icVal = await nativeTick(() => within(camHolders.icam.getValue('currentState', 1500), 1800, 'icam')).catch(() => null);
+            const raw = JSON.stringify({ xv: xvVal, icam: icVal });
+            if (/PDC|PARK|RVC|TOP_VIEW|PANORAMA/i.test(raw)) {
+                return { ok: true, alreadyOn: true, note: 'parking view active' };
+            }
+            if ((/DR_ACTIVE|"application":51\b/i.test(raw)) && (/MOSAIK|"mode":50\b/i.test(raw)) && /"perspective":7\b/.test(raw)) {
+                return { ok: true, alreadyOn: true, note: 'all4 mosaic already active' };
+            }
+        } catch (e) {}
+
+        const callAttach = async (px, arg) => nativeTick(() => within(px.callMethod('clientAttach', arg, 3000), 3500, 'clientAttach'));
+        let cookie = camHolders.cookie;
+        if (cookie === null || cookie === undefined) {
+            let att = null;
+            try {
+                att = await callAttach(camHolders.icam, { type: 'CLIENT_INDIRECT' }).catch(() => callAttach(camHolders.icam, { type: 1 }));
+            } catch (e) {
+                if (!camHolders.cam && db.interfaces[CAM_IF]) {
+                    try { camHolders.cam = await openWildcardProxy(CAM_IF); } catch (e2) {}
+                }
+                if (!camHolders.cam) return { ok: false, note: 'clientAttach: ' + e.message };
+                try {
+                    att = await callAttach(camHolders.cam, { type: 'CLIENT_INDIRECT' }).catch(() => callAttach(camHolders.cam, { type: 1 }));
+                } catch (e3) {
+                    return { ok: false, note: 'clientAttach: ' + e3.message };
+                }
+            }
+            cookie = (att && typeof att === 'object' && att.cookie !== undefined) ? att.cookie : att;
+            camHolders.cookie = cookie;
+        }
+
+        const stName = { cookie, desiredState: { application: 'DR_ACTIVE', mode: 'MODE_MOSAIK', perspective: 7 } };
+        const stWire = { cookie, desiredState: { application: 51, mode: 50, perspective: 7 } };
+        try {
+            await nativeTick(() => within(camHolders.icam.callMethod('changeState', stName, 3500), 4000, 'changeState'))
+                .catch(() => nativeTick(() => within(camHolders.icam.callMethod('changeState', stWire, 3500), 4000, 'changeState')));
+        } catch (e) {
+            await releaseCam360();
+            return { ok: false, note: 'changeState: ' + e.message };
+        }
+
+        if (camHolders.timer) clearTimeout(camHolders.timer);
+        camHolders.timer = setTimeout(() => { releaseCam360().catch(() => {}); }, 12000);
+        return { ok: true, attached: true, cookie, note: 'DR_ACTIVE mosaic 7' };
+    }
+
     async function handleParentCmd(cmd) {
         const reqId = cmd.reqId;
         if (cmd.op === 'refresh_vitals') {
             await readVitalsUDS();
             emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
+        } else if (cmd.op === 'cam_wake') {
+            const r = await wakeCam360();
+            emit({ ev: 'reply', reqId, ok: !!r.ok, result: r });
+        } else if (cmd.op === 'cam_release') {
+            const r = await releaseCam360();
+            emit({ ev: 'reply', reqId, ok: true, result: r });
         } else if (cmd.op === 'start1cr' || cmd.op === 'stop1cr' || cmd.op === 'schedule1cr' || cmd.op === 'invoke_raw') {
             const res = await execute1CR(cmd.op, cmd.params);
             emit({ ev: 'reply', reqId, ok: res.ok, result: res, state: tracker.state });
@@ -1261,19 +1422,63 @@ async function runWorker() {
     setTimeout(() => { readVitalsUDS().catch(() => {}); }, 2500);
 }
 
-/* ---------------- Strict Field Interpreters ---------------- */
+/* ---------------- VIN / VCM FA Chassis Decoder & Strict Field Interpreters ---------------- */
 
-function pickNamedNum(v, propRe, invalids) {
+function decodeChassisFromVinOrFa(vin, faStr) {
+    const out = { trueChassis: '', notMCar: false };
+    const v = String(vin || '').trim().toUpperCase();
+    if (v.length === 17) {
+        const wmi = v.slice(0, 3);
+        if (!/^(WBS|5YM)$/.test(wmi)) out.notMCar = true;
+    }
+    const faMatch = /(?:^|[^A-Z0-9])(G01LCI|G02LCI|G07LCI|G20LCI|G28LCI|G30LCI|G31LCI|G32LCI|G38LCI|G01|G02|G05|G06|G07|G08|G11|G12|G14|G15|G16|G20|G21|G22|G23|G26|G28|G29|G30|G31|G32|G38|G42|G60|G70|G80|G82|G87|F40|F44|F90|F95|F96|F97|F98)(?:[^A-Z0-9]|$)/.exec(String(faStr || '').toUpperCase());
+    if (faMatch) {
+        out.trueChassis = faMatch[1];
+        return out;
+    }
+    if (v.length === 17) {
+        const tc = v.slice(3, 7);
+        if (/^(TR|TX|TY|UZ)\d\d$|^\d\d(DP|BG|BZ)$/.test(tc)) out.trueChassis = 'G01';
+        else if (/^UJ\d\d$|^[234]\dDT$|^\d\dCA$/.test(tc)) out.trueChassis = 'G02';
+        else if (/^(CR|CV|TA|JU)\d\d$|^\d\dE[UV]$/.test(tc)) out.trueChassis = 'G05';
+        else if (/^(CY|GT)\d\d$|^\d\dE[XY]$/.test(tc)) out.trueChassis = 'G06';
+        else if (/^(CW|TB)\d\d$|^\d\dE[MN]$/.test(tc)) out.trueChassis = 'G07';
+        else if (/^(5F|5V|5U|6K)\d\d$|^\d\d(DY|DZ|FF|FG)$/.test(tc)) out.trueChassis = 'G20';
+        else if (/^J[A-T]\d\d$|^\d\dB[J-N]$/.test(tc)) out.trueChassis = 'G30';
+        else if (/^7[A-W]\d\d$|^\d\dE[A-D]$/.test(tc)) out.trueChassis = 'G12';
+        else if (/^\d\dA[PRTV]$/.test(tc)) out.trueChassis = 'G22';
+        else if (/^JF0\d$|^8\dCH$/.test(tc)) out.trueChassis = 'F90';
+    }
+    return out;
+}
+
+function estimateRangeFromFuel(fuelPct, chassis) {
+    if (fuelPct === null || fuelPct === undefined || !isFinite(fuelPct)) return null;
+    const ch = String(chassis || '').toUpperCase();
+    let fullKm = 650;
+    if (/^G0[567]/.test(ch)) fullKm = 690;
+    else if (/^G0[12]/.test(ch)) fullKm = 620;
+    else if (/^G2[01236]/.test(ch)) fullKm = 610;
+    else if (/^F9[05678]|^G8[02]/.test(ch)) fullKm = 520;
+    return Math.max(0, Math.round((Math.max(0, Math.min(100, fuelPct)) / 100) * fullKm));
+}
+
+function pickNamedNum(v, propRe, invalids, depth) {
     if (typeof v === 'number' && isFinite(v)) {
         return invalids && invalids.indexOf(v) >= 0 ? null : v;
     }
-    if (!v || typeof v !== 'object') return null;
+    if (!v || typeof v !== 'object' || (depth || 0) > 3) return null;
     const keys = Object.keys(v);
     for (let i = 0; i < keys.length; i++) {
         const k = keys[i];
-        if (propRe && !propRe.test(k)) continue;
         const x = v[k];
-        if (typeof x === 'number' && isFinite(x) && (!invalids || invalids.indexOf(x) < 0)) return x;
+        if (typeof x === 'number' && isFinite(x)) {
+            if (propRe && !propRe.test(k)) continue;
+            if (!invalids || invalids.indexOf(x) < 0) return x;
+        } else if (x && typeof x === 'object') {
+            const sub = pickNamedNum(x, propRe, invalids, (depth || 0) + 1);
+            if (sub !== null) return sub;
+        }
     }
     return null;
 }
@@ -1282,10 +1487,10 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (val === undefined || val === null) return;
     const key = iface + '.' + fname;
 
-    // Remaining driving range (exclude dynamicRange, speedRange, scaleRange, etc.)
-    if (/(^|status|_)(cruisingRange|remainingRange|tankRange|totalRange|electricRange|reichweite)$/i.test(fname) || /^statusRange/i.test(fname)) {
-        const n = pickNamedNum(val, /range|reichweite|distance|km|value/i, [255, 4095, 65534, 65535]);
-        if (n !== null && n > 0 && n <= 1600) pushPatch({ rangeKm: Math.round(n) });
+    // Remaining driving range (exclude dynamicRange, speedRange, scaleRange, freqRange, etc.)
+    if ((/(^|status|_)(range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite)$/i.test(fname) || /^statusRange/i.test(fname)) && !/dynamic|speed|scale|freq|audio/i.test(fname)) {
+        const n = pickNamedNum(val, /range|reichweite|combustion|display|total|remaining|cruising|distance|km|value/i, [0, 255, 4094, 4095, 65534, 65535]);
+        if (n !== null && n >= 5 && n <= 1600) pushPatch({ rangeKm: Math.round(n), rangeEstimated: false });
         return;
     }
 
@@ -1293,7 +1498,12 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (/tank|fuel|kraftstoff|fuellstand/i.test(fname) && !/consumption|verbrauch|cap|flap/i.test(fname)) {
         const pct = pickNamedNum(val, /percent|pct|relativ|level/i, [255, 4095, 65535]);
         if (pct !== null && pct >= 0 && pct <= 100) {
-            pushPatch({ fuelPct: Math.round(pct) });
+            const patch = { fuelPct: Math.round(pct) };
+            if (curState.rangeKm === null || curState.rangeEstimated) {
+                patch.rangeKm = estimateRangeFromFuel(patch.fuelPct, curState.trueChassis);
+                patch.rangeEstimated = true;
+            }
+            pushPatch(patch);
             return;
         }
         const lit = pickNamedNum(val, /liter|volume|inhalt|content|quantity/i, [255, 4095, 65535]);
@@ -1382,6 +1592,8 @@ module.exports = {
     pickEnumOrBool,
     buildDirectPayload,
     buildTimerPayload,
+    decodeChassisFromVinOrFa,
+    estimateRangeFromFuel,
     TelemetryTracker,
     loadIFConfigGeneratorFromText,
 };

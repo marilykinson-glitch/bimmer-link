@@ -16,6 +16,7 @@ JS_FILES = [
     'tools/bimmer-link/bimmer-link.js',
     'tools/bimmer-link/car-link.js',
     'tools/bimmer-link/car-hero.js',
+    'tools/bimmer-link/cam360.js',
     'tools/bimmer-link/carpaint.js',
     'tools/bimmer-link/wbm.js',
     'tools/bimmer-link/cloud.js',
@@ -441,6 +442,23 @@ def check_car_link_logic_in_jxa():
     if (tp.operationHour !== 17 || tp.operationMinute !== 15 || tp.status !== 'ACTIVE') throw new Error('bad timer struct payload: ' + JSON.stringify(tp));
     var tpNum = C.buildTimerPayload(tf, 17, 15, true, undefined, true);
     if (tpNum.status !== 2) throw new Error('bad numeric timer struct payload: ' + JSON.stringify(tpNum));
+
+    // Test 2b: British spelling ClimateMaster + SteeringWheelClimate exclusion + VIN/FA chassis & Range estimate
+    var rolesMaster = C.classifyClimateMember('de.bmw.infotainment.climate.ClimateMaster', 'parkClimatisation', 'field', {{ setter: true }});
+    if (rolesMaster.indexOf('direct_write') < 0) throw new Error('expected parkClimatisation to match direct_write');
+    var rolesFallback = C.classifyClimateMember('de.bmw.infotainment.climate.ClimateMaster', 'auxiliaryOperation', 'method', {{}});
+    if (rolesFallback.indexOf('master_candidate') < 0) throw new Error('expected ClimateMaster auxiliaryOperation -> master_candidate');
+    var rolesSw = C.classifyClimateMember('de.bmw.infotainment.climate.SteeringWheelClimate', 'activateHeatingNow', 'method', {{}});
+    if (rolesSw.indexOf('direct_write') >= 0) throw new Error('SteeringWheelClimate must not match cabin 1CR direct_write');
+
+    var vinG01 = C.decodeChassisFromVinOrFa('RL4TY51000L123456', '');
+    if (vinG01.trueChassis !== 'G01' || !vinG01.notMCar) throw new Error('expected RL4TY51 -> G01 + notMCar');
+    var vinG30 = C.decodeChassisFromVinOrFa('WBAJA51090G654321', '');
+    if (vinG30.trueChassis !== 'G30' || !vinG30.notMCar) throw new Error('expected WBAJA51 -> G30 + notMCar');
+    var faX5 = C.decodeChassisFromVinOrFa('5UX00000000000000', 'hdr_G05_0C1M_01CR');
+    if (faX5.trueChassis !== 'G05') throw new Error('expected FA G05 -> G05');
+    var estKm = C.estimateRangeFromFuel(31, 'G30');
+    if (estKm < 190 || estKm > 215) throw new Error('unexpected range estimate for 31%: ' + estKm);
 
     // Test 3: Trip & Park Snapshot trigger
     var trk = new C.TelemetryTracker();

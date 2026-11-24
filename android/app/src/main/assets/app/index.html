@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.4.0">
+<link rel="stylesheet" href="styles.css?v=0.4.1">
 <title>MyBMW</title>
 </head>
 <body>
@@ -50,7 +50,9 @@
         <option value="G05">G05 — X5</option>
         <option value="G06">G06 — X6</option>
         <option value="G07">G07 — X7</option>
+        <option value="G01LCI">G01 LCI — X3 LCI</option>
         <option value="G01">G01 — X3</option>
+        <option value="G02LCI">G02 LCI — X4 LCI</option>
         <option value="G02">G02 — X4</option>
         <option value="G22">G22 — 4 Series Coupé</option>
         <option value="G26">G26 — 4 Series Gran Coupé</option>
@@ -78,6 +80,9 @@
 
   <!-- VIEW 1: MY VEHICLE (HOME) -->
   <section id="view-home">
+    <div id="kombiHint" class="kombi-hint hidden" onclick="toggleEl('paintSheet')">
+      💡 Đầu xe đang code đồng hồ M5 CS? <b>Chạm chọn đúng dòng xe thật (X3 / X5 / 5 Series / 3 Series) →</b>
+    </div>
     <div class="hero-stage">
       <div class="studio-glow" id="studioGlow"></div>
       <img id="heroCarImg" class="car-hero-img" src="car-studio.jpg" alt="My BMW">
@@ -183,15 +188,15 @@
     </div>
 
     <!-- Latest Parked Snapshot Card -->
-    <div class="glass-card">
+    <div class="glass-card" id="latestSnapCard">
       <div class="card-head">
-        <span>📸 Ảnh chụp chỗ đỗ / Trạng thái gần nhất</span>
+        <span>📸 Ảnh chụp 360° / Chỗ đỗ gần nhất</span>
         <span id="snapTime" style="color:var(--dim)">--</span>
       </div>
       <div id="noSnapHint" style="font-size:13px;color:var(--dim);padding:10px 0">
-        Tự động lưu ảnh &amp; vị trí hầm ngay khi tắt máy đỗ xe, hoặc bấm nút <b>Chụp xe</b> ở trên.
+        Tự động chụp 4 camera 360° (hoặc thẻ trạng thái đỗ hầm) khi tắt máy, hoặc bấm nút <b>Chụp xe</b> ở trên.
       </div>
-      <img id="latestSnapImg" class="snap-img hidden" alt="Vehicle snapshot">
+      <img id="latestSnapImg" class="snap-img hidden" alt="Vehicle snapshot" onclick="openSnapModal()">
     </div>
   </section>
 
@@ -323,7 +328,13 @@
   </button>
 </nav>
 
+<!-- Fullscreen Snapshot Lightbox -->
+<div id="snapModal" class="snap-modal hidden" onclick="closeSnapModal()">
+  <img id="snapModalImg" src="" alt="Snapshot Zoom">
+  <div style="margin-top:12px;font-size:12.5px;color:#cbd5e1">Chạm bất kỳ đâu để đóng</div>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.4.0"></script>
+<script src="app.js?v=0.4.1"></script>
 </body>
 </html>

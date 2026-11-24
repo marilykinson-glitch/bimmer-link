@@ -254,7 +254,7 @@ function scanFactoryVehicle(opts) {
         for (let i = 0; i < pids.length; i++) {
             let comm = '';
             try { comm = fs.readFileSync(path.join(procDir, pids[i], 'comm'), 'utf8').trim(); } catch (e) { continue; }
-            if (comm !== 'HmiMain3D') continue;
+            if (!/^Hmi/.test(comm)) continue;
             let fds = [];
             try { fds = fs.readdirSync(path.join(procDir, pids[i], 'fd')); } catch (e) { continue; }
             for (let k = 0; k < fds.length; k++) {
@@ -277,26 +277,62 @@ function scanFactoryVehicle(opts) {
         }
     } catch (e) {}
 
-    // Determine effective chassis, trimLine & colour (user override wins over HU_MGU coding!)
+    // Sibling 2D bundle map when an M / LCI / Li / BEV variant only ships 3D `vehicle/` on MGU
+    const SIBLING_2D = {
+        F90LCI: ['F90', 'G30LCI', 'G30'], F90: ['G30LCI', 'G30'],
+        F97LCI: ['F97', 'G01LCI', 'G01'], F97: ['G01LCI', 'G01'],
+        F98LCI: ['F98', 'G02LCI', 'G02'], F98: ['G02LCI', 'G02'],
+        F95: ['G05'], F96: ['G06'],
+        G80: ['G20LCI', 'G20'], G81: ['G21LCI', 'G21'], G82: ['G22'], G83: ['G23'],
+        F91: ['G14'], F92: ['G15'], F93: ['G16'], G87: ['G42'],
+        G08BEVLCI: ['G08BEV', 'G08LCI', 'G08', 'G01LCI', 'G01'], G08BEV: ['G08', 'G01'],
+        G26BEV: ['G26', 'G22'], G28LCI: ['G28', 'G20LCI', 'G20'], G28: ['G20'],
+        G38LCI: ['G38', 'G30LCI', 'G30'], G38: ['G30'], G18: ['G05'],
+    };
+
+    function find2dForCode(code) {
+        if (!code) return '';
+        const up = String(code).toUpperCase();
+        const tryList = [up];
+        const stem = up.replace(/(?:BEV)?LCI$|BEV$/, '');
+        if (stem && stem !== up) tryList.push(stem);
+        if (SIBLING_2D[up]) tryList.push.apply(tryList, SIBLING_2D[up]);
+        if (stem && SIBLING_2D[stem]) tryList.push.apply(tryList, SIBLING_2D[stem]);
+        for (let i = 0; i < tryList.length; i++) {
+            const m = modelMap[tryList[i]];
+            if (m && m.has2d) return m.base;
+        }
+        return '';
+    }
+
+    // Determine effective chassis, trimLine & colour:
+    // 1) User override on App MyBMW wins first
+    // 2) True chassis read from BDC/DME VIN or FA wins when HU_MGU was Kombi-coded to M5 CS (F90LCI)
+    // 3) HU_MGU rawcodingdata + HmiMain3D open vehicle bundles
     const overChassis = String(override.chassis || '').trim().toUpperCase();
     const overTrim = String(override.trimLine || '').trim();
     const overColour = String(override.colour || '').trim();
+    const trueChassis = String(opts.trueChassis || '').trim().toUpperCase();
+    const codedBaureihe = coding.valid && coding.baureihe ? coding.baureihe.toUpperCase() : '';
+    const isKombiCodedM = !overChassis && codedBaureihe && /^F9\d|^G8\d/.test(codedBaureihe) &&
+        (opts.kombiSpoofed || (trueChassis && trueChassis !== codedBaureihe));
 
-    let chosenBase = '';
-    if (overChassis && modelMap[overChassis]) {
-        chosenBase = modelMap[overChassis].base;
-    } else {
-        const cands = open2d.concat(open3d);
-        if (coding.valid && coding.baureihe && modelMap[coding.baureihe.toUpperCase()]) {
-            const cb = modelMap[coding.baureihe.toUpperCase()].base;
-            if (cands.indexOf(cb) < 0) cands.unshift(cb);
-        }
-        // Prefer a candidate that actually has 2D bitmaps if the primary only has 3D
-        const with2d = cands.filter((b) => fs.existsSync(path.join(b, 'vehicle2D_big', 'bitmaps.res')) || fs.existsSync(path.join(b, 'vehicle2D_small', 'bitmaps.res')));
-        chosenBase = with2d[0] || cands[0] || '';
+    const wantedCode = overChassis || (isKombiCodedM && trueChassis ? trueChassis : '') || codedBaureihe || kombiModel.toUpperCase();
+    let chosenBase = find2dForCode(wantedCode);
+    if (!chosenBase) {
+        const openWith2d = open2d.concat(open3d).filter((b) => fs.existsSync(path.join(b, 'vehicle2D_big', 'bitmaps.res')) || fs.existsSync(path.join(b, 'vehicle2D_small', 'bitmaps.res')));
+        chosenBase = openWith2d[0] || '';
+    }
+    if (!chosenBase && availableModels.length) {
+        const pref = availableModels.find((c) => c === 'G30LCI' || c === 'G30' || c === 'G01LCI' || c === 'G01' || c === 'G20') || availableModels.find((c) => c !== 'F40') || availableModels[0];
+        if (pref && modelMap[pref]) chosenBase = modelMap[pref].base;
+    }
+    if (!chosenBase && wantedCode && modelMap[wantedCode]) {
+        chosenBase = modelMap[wantedCode].base;
     }
 
-    const modelName = overChassis || (chosenBase ? path.basename(chosenBase) : (coding.valid ? coding.baureihe : (kombiModel || '')));
+    const modelName = overChassis || (isKombiCodedM && trueChassis ? trueChassis : '') || (codedBaureihe || (chosenBase ? path.basename(chosenBase) : kombiModel));
+    const renderModelName = chosenBase ? path.basename(chosenBase) : modelName;
     const brand = chosenBase && chosenBase.indexOf('/bmwm/') >= 0 ? 'bmwm' : (chosenBase && chosenBase.indexOf('/mini/') >= 0 ? 'mini' : 'bmw');
 
     const hmiFile = (rel) => {
@@ -306,12 +342,12 @@ function scanFactoryVehicle(opts) {
         return fs.existsSync(p2) ? p2 : '';
     };
 
-    const effectiveTrimLine = overTrim || (coding.valid ? coding.trimLine : '');
+    const effectiveTrimLine = overTrim || (isKombiCodedM ? 'm_sportpaket' : (coding.valid ? coding.trimLine : ''));
     const effectiveColour = overColour || (coding.valid ? coding.colour : '');
 
     let trim = kombiTrim || 'A';
-    if (modelName && (overTrim || (coding.valid && coding.trimCode !== 0) || !kombiTrim)) {
-        trim = CARPAINT.resolveHeroTrim(modelName, effectiveTrimLine || 'base', hmiFile('script/hmi_script.lua')) || trim;
+    if (renderModelName && (overTrim || isKombiCodedM || (coding.valid && coding.trimCode !== 0) || !kombiTrim)) {
+        trim = CARPAINT.resolveHeroTrim(renderModelName, effectiveTrimLine || 'base', hmiFile('script/hmi_script.lua')) || trim;
     }
 
     let paint = CARPAINT.resolvePaint(
@@ -319,7 +355,6 @@ function scanFactoryVehicle(opts) {
         hmiFile('widget/VEHICLE_CARPAINT_colorregistry.pbc'),
         hmiFile('widget/variantregistry_ext_car.pbvar')
     );
-    // If registry fell back to DEFAULT/WHITE while effectiveColour is a known BMW paint, use BUILTIN_PAINTS
     if (effectiveColour && BUILTIN_PAINTS[effectiveColour] && (!paint || paint.name === 'DEFAULT' || (paint.name === 'alpin_white_U300' && effectiveColour !== 'alpin_white'))) {
         paint = BUILTIN_PAINTS[effectiveColour];
     }
@@ -331,9 +366,13 @@ function scanFactoryVehicle(opts) {
         colour: effectiveColour,
         paint,
     });
+    meta.codedChassis = codedBaureihe;
+    meta.trueChassis = trueChassis;
+    meta.kombiSpoofed = !!isKombiCodedM;
 
     // Extract genuine 2D studio bitmap + exact paint mask from `<chosenBase>/vehicle2D_big` (or `vehicle2D_small`)
     let pngBuf = null;
+    let heroNote = '';
     if (chosenBase) {
         const subs = ['vehicle2D_big', 'vehicle2D_small'];
         for (let si = 0; si < subs.length && !pngBuf; si++) {
@@ -358,7 +397,6 @@ function scanFactoryVehicle(opts) {
                 const masks = parsed.entries.filter((e) => isMask(e.key));
                 if (!pics.length) continue;
 
-                // Prefer exact scene.byTrim[trim] when present
                 let pick = null;
                 if (scene && scene.byTrim && scene.byTrim[trim] && parsed.byKey[scene.byTrim[trim].pic]) {
                     pick = parsed.byKey[scene.byTrim[trim].pic];
@@ -378,13 +416,17 @@ function scanFactoryVehicle(opts) {
                 );
                 const topDown = W.flipRows(shaded, pick.w, pick.h);
                 const cropped = cropAlphaBounds(topDown, pick.w, pick.h);
-                const targetW = Math.min(440, cropped.w);
+                const targetW = Math.min(600, cropped.w);
                 const targetH = Math.max(1, Math.round(cropped.h * targetW / cropped.w));
                 const scaled = W.resize(cropped.rgba, cropped.w, cropped.h, targetW, targetH);
                 pngBuf = encodeCompactPng(scaled, targetW, targetH);
-            } catch (e) { /* try next */ }
+                heroNote = cleanBaseName + '/' + sub + ':' + pick.key + (maskEntry ? '+' + maskEntry.key : '');
+            } catch (e) {
+                heroNote = 'err:' + e.message;
+            }
         }
     }
+    meta.renderSource = heroNote;
 
     const paintRgb = paint && paint.base ? [
         Math.round(Math.min(1, Math.max(0, paint.base[0])) * 255),
