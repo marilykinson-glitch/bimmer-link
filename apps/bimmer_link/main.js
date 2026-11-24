@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const mgu = require('./kit/mgu');
 const G = require('./kit/gauges');
-const { Canvas } = require('./kit/canvas');
+const { Recorder } = require('./kit/record');
 const UI = require('./ui');
 
 const RUN = process.env.BL_RUN || '/run/bimmer-link';
@@ -94,7 +94,7 @@ mgu.run({
             snapNow: () => {
                 armed = '';
                 send('snap_now', {});
-                tell('Đang chụp trạng thái xe và gửi về Telegram…', 'go');
+                tell('Đang chụp trạng thái xe & đồng bộ lên App MyBMW…', 'go');
                 return repaint();
             },
             cycleTimer: () => {
@@ -147,6 +147,7 @@ mgu.run({
                 telegramOk: !!(s && s.telegramOk),
                 ownerName: (s && s.ownerName) || '',
                 tgError: (s && s.tgError) || '',
+                vehicleProfile: (s && s.vehicleProfile) || null,
                 valet: (s && s.valet) || { enabled: false, maxSpeed: 45, maxRpm: 3500, radiusM: 500 },
                 telemetry: (s && s.telemetry) || {},
                 lastTrip: (s && s.lastTrip) || null,
@@ -162,18 +163,19 @@ mgu.run({
             const vis = ui.isVisible('MAIN');
             const key = JSON.stringify([
                 m.state, m.viewMode, m.qrMode, m.url, m.cloudUrl, m.cloudOk, m.pin, m.telegramOk, m.ownerName, m.tgError,
-                m.valet, m.telemetry, m.lastTrip, m.trips.length, m.message, m.messageKind, m.armed, vis,
+                m.vehicleProfile, m.valet, m.telemetry, m.lastTrip, m.trips.length, m.message, m.messageKind, m.armed, vis,
             ]);
             if (key === lastKey && shown) return;
             lastKey = key;
             shown = true;
-            const cv = ctx.canvas(UI.W, UI.H) || new Canvas(UI.W, UI.H);
+            const cv = ctx.canvas(UI.W, UI.H) || new Recorder(UI.W, UI.H);
             UI.draw(cv, G, ctx.theme(), m, acts);
             await ui.image('MAIN_GFX', cv);
         };
 
         const loop = ctx.loop('MAIN', 4, render);
         function repaint() { lastKey = ''; return loop && loop.kick ? loop.kick() : render(); }
+        if (ctx.onLayout) ctx.onLayout(repaint);
 
         ['BTN_1CR', 'BTN_VALET', 'BTN_SNAP', 'BTN_TIMER'].forEach((b) => { if (ctx.hideButton) ctx.hideButton(b); });
         ui.onClick('BTN_1CR', acts.toggle1cr);

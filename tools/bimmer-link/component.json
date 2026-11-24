@@ -1,7 +1,7 @@
 {
   "id": "bimmer-link",
   "kind": "tool",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "title": "Trợ thủ MyBMW & 1CR",
   "description": "Dịch vụ nền cho ứng dụng MyBMW & 1CR: tự động quét đúng dòng xe, gói trang bị (M Sport / Luxury), màu sơn gốc và hình xe chuẩn hãng trên đầu MGU; đồng bộ thời gian thực với ứng dụng điện thoại MyBMW (iPhone PWA & Android APK); gửi ảnh vị trí đỗ hầm, giám sát Valet, điều khiển đề nổ 1CR và hẹn giờ BDC/IHKA.",
   "license": "GPL-3.0-or-later",

@@ -25,7 +25,7 @@ const CarLink = require('./car-link');
 const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -250,7 +250,7 @@ function createService(customCfg) {
         activeTrip: null,
         lastTrip: trips[0] || null,
         workerUp: false,
-        message: 'Sẵn sàng. Quét mã QR bằng điện thoại để kết nối Telegram & điều khiển 1CR.',
+        message: 'Sẵn sàng. Quét mã QR bên trái để ghép App MyBMW (iPhone / Android).',
         messageKind: 'dim',
         seenCmdId: -1,
         valetAlerts: {},       // kind -> lastMs
@@ -561,12 +561,12 @@ function createService(customCfg) {
             const rep = await callWorker(action, {}, 6000);
             const resObj = (rep && rep.result) || {};
             if (rep && rep.ok) {
-                const msg = (wantOn ? '🔥 Đã kích hoạt đề nổ / làm mát 1CR (' : '⏹ Đã gửi lệnh tắt 1CR (') + (resObj.method || 'SOME/IP') + ')';
-                tell(msg, 'go');
+                const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR (' : 'Đã gửi lệnh tắt 1CR (') + (resObj.method || 'SOME/IP') + ')';
+                tell(plain, 'go');
                 if (config.botToken && config.chatId) {
-                    tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+                    tg.sendMessage((wantOn ? '🔥 ' : '⏹ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
                 }
-                return { ok: true, message: msg, detail: resObj };
+                return { ok: true, message: plain, detail: resObj };
             }
             // Simulated / bench feedback when not on car bus yet
             const errText = (resObj && resObj.error) || (rep && rep.error) || 'Không nhận được phản hồi từ hộp điều hoà';
@@ -586,14 +586,14 @@ function createService(customCfg) {
             saveConfig();
             const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en }, 5000);
             S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
-            const msg = en
-                ? ('⏰ Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? ' (đã nạp xuống BDC/IHKA)' : ' (đã lưu lịch)'))
-                : '❌ Đã tắt hẹn giờ nổ máy 1CR.';
-            tell(msg, 'go');
+            const plain = en
+                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? ' (đã nạp xuống BDC/IHKA)' : ' (đã lưu lịch)'))
+                : 'Đã tắt hẹn giờ nổ máy 1CR.';
+            tell(plain, 'go');
             if (config.botToken && config.chatId) {
-                tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+                tg.sendMessage((en ? '⏰ ' : '❌ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
             }
-            return { ok: true, message: msg };
+            return { ok: true, message: plain };
         }
 
         if (action === 'valet_toggle' || action === 'valet_set') {
@@ -602,14 +602,14 @@ function createService(customCfg) {
             config.valet.anchorPos = (next && S.telemetry.pos) ? { lat: S.telemetry.pos.lat, lon: S.telemetry.pos.lon } : null;
             S.valetAlerts = {};
             saveConfig();
-            const msg = next
-                ? ('🛡️ Đã BẬT chế độ Valet (giới hạn ' + config.valet.maxSpeed + ' km/h, ' + config.valet.maxRpm + ' RPM, bán kính ' + config.valet.radiusM + 'm).')
-                : '🛡️ Đã TẮT chế độ Valet.';
-            tell(msg, next ? 'warn' : 'go');
+            const plain = next
+                ? ('Đã BẬT chế độ Valet (giới hạn ' + config.valet.maxSpeed + ' km/h, ' + config.valet.maxRpm + ' RPM, bán kính ' + config.valet.radiusM + 'm).')
+                : 'Đã TẮT chế độ Valet.';
+            tell(plain, next ? 'warn' : 'go');
             if (config.botToken && config.chatId) {
-                tg.sendMessage(msg, S.telemetry, config.valet.enabled).catch(() => {});
+                tg.sendMessage('🛡️ ' + plain, S.telemetry, config.valet.enabled).catch(() => {});
             }
-            return { ok: true, message: msg, valet: config.valet };
+            return { ok: true, message: plain, valet: config.valet };
         }
 
         if (action === 'trips') {

@@ -78,11 +78,13 @@ function drawTripsPane(cv, G, t, lx, top, trips, onBack) {
 
 function draw(cv, G, t, v, act) {
     act = act || {};
-    G.bg(cv, t);
+    cv.clear(t.bg);
+    G.frame(cv, t, ['MyBMW & 1CR'], 0, []);
+    G.panel(cv, t, 24, G.TOP, W - 48, G.BOTTOM - G.TOP, null);
 
-    const lx = 76;
-    const top = G.TOP + 54;
-    const bottom = H - G.BOT - 16;
+    const lx = 64;
+    const top = G.TOP + 34;
+    const bottom = G.pageBottom(cv) - (cv.own ? G.MARGIN : 0);
 
     // LEFT PANE: QR (MyBMW Cloud App or Local Wi-Fi) or Trip Log
     if (v.viewMode === 'trips') {
@@ -136,7 +138,11 @@ function draw(cv, G, t, v, act) {
     if (v.version) {
         cv.text(v.version, W - 56, G.TOP + 34, 14, G.withAlpha('#ffffff', 0.38), { literal: true, align: 'right', font: 'label' });
     }
-    cv.text('Tự chụp vị trí hầm khi tắt máy · Điều khiển đề nổ 1CR & hẹn giờ BDC/IHKA · Giám sát Valet', rx, G.TOP + 106, 17, t.dim, { literal: true, font: 'label' });
+    const vp = v.vehicleProfile;
+    const subLine = (vp && vp.chassis)
+        ? (vp.modelTitle + (vp.paintLabel ? (' · ' + vp.paintLabel) : '') + ' — Đề nổ 1CR · Vị trí đỗ hầm · Giám sát Valet')
+        : 'Tự chụp vị trí hầm khi tắt máy · Điều khiển đề nổ 1CR & hẹn giờ BDC/IHKA · Giám sát Valet';
+    cv.text(fit(cv, subLine, 17, { literal: true, font: 'label' }, rw), rx, G.TOP + 106, 17, t.dim, { literal: true, font: 'label' });
 
     const tel = v.telemetry || {};
     const c1 = tel.climate1cr || {};
@@ -179,7 +185,7 @@ function draw(cv, G, t, v, act) {
         line1: fuelBat,
         line2: hasOpen ? 'Chú ý: Có cửa / cốp mở hoặc chưa khoá!' : ('Cửa kín · Máy ' + (tel.coolantC != null ? tel.coolantC + '°C' : '--') + ' · Ngoài ' + (tel.ambientC != null ? tel.ambientC + '°C' : '--')),
         line2Color: hasOpen ? (t.warn || '#ffb020') : t.dim,
-        hint: 'Gửi ảnh',
+        hint: 'Gửi App',
         onTap: act.snapNow,
     });
 
@@ -220,7 +226,7 @@ function draw(cv, G, t, v, act) {
         { key: 'blBtnValet', color: valet.enabled ? warn : undefined, primary: !!valet.enabled });
 
     G.button(cv, t, rx + 2 * (bw + bgap), by, bw, 52,
-        'Gửi Telegram',
+        'Chụp gửi App',
         act.snapNow || nop,
         { key: 'blBtnSnap', color: acc });
 
