@@ -1,4 +1,4 @@
-const CACHE = 'mybmw-mgu-v3';
+const CACHE = 'mybmw-mgu-v4';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon-192.png', './car-studio.jpg'];
 
 self.addEventListener('install', (e) => {

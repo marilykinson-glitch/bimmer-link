@@ -3,20 +3,18 @@
  * car-link.js - live BMW MGU vehicle bridge (SOME/IP + UDS over InternalTasu) and 1CR Remote Start / Pre-conditioning engine.
  *
  * Runs as an isolated child process (`node car-link.js worker`) so native `/usr/lib/someip.node` calls never block
- * the HTTP setup portal or Telegram uplink. Communicates over newline-delimited JSON on stdin/stdout.
+ * the HTTP setup portal or Cloud/Telegram uplink. Communicates over newline-delimited JSON on stdin/stdout.
  *
- * Capabilities:
- *   1. Live Positioning (`Positioning.currentLocation` map-matched dead-reckoning for underground garages + `rawPositionData` / `GnssPositioning`).
- *   2. Vehicle state transitions (`VehicleCondition`: FAHREN -> FAHRBEREITSCHAFT_BEENDEN / WOHNEN / PARKEN_BN_IO) for automatic Park Snapshot & Trip summary.
- *   3. Driving & status signals: Speed, RPM, Gear/Selector (P/R/N/D), Coolant/Oil/Ambient/Cabin temperatures, Fuel %, Remaining Range, Odometer, Doors/Windows/Trunk/Hood/Lock states.
- *   4. On-demand 12V battery voltage read via UDS 0x22 F442 (ISO Control Module Voltage on DME 0x12 / BDC 0x40) — only on snapshot/manual refresh so sleep is never delayed.
- *   5. Option 1CR (Remote Engine Start & Auxiliary Pre-conditioning):
- *      - Auto-discovers all Climate / Auxiliary / Standheizung / Preconditioning / DepartureTimer interfaces in `/etc/oap/someip/someip-interfaces.json`.
- *      - Synthesizes schema-valid payloads from the car's own Franca type catalog for:
- *          * `start1cr`: Enables 1CR engine-start consent if needed + triggers immediate pre-conditioning / engine start (with near-now timer fallback).
- *          * `stop1cr`: Stops active remote start / auxiliary conditioning.
- *          * `schedule1cr`: Programs the hardware Departure Timer in BDC_BODY3 / IHKA so the car wakes from 0W deep sleep at HH:MM and starts via 1CR.
- *          * `invokeRaw`: Executes any specific SOME/IP setter/method from the Phone 1CR Inspector UI and optionally saves it as the car's pinned 1CR profile.
+ * Key architecture details verified against real BMW MGU firmware:
+ *   1. Parses `/etc/oap/someip/someip-interfaces.json` `db.datatypes` (where Franca `enum`s store `{ type: 'enum', items }`
+ *      and `struct`s store `{ type: 'struct', fields }`), trying BOTH enum string names AND numeric wire values across
+ *      all available SOME/IP instances.
+ *   2. Broadly discovers Climate / AirConditioning / HVAC / Standklima / Preconditioning / ParkHeating / 1CR / DepartureTimer
+ *      interfaces and members across the master catalog.
+ *   3. Groups body/vehicle watchers into one SOME/IP proxy per interface (no 12-field truncation) with strict field &
+ *      sub-property matching so unrelated `range` or `trip` signals never corrupt Range km or Odometer km.
+ *   4. Reads exact 12V Voltage (`F442`), Fuel % (`F42F`), Odometer (`F4A6`), Ambient °C (`F446`), and Coolant °C (`F405`)
+ *      on-demand via UDS `0x22` / OBD `0x01` over `InternalTasu` (once at boot + on refresh/park — never blocking sleep).
  *
  * Node 8 compatible, zero external npm dependencies.
  */
@@ -129,46 +127,161 @@ function haversineKm(lat1, lon1, lat2, lon2) {
     return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/* ---------------- Catalog Introspection & 1CR Payload Synthesis ---------------- */
+/* ---------------- Catalog Introspection (`db.datatypes`) & 1CR Payload Synthesis ---------------- */
 
-const CLIMATE_IFACE_RE = /climate|auxiliary|standheiz|stationary|precond|parkheat|remotestart|independentvent/i;
-const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|TPMS)/i;
+const CLIMATE_IFACE_RE = /climate|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|stationary|precond|parkheat|remotestart|independentvent|departure/i;
+const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|parkheat|parkklima|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|stationary.*clim|climatization.*now|climate.*now|direct.*oper.*clim|departure.*timer|abfahrt/i;
+const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
 
 /** Classify a Climate / 1CR field or method into semantic roles for automatic invocation. */
 function classifyClimateMember(ifaceName, memberName, kind, meta) {
     const full = ifaceName + '.' + memberName;
     const roles = [];
     const writable = kind === 'method' || !!(meta && meta.setter);
-    if (/remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|1cr/i.test(full)) {
+    if (/remote.*engine.*start|engine.*start.*climat|allow.*engine.*start|motorstart|climatization.*engine|1cr/i.test(full)) {
         roles.push(writable ? 'consent_write' : 'consent_read');
     }
-    if (/direct.*oper|immediate|adhoc|ad_hoc|activate.*aux|start.*aux|park.*heat|stationary.*clim|standheiz|standklima|independent.*vent|precond|aux.*clim|climatization.*now/i.test(full)) {
-        if (!/timer|schedule|weekly|abfahrt|departure/i.test(memberName)) {
+    if (/direct.*oper|immediate|adhoc|ad_hoc|activate.*now|start.*now|climate.*now|climatization.*now|instant.*clim|activate.*aux|start.*aux|park.*heat|park.*clim|parkklima|stationary.*clim|standheiz|standklima|standlueft|independent.*vent|precond|aux.*clim|aux.*vent|aux.*heat|ventilat.*now|cooling.*now|set.*climatization|switch.*climat/i.test(full)) {
+        if (!/timer|schedule|weekly|abfahrt|departure|zeitplan/i.test(memberName)) {
             roles.push(writable ? 'direct_write' : 'direct_read');
         }
     }
-    if (/timer|departure|abfahrt|schedule|weekly/i.test(full)) {
+    if (/timer|departure|abfahrt|schedule|weekly|zeitplan|startzeit/i.test(full)) {
         roles.push(writable ? 'timer_write' : 'timer_read');
     }
     if (/temp/i.test(memberName) && !writable) roles.push('temp_read');
-    if (/status|state|active|on/i.test(memberName) && !writable && !roles.length) roles.push('state_read');
+    if (/status|state|active|on|mode/i.test(memberName) && !writable && !roles.length) roles.push('state_read');
     return roles;
+}
+
+function lookupRawType(db, iv, typeName) {
+    if (!typeName || typeof typeName !== 'string') return null;
+    const pools = [
+        iv && iv.datatypes, db && db.datatypes,
+        iv && iv.types, iv && iv.enumerations, iv && iv.structs,
+        db && db.types, db && db.enumerations, db && db.structs, db && db.typeDefinitions,
+    ];
+    const shortName = typeName.split('.').pop();
+    for (let i = 0; i < pools.length; i++) {
+        const p = pools[i];
+        if (!p || typeof p !== 'object') continue;
+        if (p[typeName]) return p[typeName];
+        if (p[shortName]) return p[shortName];
+    }
+    return null;
+}
+
+function resolveTypeDef(db, iv, typeName, depth) {
+    if (!typeName || (depth || 0) > 6) return null;
+    if (typeof typeName === 'object') return summarizeType(db, iv, typeName, (depth || 0) + 1);
+    const raw = lookupRawType(db, iv, typeName);
+    if (!raw) {
+        return { kind: 'primitive', name: String(typeName) };
+    }
+    return summarizeType(db, iv, raw, (depth || 0) + 1);
+}
+
+function summarizeType(db, iv, t, depth) {
+    if (!t || typeof t !== 'object') return null;
+    // Enum in MGU `db.datatypes` (`{ type: 'enum', items: { OFF: { value: 0 }, ON: { value: 1 } } }`) or Franca `values`/`enumerators`
+    if (t.type === 'enum' || t.enumerators || t.values || t.enumValues || (t.items && typeof t.items === 'object' && !Array.isArray(t.items) && t.type !== 'struct' && t.type !== 'union')) {
+        const ev = t.items || t.enumerators || t.values || t.enumValues || {};
+        const values = [];
+        const valueMap = {};
+        if (Array.isArray(ev)) {
+            ev.forEach((x, idx) => {
+                const nm = x && x.name !== undefined ? String(x.name) : String(x);
+                const val = (x && typeof x.value === 'number') ? x.value : idx;
+                values.push(nm);
+                valueMap[nm] = val;
+            });
+        } else {
+            Object.keys(ev).forEach((nm, idx) => {
+                const item = ev[nm];
+                const val = typeof item === 'number' ? item : (item && typeof item.value === 'number' ? item.value : idx);
+                values.push(nm);
+                valueMap[nm] = val;
+            });
+        }
+        return { kind: 'enum', values, valueMap };
+    }
+
+    // Struct in MGU `db.datatypes` (`{ type: 'struct', fields: { hour: { type: 'UInt8' } } }`) or array
+    if (t.type === 'struct' || t.fields || t.members || t.elements) {
+        const fl = t.fields || t.members || t.elements || {};
+        const fields = Array.isArray(fl)
+            ? fl.map((x) => {
+                const ftype = x && (x.type || x.datatype);
+                return { name: x && x.name, type: typeof ftype === 'string' ? ftype : null, typeDef: resolveTypeDef(db, iv, ftype, depth) };
+            })
+            : Object.keys(fl).map((k) => {
+                const entry = fl[k];
+                const ftype = typeof entry === 'string' ? entry : (entry && (entry.type || entry.datatype));
+                return { name: k, type: typeof ftype === 'string' ? ftype : null, typeDef: resolveTypeDef(db, iv, ftype, depth) };
+            });
+        return { kind: 'struct', fields };
+    }
+
+    // Union in MGU `db.datatypes`
+    if (t.type === 'union' && (t.elements || t.fields || t.items)) {
+        const ul = t.elements || t.fields || t.items || {};
+        const branches = Array.isArray(ul)
+            ? ul.map((x) => ({ name: x && x.name, type: x && x.type, typeDef: resolveTypeDef(db, iv, x && x.type, depth) }))
+            : Object.keys(ul).map((k) => ({ name: k, type: ul[k] && ul[k].type, typeDef: resolveTypeDef(db, iv, ul[k] && ul[k].type, depth) }));
+        return { kind: 'union', branches };
+    }
+
+    // Typedef alias (`{ type: 'SomeOtherType' }`)
+    if (typeof t.type === 'string' && !/^(UInt\d+|Int\d+|Boolean|Float|Double|String|ByteBuffer|primitive|array|map)$/i.test(t.type)) {
+        const target = resolveTypeDef(db, iv, t.type, depth);
+        if (target) return target;
+    }
+
+    return { kind: String(t.kind || t.type || 'primitive') };
+}
+
+function parseMethodInArgs(db, iv, mm) {
+    const rawIn = mm.inArgs || mm.in || mm.parameters || mm.args || mm.input;
+    if (!rawIn) return [];
+    if (Array.isArray(rawIn)) {
+        return rawIn.map((a) => {
+            const tp = a && (a.type || a.datatype);
+            return { name: a && a.name, type: typeof tp === 'string' ? tp : null, typeDef: resolveTypeDef(db, iv, tp, 0) };
+        });
+    }
+    if (typeof rawIn === 'object') {
+        return Object.keys(rawIn).map((k) => {
+            const entry = rawIn[k];
+            const tp = typeof entry === 'string' ? entry : (entry && (entry.type || entry.datatype));
+            return { name: k, type: typeof tp === 'string' ? tp : null, typeDef: resolveTypeDef(db, iv, tp, 0) };
+        });
+    }
+    return [];
 }
 
 /**
  * Inspects a Franca / OAP master catalog (`db`) and returns structured descriptors for all
- * Climate / 1CR / Pre-conditioning interfaces, fields, and methods.
+ * Climate / 1CR / Pre-conditioning / DepartureTimer interfaces, fields, and methods.
  */
 function discoverClimateCatalog(db) {
     const interfaces = (db && db.interfaces) || {};
-    const types = Object.assign({}, (db && db.types) || {}, (db && db.typeDefinitions) || {}, (db && db.enumerations) || {}, (db && db.structs) || {});
+    const types = Object.assign({}, (db && db.datatypes) || {}, (db && db.types) || {}, (db && db.enumerations) || {}, (db && db.structs) || {});
     const found = [];
 
     Object.keys(interfaces).sort().forEach((ifaceName) => {
-        if (!CLIMATE_IFACE_RE.test(ifaceName)) return;
         const iv = interfaces[ifaceName] || {};
         const fields = iv.fields || {};
         const methods = iv.methods || {};
+        const fkeys = Object.keys(fields);
+        const mkeys = Object.keys(methods);
+
+        const ifaceMatches = CLIMATE_IFACE_RE.test(ifaceName);
+        const memberMatches = !ifaceMatches && (
+            fkeys.some((k) => CLIMATE_MEMBER_HINT_RE.test(k)) ||
+            mkeys.some((k) => CLIMATE_MEMBER_HINT_RE.test(k))
+        );
+        if (!ifaceMatches && !memberMatches) return;
+
         const broadcasts = iv.broadcasts || iv.events || {};
         const item = {
             iface: ifaceName,
@@ -177,92 +290,67 @@ function discoverClimateCatalog(db) {
             methods: [],
             broadcasts: Object.keys(broadcasts),
         };
-        Object.keys(fields).sort().forEach((fname) => {
+        fkeys.sort().forEach((fname) => {
             const fm = fields[fname] || {};
-            const typeDef = resolveTypeDef(db, iv, fm.type);
+            const roles = classifyClimateMember(ifaceName, fname, 'field', fm);
+            if (!ifaceMatches && !roles.length && !CLIMATE_MEMBER_HINT_RE.test(fname)) return;
+            const ftype = fm.type || fm.datatype || null;
             item.fields.push({
                 name: fname,
-                getter: !!fm.getter,
+                getter: fm.getter !== false,
                 setter: !!fm.setter,
                 notifier: fm.notifier !== false,
-                type: fm.type || null,
-                typeDef,
-                roles: classifyClimateMember(ifaceName, fname, 'field', fm),
+                type: typeof ftype === 'string' ? ftype : null,
+                typeDef: resolveTypeDef(db, iv, ftype, 0),
+                roles,
             });
         });
-        Object.keys(methods).sort().forEach((mname) => {
+        mkeys.sort().forEach((mname) => {
             const mm = methods[mname] || {};
-            const inArgs = Array.isArray(mm.inArgs) ? mm.inArgs : Object.keys(mm.in || mm.inArgs || {}).map((k) => Object.assign({ name: k }, (mm.in || mm.inArgs)[k]));
+            const roles = classifyClimateMember(ifaceName, mname, 'method', mm);
+            if (!ifaceMatches && !roles.length && !CLIMATE_MEMBER_HINT_RE.test(mname)) return;
             item.methods.push({
                 name: mname,
-                inArgs: inArgs.map((a) => ({
-                    name: a && a.name,
-                    type: a && a.type,
-                    typeDef: resolveTypeDef(db, iv, a && a.type),
-                })),
-                roles: classifyClimateMember(ifaceName, mname, 'method', mm),
+                inArgs: parseMethodInArgs(db, iv, mm),
+                roles,
             });
         });
-        found.push(item);
+        if (item.fields.length || item.methods.length) found.push(item);
     });
     return { interfaces: found, hasTypes: Object.keys(types).length > 0 };
 }
 
-function resolveTypeDef(db, iv, typeName) {
-    if (!typeName || typeof typeName !== 'string') return null;
-    const pools = [
-        iv && iv.types, iv && iv.enumerations, iv && iv.structs,
-        db && db.types, db && db.enumerations, db && db.structs, db && db.typeDefinitions,
-    ];
-    const shortName = typeName.split('.').pop();
-    for (let i = 0; i < pools.length; i++) {
-        const p = pools[i];
-        if (!p || typeof p !== 'object') continue;
-        if (p[typeName]) return summarizeType(p[typeName]);
-        if (p[shortName]) return summarizeType(p[shortName]);
-    }
-    return null;
-}
-
-function summarizeType(t) {
-    if (!t || typeof t !== 'object') return null;
-    if (t.enumerators || t.values || t.enumValues) {
-        const ev = t.enumerators || t.values || t.enumValues;
-        return { kind: 'enum', values: Array.isArray(ev) ? ev.map((x) => (x && x.name !== undefined ? x.name : x)) : Object.keys(ev) };
-    }
-    if (t.fields || t.members || t.elements) {
-        const fl = t.fields || t.members || t.elements;
-        const fields = Array.isArray(fl)
-            ? fl.map((x) => ({ name: x && x.name, type: x && x.type }))
-            : Object.keys(fl).map((k) => ({ name: k, type: fl[k] && fl[k].type }));
-        return { kind: 'struct', fields };
-    }
-    return { kind: String(t.kind || t.type || 'primitive') };
-}
-
 /**
  * Pick an enum/boolean/numeric value for turning a feature ON or OFF based on its Franca type definition
- * or its last observed live value on the bus (`sample`).
+ * or its last observed live value on the bus (`sample`). When `numericEnum` is true, returns wire integer.
  */
-function pickEnumOrBool(typeDef, wantOn, sample) {
+function pickEnumOrBool(typeDef, wantOn, sample, numericEnum) {
     if (typeDef && typeDef.kind === 'enum' && Array.isArray(typeDef.values) && typeDef.values.length) {
         const vals = typeDef.values.map(String);
         const posRe = wantOn
-            ? /^(ON|ACTIVE|ACTIVATE|START|ENABLE|ENABLED|TRUE|IMMEDIATE|DIRECT_ON|CLIMATE_ON|RUN|1)$/i
-            : /^(OFF|INACTIVE|DEACTIVATE|STOP|DISABLE|DISABLED|FALSE|DIRECT_OFF|CLIMATE_OFF|0)$/i;
+            ? /^(ON|ACTIVE|ACTIVATE|ACTIVATED|START|STARTED|ENABLE|ENABLED|TRUE|IMMEDIATE|DIRECT_ON|CLIMATE_ON|RUN|RUNNING|1)$/i
+            : /^(OFF|INACTIVE|DEACTIVATE|DEACTIVATED|STOP|STOPPED|DISABLE|DISABLED|FALSE|DIRECT_OFF|CLIMATE_OFF|STANDBY|0)$/i;
         const looseRe = wantOn
-            ? /(^|_)(ON|ACTIVE|START|ENABLE|RUN|HEAT|COOL|VENT)(_|$)/i
-            : /(^|_)(OFF|INACTIVE|STOP|DISABLE|CANCEL)(_|$)/i;
-        const noInvalid = vals.filter((v) => !/INVALID|UNKNOWN|ERROR|SIGNAL_UNAVAILABLE|NO_ACTION|INIT/i.test(v));
-        const exact = noInvalid.find((v) => posRe.test(v));
-        if (exact !== undefined) return exact;
-        const loose = noInvalid.find((v) => looseRe.test(v));
-        if (loose !== undefined) return loose;
+            ? /(^|_)(ON|ACTIVE|ACTIVATE|START|ENABLE|RUN|IMMEDIATE|CLIMAT|COOL|VENT|HEAT)(_|$)/i
+            : /(^|_)(OFF|INACTIVE|DEACTIVATE|STOP|DISABLE|CANCEL|IDLE|STANDBY)(_|$)/i;
+        const noInvalid = vals.filter((v) => !/INVALID|UNKNOWN|ERROR|SIGNAL_UNAVAILABLE|NO_ACTION|NO_CHANGE|INIT|NOT_AVAILABLE/i.test(v));
+        let chosen = noInvalid.find((v) => posRe.test(v));
+        if (chosen === undefined) chosen = noInvalid.find((v) => looseRe.test(v));
+        if (chosen === undefined && noInvalid.length >= 2) {
+            chosen = wantOn ? noInvalid[1] : noInvalid[0];
+        }
+        if (chosen !== undefined) {
+            if (numericEnum && typeDef.valueMap && typeDef.valueMap[chosen] !== undefined) {
+                return typeDef.valueMap[chosen];
+            }
+            return chosen;
+        }
     }
     if (typeof sample === 'boolean') return !!wantOn;
     if (typeof sample === 'number') return wantOn ? 1 : 0;
     if (typeof sample === 'string') {
         if (/^(true|false)$/i.test(sample)) return !!wantOn;
+        if (numericEnum) return wantOn ? 1 : 0;
         if (/OFF|INACTIVE|STOP|DISABLE/i.test(sample) && wantOn) {
             return sample.replace(/INACTIVE/ig, 'ACTIVE').replace(/DISABLE[D]?/ig, 'ENABLED').replace(/STOP/ig, 'START').replace(/OFF/ig, 'ON');
         }
@@ -270,59 +358,71 @@ function pickEnumOrBool(typeDef, wantOn, sample) {
             return sample.replace(/ACTIVE/ig, 'INACTIVE').replace(/ENABLE[D]?/ig, 'DISABLED').replace(/START/ig, 'STOP').replace(/ON/ig, 'OFF');
         }
     }
+    if (typeDef && typeDef.kind && /bool/i.test(typeDef.kind + ' ' + (typeDef.name || ''))) return !!wantOn;
     return wantOn ? 1 : 0;
 }
 
 /**
  * Build a payload for a direct Start/Stop setter or method, guided by `typeDef` and any live `sample` struct.
  */
-function buildDirectPayload(meta, wantOn, sample) {
+function buildDirectPayload(meta, wantOn, sample, numericEnum) {
     const td = meta && meta.typeDef;
+    if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
+        const out = {};
+        td.fields.forEach((f) => {
+            if (!f || !f.name) return;
+            const cur = (sample && typeof sample === 'object') ? sample[f.name] : undefined;
+            if (/zone|id|index|slot|seat/i.test(f.name)) {
+                out[f.name] = cur !== undefined ? cur : (f.typeDef && f.typeDef.kind === 'enum' && f.typeDef.values[0] ? (numericEnum ? 0 : f.typeDef.values[0]) : 0);
+            } else {
+                out[f.name] = buildDirectPayload(f, wantOn, cur, numericEnum);
+            }
+        });
+        return out;
+    }
     if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
         const out = {};
         Object.keys(sample).forEach((k) => {
             if (/zone|slot|id|index/i.test(k)) out[k] = sample[k];
-            else out[k] = pickEnumOrBool(null, wantOn, sample[k]);
+            else out[k] = pickEnumOrBool(null, wantOn, sample[k], numericEnum);
         });
         return out;
     }
-    if (td && td.kind === 'struct' && Array.isArray(td.fields)) {
-        const out = {};
-        td.fields.forEach((f) => {
-            if (!f || !f.name) return;
-            if (/zone|id|index|slot/i.test(f.name)) out[f.name] = 0;
-            else out[f.name] = pickEnumOrBool(null, wantOn, /bool/i.test(String(f.type)) ? false : 0);
-        });
-        return out;
-    }
-    return pickEnumOrBool(td, wantOn, sample);
+    return pickEnumOrBool(td, wantOn, sample, numericEnum);
 }
 
 /**
  * Build a payload for a Departure Timer (`BDC_BODY3 / IHKA` wake schedule) setter or method.
- * Mirrors how BMW's `KombiIF.timeDate` and `Climate` timer structs name `hour`/`minute`/`active` fields.
  */
-function buildTimerPayload(meta, hour, minute, enabled, sample) {
+function buildTimerPayload(meta, hour, minute, enabled, sample, numericEnum) {
     const h = Math.max(0, Math.min(23, Number(hour) | 0));
     const m = Math.max(0, Math.min(59, Number(minute) | 0));
-    const setField = (obj, k, cur) => {
+    const setField = (obj, k, fmeta, cur) => {
+        const ftd = fmeta && fmeta.typeDef;
         if (/hour|stunde|std/i.test(k)) obj[k] = h;
         else if (/min/i.test(k)) obj[k] = m;
         else if (/sec|sek/i.test(k)) obj[k] = 0;
         else if (/slot|index|id|timer.?nr|number/i.test(k)) obj[k] = typeof cur === 'number' ? cur : 1;
-        else if (/active|enable|on|state|status|mode|operation/i.test(k)) obj[k] = pickEnumOrBool(null, enabled, cur);
+        else if (/active|enable|on|state|status|mode|operation/i.test(k)) obj[k] = pickEnumOrBool(ftd, enabled, cur, numericEnum);
+        else if (ftd && ftd.kind === 'struct') obj[k] = buildTimerPayload(fmeta, h, m, enabled, cur, numericEnum);
         else if (cur !== undefined) obj[k] = cur;
+        else if (ftd && ftd.kind === 'enum' && ftd.values.length) obj[k] = numericEnum ? 0 : ftd.values[0];
+        else if (ftd && /bool/i.test(ftd.kind + ' ' + (ftd.name || ''))) obj[k] = !!enabled;
         else obj[k] = 0;
     };
-    if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
+    const td = meta && meta.typeDef;
+    if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
         const out = {};
-        Object.keys(sample).forEach((k) => setField(out, k, sample[k]));
+        td.fields.forEach((f) => {
+            if (!f || !f.name) return;
+            const cur = (sample && typeof sample === 'object') ? sample[f.name] : undefined;
+            setField(out, f.name, f, cur);
+        });
         return out;
     }
-    const td = meta && meta.typeDef;
-    if (td && td.kind === 'struct' && Array.isArray(td.fields)) {
+    if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
         const out = {};
-        td.fields.forEach((f) => { if (f && f.name) setField(out, f.name, /bool/i.test(String(f.type)) ? false : undefined); });
+        Object.keys(sample).forEach((k) => setField(out, k, null, sample[k]));
         return out;
     }
     return {
@@ -377,7 +477,7 @@ class TelemetryTracker {
         this._wasDriving = false;
     }
 
-    /** Update fields and return emitted high-level events: [{ type: 'trip_end' | 'parked', trip }] */
+    /** Update fields and return emitted high-level events: [{ type: 'parked', trip }] */
     update(patch, now) {
         now = now || Date.now();
         const events = [];
@@ -427,7 +527,6 @@ class TelemetryTracker {
             if ((s.speed || 0) > 5 || s.engineRunning) this._wasDriving = true;
         }
 
-        // Detect transition from driving/running -> shutdown/parked
         const shuttingDown = (prevCond === 10 && s.condition != null && s.condition !== 10 && s.condition !== 8) ||
             (prevEngine && !s.engineRunning && (s.speed || 0) < 1 && s.stage === 'P');
 
@@ -511,19 +610,28 @@ function writeJsonSafe(f, obj) {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir);
         fs.writeFileSync(f + '.tmp', JSON.stringify(obj, null, 2) + '\n');
         fs.renameSync(f + '.tmp', f);
-    } catch (e) { /* ignore read-only in tests */ }
+    } catch (e) {}
+}
+
+function toBytes(b) {
+    if (!b) return [];
+    if (Buffer.isBuffer(b) || b instanceof Uint8Array) return Array.prototype.slice.call(b);
+    if (Array.isArray(b)) return b.slice();
+    if (b.data) return toBytes(b.data);
+    return [];
 }
 
 async function runWorker() {
     const emit = (msg) => {
-        try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) { /* parent closed */ }
+        try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) {}
     };
 
     const tracker = new TelemetryTracker();
     const climateLive = {};        // "iface.field" -> latest value
-    const climateProxies = {};     // iface -> { proxy, desc }
+    const climateProxies = {};     // iface -> { list: [{ inst, proxy, available }], desc, cfgSummary }
     let climateCatalog = { interfaces: [] };
     let tasuProxy = null;
+    const tasuListeners = [];
 
     let db = null, gen = null, someip = null;
     try { db = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8')); } catch (e) {
@@ -534,7 +642,6 @@ async function runWorker() {
         try { someip = require(SOMEIP_PATH); } catch (e) { emit({ ev: 'log', level: 'warn', text: 'someip.node: ' + e.message }); }
     }
 
-    // Serialize native buildProxy/init ticks just like kit/runtime/signals.js to avoid vsomeip futex contention
     let chain = Promise.resolve();
     function nativeTick(fn) {
         const step = () => new Promise((res, rej) => setImmediate(() => {
@@ -545,8 +652,8 @@ async function runWorker() {
         return p;
     }
 
-    async function openDynamicProxy(ifaceName, attrMap, methods, broadcasts) {
-        if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return null;
+    async function openDynamicProxies(ifaceName, attrMap, methods, broadcasts, maxInst) {
+        if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return { list: [], cfg: null };
         const spec = { instances: '*' };
         if (attrMap && Object.keys(attrMap).length) spec.attributes = attrMap;
         if (methods && methods.length) spec.methods = methods;
@@ -555,9 +662,21 @@ async function runWorker() {
         proxies[ifaceName] = spec;
         const generated = gen.generate(db, { proxies, services: {} });
         const cfg = generated && generated[ifaceName];
-        if (!cfg) return null;
-        const inst = Object.keys(cfg.instances || { '1': 1 })[0] || '1';
-        return nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((px) => px.init().then(() => px)), 5000, ifaceName));
+        if (!cfg) return { list: [], cfg: null };
+        const insts = Object.keys(cfg.instances || { '1': 1 }).slice(0, maxInst || 3);
+        const list = [];
+        for (let i = 0; i < insts.length; i++) {
+            const inst = insts[i];
+            try {
+                const px = await nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 5000, ifaceName + '@' + inst));
+                const entry = { inst, proxy: px, available: !!(px.isAvailable && px.isAvailable()) };
+                try { px.subscribeToAvailability((a) => { entry.available = !!a; }); } catch (e) {}
+                list.push(entry);
+            } catch (e) {
+                emit({ ev: 'log', level: 'warn', text: 'proxy ' + ifaceName + '@' + inst + ': ' + e.message });
+            }
+        }
+        return { list, cfg };
     }
 
     function pushPatch(patch) {
@@ -566,10 +685,10 @@ async function runWorker() {
         evs.forEach((e) => emit({ ev: e.type, trip: e.trip, state: tracker.state }));
     }
 
-    // 1. Subscribe to Positioning, Core Driving, Fuel/Range/Body, and Climate/1CR
     if (db && gen && someip) {
-        // Positioning
         const allIfaces = Object.keys(db.interfaces || {});
+
+        // 1. Positioning (Underground Nav dead-reckoning + GNSS)
         for (let i = 0; i < allIfaces.length; i++) {
             const name = allIfaces[i];
             const iv = db.interfaces[name] || {};
@@ -580,8 +699,9 @@ async function runWorker() {
                 if (fnames.indexOf('currentLocation') >= 0) attrs.currentLocation = 'rs';
                 if (fnames.indexOf('rawPositionData') >= 0) attrs.rawPositionData = 'rs';
                 try {
-                    const px = await openDynamicProxy(name, attrs, [], []);
-                    if (px) {
+                    const opened = await openDynamicProxies(name, attrs, [], [], 2);
+                    opened.list.forEach((item) => {
+                        const px = item.proxy;
                         const onPos = (f, val) => {
                             const c = extractCoords(val, 0);
                             if (!c) return;
@@ -593,21 +713,23 @@ async function runWorker() {
                             try { px.subscribe({ name: f, onReceive: (v) => onPos(f, v) }); } catch (e) {}
                             try { px.getValue(f, 2500).then((v) => onPos(f, v)).catch(() => {}); } catch (e) {}
                         });
-                    }
-                } catch (e) { emit({ ev: 'log', level: 'warn', text: 'pos proxy: ' + e.message }); }
+                    });
+                } catch (e) {}
             } else if (/GnssPositioning$/i.test(name) && bnames.indexOf('positioning') >= 0) {
                 try {
-                    const px = await openDynamicProxy(name, {}, [], ['positioning']);
-                    if (px) px.subscribe({ name: 'positioning', onReceive: (v) => {
-                        if (tracker.state.pos && (Date.now() - tracker.state.pos.at < 60000)) return;
-                        const c = extractCoords(v, 0);
-                        if (c) pushPatch({ pos: { lat: c.lat, lon: c.lon, street: '', district: '', city: '', source: 'gnss', at: Date.now() } });
-                    } });
+                    const opened = await openDynamicProxies(name, {}, [], ['positioning'], 1);
+                    opened.list.forEach((item) => {
+                        item.proxy.subscribe({ name: 'positioning', onReceive: (v) => {
+                            if (tracker.state.pos && (Date.now() - tracker.state.pos.at < 60000)) return;
+                            const c = extractCoords(v, 0);
+                            if (c) pushPatch({ pos: { lat: c.lat, lon: c.lon, street: '', district: '', city: '', source: 'gnss', at: Date.now() } });
+                        } });
+                    });
                 } catch (e) {}
             }
         }
 
-        // Core driving signals (CDS, Vehicle2, VehicleInformation, VehicleCondition)
+        // 2. Core driving signals (CDS, Vehicle2, VehicleInformation, VehicleCondition)
         const coreSpecs = [
             {
                 iface: 'de.bmw.infotainment.vehicle.CDS',
@@ -668,40 +790,45 @@ async function runWorker() {
             cs.fields.forEach((f) => { if (iv.fields && iv.fields[f]) attrs[f] = 'rs'; });
             if (!Object.keys(attrs).length) continue;
             try {
-                const px = await openDynamicProxy(cs.iface, attrs, [], []);
-                if (px) {
+                const opened = await openDynamicProxies(cs.iface, attrs, [], [], 1);
+                opened.list.forEach((item) => {
+                    const px = item.proxy;
                     Object.keys(attrs).forEach((f) => {
                         try { px.subscribe({ name: f, onReceive: (v) => cs.onField(f, v) }); } catch (e) {}
                         try { px.getValue(f, 2500).then((v) => cs.onField(f, v)).catch(() => {}); } catch (e) {}
                     });
-                }
-            } catch (e) { emit({ ev: 'log', level: 'warn', text: cs.iface + ': ' + e.message }); }
+                });
+            } catch (e) {}
         }
 
-        // Dynamic Fuel / Range / Odometer / Ambient Temp / Door / Lock watchers
+        // 3. Single-proxy-per-interface Body / Fuel / Range / Odometer / Door / Lock watchers (no 12-field cutoff!)
+        const BODY_FIELD_RE = /(^|status|_)(tank|fuel|kraftstoff|fuellstand|cruisingRange|remainingRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|window|centralLock|lockState|tailgate|trunk|bonnet|hood)/i;
         for (let i = 0; i < allIfaces.length; i++) {
             const name = allIfaces[i];
             if (!BODY_IFACE_RE.test(name)) continue;
             const iv = db.interfaces[name] || {};
             const fnames = Object.keys(iv.fields || {});
-            const want = fnames.filter((f) => /tank|fuel|range|reichweite|odometer|mileage|outsideTemp|exteriorTemp|ambientTemp|door|window|lock|tailgate|trunk|bonnet|hood/i.test(f)).slice(0, 12);
+            const want = fnames.filter((f) => BODY_FIELD_RE.test(f)).slice(0, 28);
             if (!want.length) continue;
-            for (let k = 0; k < want.length; k++) {
-                const fname = want[k];
+            const attrs = {};
+            want.forEach((fname) => {
                 const fm = iv.fields[fname] || {};
-                const mode = fm.getter ? 'rs' : 's';
-                try {
-                    const attrs = {}; attrs[fname] = mode;
-                    const px = await openDynamicProxy(name, attrs, [], []);
-                    if (!px) continue;
+                attrs[fname] = (fm.getter !== false ? 'r' : '') + (fm.notifier !== false ? 's' : '') || 'r';
+            });
+            try {
+                const opened = await openDynamicProxies(name, attrs, [], [], 1);
+                if (!opened.list.length) continue;
+                const px = opened.list[0].proxy;
+                want.forEach((fname) => {
+                    const fm = iv.fields[fname] || {};
                     const onBody = (val) => interpretBodyField(name, fname, val, pushPatch, tracker.state);
-                    try { px.subscribe({ name: fname, onReceive: onBody }); } catch (e) {}
-                    if (fm.getter) { try { px.getValue(fname, 2500).then(onBody).catch(() => {}); } catch (e) {} }
-                } catch (e) {}
-            }
+                    if (fm.notifier !== false) { try { px.subscribe({ name: fname, onReceive: onBody }); } catch (e) {} }
+                    if (fm.getter !== false) { try { px.getValue(fname, 2500).then(onBody).catch(() => {}); } catch (e) {} }
+                });
+            } catch (e) {}
         }
 
-        // 2. Discover & open ALL Climate / 1CR / Pre-conditioning interfaces
+        // 4. Discover & open ALL Climate / 1CR / Standklima / Pre-conditioning interfaces across all instances
         climateCatalog = discoverClimateCatalog(db);
         tracker.state.climate1cr.discoveredCount = climateCatalog.interfaces.length;
         for (let i = 0; i < climateCatalog.interfaces.length; i++) {
@@ -712,31 +839,38 @@ async function runWorker() {
                 if (!attrs[f.name]) attrs[f.name] = 'r';
             });
             const methods = desc.methods.map((m) => m.name);
-            let px = null;
+            let opened = { list: [], cfg: null };
             try {
-                px = await openDynamicProxy(desc.iface, attrs, methods, desc.broadcasts);
+                opened = await openDynamicProxies(desc.iface, attrs, methods, desc.broadcasts, 3);
             } catch (e) {
-                // Fallback: build read/write per field safely if combined schema had an unsupported type
                 const safeAttrs = {};
                 desc.fields.forEach((f) => {
-                    if (f.roles.length) safeAttrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') + (f.notifier ? 's' : '') || 'r';
+                    if (f.roles.length || f.setter) safeAttrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') + (f.notifier ? 's' : '') || 'r';
                 });
-                try { px = await openDynamicProxy(desc.iface, safeAttrs, methods, []); } catch (e2) {}
+                try { opened = await openDynamicProxies(desc.iface, safeAttrs, methods, [], 3); } catch (e2) {}
             }
-            if (!px) continue;
-            climateProxies[desc.iface] = { proxy: px, desc };
-            desc.fields.forEach((f) => {
-                const key = desc.iface + '.' + f.name;
-                const onVal = (val) => {
-                    climateLive[key] = val;
-                    interpretClimateField(desc.iface, f, val, pushPatch, tracker.state);
-                };
-                if (f.notifier) { try { px.subscribe({ name: f.name, onReceive: onVal }); } catch (e) {} }
-                if (f.getter) { try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {} }
+            if (!opened.list.length) continue;
+            const cfgSummary = opened.cfg ? {
+                instances: Object.keys(opened.cfg.instances || {}),
+                fields: Object.keys(opened.cfg.fields || {}),
+                methods: Object.keys(opened.cfg.methods || {}),
+            } : null;
+            climateProxies[desc.iface] = { list: opened.list, desc, cfgSummary };
+            opened.list.forEach((instEntry) => {
+                const px = instEntry.proxy;
+                desc.fields.forEach((f) => {
+                    const key = desc.iface + '.' + f.name;
+                    const onVal = (val) => {
+                        climateLive[key] = val;
+                        interpretClimateField(desc.iface, f, val, pushPatch, tracker.state);
+                    };
+                    if (f.notifier) { try { px.subscribe({ name: f.name, onReceive: onVal }); } catch (e) {} }
+                    if (f.getter) { try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {} }
+                });
             });
         }
 
-        // 3. Optional UDS TASU proxy for on-demand 12V battery voltage read (never polled continuously!)
+        // 5. UDS InternalTasu proxy for on-demand accurate 12V Battery, Fuel %, Odometer, Temps (never polled continuously!)
         const tasuName = 'com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu';
         if (db.interfaces && db.interfaces[tasuName]) {
             try {
@@ -747,59 +881,168 @@ async function runWorker() {
                 const cfg = generated && generated[tasuName];
                 if (cfg) {
                     tasuProxy = await nativeTick(() => someip.buildProxy(cfg, 'SystemFunctionsInternalTasuInst1').then((p) => p.init().then(() => p)));
+                    tasuProxy.subscribe({
+                        name: 'sendTasuResponse',
+                        onReceive: (msg) => {
+                            if (msg && msg.errorCode !== undefined && msg.errorCode !== 'NO_ERROR' && msg.errorCode !== 0) return;
+                            const b = toBytes(msg && (msg.udsResponse !== undefined ? msg.udsResponse : msg));
+                            if (b.length < 10 || b[2] === 0x7F) return;
+                            const frame = { ecu: b[6], uds: b.slice(9) };
+                            tasuListeners.slice().forEach((fn) => { try { fn(frame); } catch (e) {} });
+                        },
+                    });
                 }
             } catch (e) { emit({ ev: 'log', level: 'warn', text: 'TASU init: ' + e.message }); }
         }
     }
 
-    /** Read 12V battery voltage on demand via UDS 0x22 F442 on DME (0x12) or BDC (0x40). */
-    async function readBattery12V() {
-        if (!tasuProxy) return tracker.state.battery12v;
-        const tryEcu = (ecu, didHi, didLo, factor) => new Promise((resolve) => {
-            let done = false;
-            const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
-            const timer = setTimeout(() => finish(null), 2200);
-            try {
-                tasuProxy.subscribe({
-                    name: 'sendTasuResponse',
-                    onReceive: (msg) => {
-                        const raw = msg && (msg.udsResponse || msg);
-                        const b = Buffer.isBuffer(raw) ? raw : (raw && raw.data ? Buffer.from(raw.data) : null);
-                        if (!b || b.length < 14 || b[6] !== ecu) return;
-                        const uds = b.slice(9);
-                        if (uds[0] === 0x62 && uds[1] === didHi && uds[2] === didLo && uds.length >= 5) {
-                            const volts = +(((uds[3] << 8) | uds[4]) * factor).toFixed(2);
-                            if (volts >= 8 && volts <= 16.8) finish(volts);
-                        }
-                    },
-                });
-                tasuProxy.callMethod('sendTasuRequest', {
-                    sourceAddress: 0xF2, targetAddress: ecu, serviceID: 0x22, subroutineID: 0,
-                    udsDataLength: 2, udsData: Buffer.from([didHi, didLo]), deadlockTime: 0,
-                }, 2000).catch(() => finish(null));
-            } catch (e) { finish(null); }
+    /** Send a single physical UDS/OBD read over InternalTasu with proper echo matching & busy retry. */
+    async function udsQuery(ecu, sid, reqBytes, timeoutMs) {
+        if (!tasuProxy) return null;
+        return new Promise((resolve) => {
+            let done = false, timer = null;
+            const onFrame = (f) => {
+                if (f.ecu !== ecu) return;
+                const u = f.uds;
+                if (u[0] === 0x7F && u[1] === sid && u[2] === 0x78) {
+                    clearTimeout(timer);
+                    timer = setTimeout(() => finish(null), 5000);
+                    return;
+                }
+                const matchPos = u[0] === sid + 0x40 && reqBytes.every((b, idx) => u[idx + 1] === b);
+                const matchNeg = u[0] === 0x7F && u[1] === sid;
+                if (!matchPos && !matchNeg) return;
+                finish(matchPos ? u : null);
+            };
+            const finish = (v) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                const idx = tasuListeners.indexOf(onFrame);
+                if (idx >= 0) tasuListeners.splice(idx, 1);
+                resolve(v);
+            };
+            tasuListeners.push(onFrame);
+            timer = setTimeout(() => finish(null), timeoutMs || 2200);
+
+            const sendAttempt = (n) => {
+                nativeTick(() => tasuProxy.callMethod('sendTasuRequest', {
+                    sourceAddress: 0xF2, targetAddress: ecu, serviceID: sid, subroutineID: 0,
+                    udsDataLength: reqBytes.length, udsData: Buffer.from(reqBytes), deadlockTime: 0,
+                }, 2200)).then((r) => {
+                    const verdict = r && typeof r === 'object' ? String(r.TasuErrorEnum || '') : '';
+                    if (/TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(verdict) && n < 2 && !done) {
+                        setTimeout(() => { if (!done) sendAttempt(n + 1); }, 220 * (n + 1));
+                    }
+                }).catch(() => finish(null));
+            };
+            sendAttempt(0);
         });
-        const v = (await tryEcu(0x12, 0xF4, 0x42, 0.001)) || (await tryEcu(0x40, 0xF4, 0x42, 0.001));
-        if (v) pushPatch({ battery12v: v });
-        return v;
     }
 
-    /** Execute 1CR Start / Stop / Schedule or Raw Inspector test */
+    /** Read accurate 12V Voltage, Fuel %, Odometer km, Ambient °C, Coolant °C via ISO UDS 0x22 F4xx / OBD 0x01 on demand. */
+    async function readVitalsUDS() {
+        if (!tasuProxy) return;
+        const patch = {};
+
+        // 1. 12V Control Module Voltage (0x22 F442 on DME 0x12 / BDC 0x40, fallback OBD 0x01 42)
+        let u = (await udsQuery(0x12, 0x22, [0xF4, 0x42], 1800)) || (await udsQuery(0x40, 0x22, [0xF4, 0x42], 1800));
+        if (u && u.length >= 5) {
+            const v = +(((u[3] << 8) | u[4]) * 0.001).toFixed(2);
+            if (v >= 8.5 && v <= 16.5) patch.battery12v = v;
+        } else {
+            u = await udsQuery(0x12, 0x01, [0x42], 1500);
+            if (u && u.length >= 4) {
+                const v = +(((u[2] << 8) | u[3]) * 0.001).toFixed(2);
+                if (v >= 8.5 && v <= 16.5) patch.battery12v = v;
+            }
+        }
+
+        // 2. Fuel Tank Level % (0x22 F42F or OBD 0x01 2F on DME 0x12)
+        u = await udsQuery(0x12, 0x22, [0xF4, 0x2F], 1600);
+        let rawFuel = (u && u.length >= 4) ? u[3] : null;
+        if (rawFuel === null) {
+            u = await udsQuery(0x12, 0x01, [0x2F], 1500);
+            if (u && u.length >= 3) rawFuel = u[2];
+        }
+        if (rawFuel !== null && rawFuel >= 0 && rawFuel <= 255) {
+            const pct = Math.round((rawFuel * 100) / 255);
+            if (pct >= 0 && pct <= 100) patch.fuelPct = pct;
+        }
+
+        // 3. Odometer km (0x22 F4A6 or OBD 0x01 A6 on DME 0x12: 4-byte unsigned * 0.1 km)
+        u = await udsQuery(0x12, 0x22, [0xF4, 0xA6], 1600);
+        let odoAt = (u && u.length >= 7) ? 3 : -1;
+        if (odoAt < 0) {
+            u = await udsQuery(0x12, 0x01, [0xA6], 1500);
+            if (u && u.length >= 6) odoAt = 2;
+        }
+        if (odoAt >= 0) {
+            const rawOdo = u[odoAt] * 16777216 + (u[odoAt + 1] << 16) + (u[odoAt + 2] << 8) + u[odoAt + 3];
+            const km = Math.round(rawOdo * 0.1);
+            if (km > 0 && km < 1500000) patch.odometerKm = km;
+        }
+
+        // 4. Ambient Air Temp (0x22 F446 / 0x01 46) & Coolant Temp (0x22 F405 / 0x01 05) if missing
+        if (tracker.state.ambientC === null) {
+            u = (await udsQuery(0x12, 0x22, [0xF4, 0x46], 1400)) || (await udsQuery(0x12, 0x01, [0x46], 1400));
+            const idx = u && (u[0] === 0x62 ? 3 : 2);
+            if (u && u.length > idx && u[idx] !== 255) {
+                const amb = u[idx] - 40;
+                if (amb >= -40 && amb <= 60) patch.ambientC = amb;
+            }
+        }
+        if (tracker.state.coolantC === null) {
+            u = (await udsQuery(0x12, 0x22, [0xF4, 0x05], 1400)) || (await udsQuery(0x12, 0x01, [0x05], 1400));
+            const idx = u && (u[0] === 0x62 ? 3 : 2);
+            if (u && u.length > idx && u[idx] !== 255) {
+                const cl = u[idx] - 40;
+                if (cl >= -40 && cl <= 150) patch.coolantC = cl;
+            }
+        }
+
+        if (Object.keys(patch).length) pushPatch(patch);
+    }
+
+    /** Execute 1CR Start / Stop / Schedule or Raw Inspector test across all live instances & both enum encodings */
     async function execute1CR(action, params) {
         params = params || {};
         const trace = [];
         const savedProfile = readJsonSafe(PROFILE_PATH);
 
-        // Helper to invoke a single setter or method
         const callOne = async (iface, kind, name, payload) => {
-            const entry = climateProxies[iface];
-            if (!entry || !entry.proxy) throw new Error('Proxy not open: ' + iface);
-            if (kind === 'setter') {
-                await within(entry.proxy.setValue(name, payload, 4000), 4500, iface + '.' + name);
-                return { ok: true, iface, kind, name, payload };
+            const holder = climateProxies[iface];
+            if (!holder || !holder.list || !holder.list.length) throw new Error('Proxy not open: ' + iface);
+            // Sort available instances first
+            const sorted = holder.list.slice().sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0));
+            let lastErr = null;
+            for (let i = 0; i < sorted.length; i++) {
+                const inst = sorted[i];
+                try {
+                    if (kind === 'setter') {
+                        await nativeTick(() => within(inst.proxy.setValue(name, payload, 3500), 4000, iface + '.' + name));
+                        return { ok: true, iface, inst: inst.inst, kind, name, payload };
+                    }
+                    const res = await nativeTick(() => within(inst.proxy.callMethod(name, payload || {}, 3500), 4000, iface + '.' + name));
+                    return { ok: true, iface, inst: inst.inst, kind, name, payload, response: res };
+                } catch (e) {
+                    lastErr = e;
+                }
             }
-            const res = await within(entry.proxy.callMethod(name, payload || {}, 4000), 4500, iface + '.' + name);
-            return { ok: true, iface, kind, name, payload, response: res };
+            throw lastErr || new Error('No instance answered for ' + iface + '.' + name);
+        };
+
+        const callSmart = async (iface, kind, meta, buildFn) => {
+            const pStr = buildFn(false);
+            try {
+                return await callOne(iface, kind, meta.name, pStr);
+            } catch (e1) {
+                const pNum = buildFn(true);
+                if (JSON.stringify(pNum) !== JSON.stringify(pStr)) {
+                    return await callOne(iface, kind, meta.name, pNum);
+                }
+                throw e1;
+            }
         };
 
         if (action === 'invoke_raw') {
@@ -820,23 +1063,22 @@ async function runWorker() {
             const wantOn = action === 'start1cr';
             const roleKey = wantOn ? 'start' : 'stop';
 
-            // 1. Pinned profile wins first if user saved a verified car profile
             if (savedProfile && savedProfile[roleKey]) {
                 const p = savedProfile[roleKey];
                 try {
                     const r = await callOne(p.iface, p.kind, p.name, p.payload);
                     trace.push(r);
                     tracker.state.climate1cr.active = wantOn;
-                    tracker.state.climate1cr.lastAction = wantOn ? 'Kích nổ 1CR (Cấu hình ghim)' : 'Tắt 1CR (Cấu hình ghim)';
-                    tracker.state.climate1cr.lastResult = 'Đã gửi lệnh tới ' + p.iface.split('.').pop() + '.' + p.name;
+                    tracker.state.climate1cr.lastAction = wantOn ? 'Kích nổ 1CR (Ghim)' : 'Tắt 1CR (Ghim)';
+                    tracker.state.climate1cr.lastResult = 'Đã gửi tới ' + p.iface.split('.').pop() + '.' + p.name;
                     pushPatch({});
-                    return { ok: true, method: p.iface + '.' + p.name, trace };
+                    return { ok: true, method: p.iface.split('.').pop() + '.' + p.name, trace };
                 } catch (e) {
                     trace.push({ ok: false, step: 'pinned', error: e.message });
                 }
             }
 
-            // 2. Ensure 1CR Remote Engine Start consent flag is enabled before starting
+            // Enable 1CR Remote Engine Start consent flag first when starting
             if (wantOn) {
                 for (let i = 0; i < climateCatalog.interfaces.length; i++) {
                     const d = climateCatalog.interfaces[i];
@@ -845,8 +1087,7 @@ async function runWorker() {
                         const f = d.fields[k];
                         if (f.setter && f.roles.indexOf('consent_write') >= 0) {
                             const sample = climateLive[d.iface + '.' + f.name];
-                            const payload = buildDirectPayload(f, true, sample);
-                            try { trace.push(await callOne(d.iface, 'setter', f.name, payload)); } catch (e) {
+                            try { trace.push(await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, true, sample, num))); } catch (e) {
                                 trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
                             }
                         }
@@ -854,7 +1095,7 @@ async function runWorker() {
                 }
             }
 
-            // 3. Try discovered direct-operation setters & methods
+            // Try all discovered direct-operation setters & methods
             let succeeded = null;
             for (let i = 0; i < climateCatalog.interfaces.length; i++) {
                 const d = climateCatalog.interfaces[i];
@@ -863,9 +1104,8 @@ async function runWorker() {
                     const f = d.fields[k];
                     if (!f.setter || f.roles.indexOf('direct_write') < 0) continue;
                     const sample = climateLive[d.iface + '.' + f.name];
-                    const payload = buildDirectPayload(f, wantOn, sample);
                     try {
-                        const r = await callOne(d.iface, 'setter', f.name, payload);
+                        const r = await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, wantOn, sample, num));
                         trace.push(r);
                         if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
                     } catch (e) {
@@ -875,12 +1115,14 @@ async function runWorker() {
                 for (let k = 0; k < d.methods.length; k++) {
                     const m = d.methods[k];
                     if (m.roles.indexOf('direct_write') < 0) continue;
-                    const argObj = {};
-                    m.inArgs.forEach((a) => {
-                        if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined);
-                    });
                     try {
-                        const r = await callOne(d.iface, 'method', m.name, argObj);
+                        const r = await callSmart(d.iface, 'method', m, (num) => {
+                            const argObj = {};
+                            m.inArgs.forEach((a) => {
+                                if (a && a.name) argObj[a.name] = buildDirectPayload(a, wantOn, undefined, num);
+                            });
+                            return argObj;
+                        });
                         trace.push(r);
                         if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + m.name + '()';
                     } catch (e) {
@@ -889,12 +1131,12 @@ async function runWorker() {
                 }
             }
 
-            // 4. Smart fallback on Start: if no direct-operation writable member answered, program Departure Timer to Now + 2 min
+            // Fallback on Start: program Departure Timer to Now + 2 min
             if (!succeeded && wantOn) {
                 const target = new Date(Date.now() + 2 * 60000);
                 const sched = await execute1CR('schedule1cr', { hour: target.getHours(), minute: target.getMinutes(), enabled: true });
                 if (sched.ok) {
-                    succeeded = 'Timer+2p (' + sched.method + ')';
+                    succeeded = 'Hẹn giờ +2p (' + sched.method + ')';
                     trace.push({ ok: true, fallback: 'near_now_timer', method: sched.method });
                 }
             }
@@ -902,16 +1144,19 @@ async function runWorker() {
             tracker.state.climate1cr.lastAction = wantOn ? 'Kích nổ / Làm mát 1CR' : 'Tắt làm mát 1CR';
             if (succeeded) {
                 tracker.state.climate1cr.active = wantOn;
-                tracker.state.climate1cr.lastResult = 'Thành công qua ' + succeeded;
+                const lockHint = (wantOn && (tracker.state.locked === false || (tracker.state.condition && tracker.state.condition >= 5)))
+                    ? ' (Chú ý: cần khoá cửa xe từ bên ngoài để hộp BDC đề nổ máy; khi mở cửa xe chỉ chạy quạt làm mát)'
+                    : '';
+                tracker.state.climate1cr.lastResult = 'Đã gửi qua ' + succeeded + lockHint;
                 pushPatch({});
-                return { ok: true, method: succeeded, trace };
+                return { ok: true, method: succeeded + lockHint, trace };
             }
-            const noCatalog = !climateCatalog.interfaces.length;
-            tracker.state.climate1cr.lastResult = noCatalog
-                ? 'Chưa đọc được catalog xe (chế độ mô phỏng / chưa lên xe)'
-                : 'Chưa khớp tự động — mở tab Chuyên sâu 1CR trên QR để chọn đúng hàm của xe';
+            const openNames = Object.keys(climateProxies).map((x) => x.split('.').pop());
+            tracker.state.climate1cr.lastResult = !climateCatalog.interfaces.length
+                ? 'Không tìm thấy giao diện Climate trong catalog xe'
+                : ('Đã quét ' + openNames.length + ' cổng (' + openNames.slice(0, 4).join(', ') + ') nhưng chưa khớp tự động — mở tab Dò 1CR để xem chi tiết');
             pushPatch({});
-            return { ok: false, error: tracker.state.climate1cr.lastResult, trace };
+            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames };
         }
 
         if (action === 'schedule1cr') {
@@ -919,14 +1164,14 @@ async function runWorker() {
             const hhmm = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
             if (savedProfile && savedProfile.timer) {
                 const p = savedProfile.timer;
-                const payload = buildTimerPayload({ typeDef: null }, h, m, en, p.payload);
+                const payload = buildTimerPayload({ typeDef: null }, h, m, en, p.payload, false);
                 try {
                     const r = await callOne(p.iface, p.kind, p.name, payload);
                     tracker.state.climate1cr.timerText = en ? hhmm : 'Tắt';
                     tracker.state.climate1cr.lastAction = 'Hẹn giờ BDC/IHKA ' + hhmm;
                     tracker.state.climate1cr.lastResult = 'Đã nạp vào hộp ' + p.iface.split('.').pop();
                     pushPatch({});
-                    return { ok: true, method: p.iface + '.' + p.name, trace: [r] };
+                    return { ok: true, method: p.iface.split('.').pop() + '.' + p.name, trace: [r] };
                 } catch (e) { trace.push({ ok: false, error: e.message }); }
             }
 
@@ -938,9 +1183,8 @@ async function runWorker() {
                     const f = d.fields[k];
                     if (!f.setter || f.roles.indexOf('timer_write') < 0) continue;
                     const sample = climateLive[d.iface + '.' + f.name];
-                    const payload = buildTimerPayload(f, h, m, en, sample);
                     try {
-                        const r = await callOne(d.iface, 'setter', f.name, payload);
+                        const r = await callSmart(d.iface, 'setter', f, (num) => buildTimerPayload(f, h, m, en, sample, num));
                         trace.push(r);
                         if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + f.name;
                     } catch (e) { trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message }); }
@@ -948,12 +1192,14 @@ async function runWorker() {
                 for (let k = 0; k < d.methods.length; k++) {
                     const mt = d.methods[k];
                     if (mt.roles.indexOf('timer_write') < 0) continue;
-                    const argObj = {};
-                    mt.inArgs.forEach((a) => {
-                        if (a && a.name) argObj[a.name] = buildTimerPayload(a, h, m, en, undefined);
-                    });
                     try {
-                        const r = await callOne(d.iface, 'method', mt.name, argObj);
+                        const r = await callSmart(d.iface, 'method', mt, (num) => {
+                            const argObj = {};
+                            mt.inArgs.forEach((a) => {
+                                if (a && a.name) argObj[a.name] = buildTimerPayload(a, h, m, en, undefined, num);
+                            });
+                            return argObj;
+                        });
                         trace.push(r);
                         if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + mt.name + '()';
                     } catch (e) { trace.push({ ok: false, iface: d.iface, name: mt.name, error: e.message }); }
@@ -969,7 +1215,6 @@ async function runWorker() {
         return { ok: false, error: 'unknown 1CR action: ' + action };
     }
 
-    // Listen for JSON commands from parent daemon on stdin
     let buf = '';
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (chunk) => {
@@ -988,18 +1233,21 @@ async function runWorker() {
     async function handleParentCmd(cmd) {
         const reqId = cmd.reqId;
         if (cmd.op === 'refresh_vitals') {
-            await readBattery12V();
+            await readVitalsUDS();
             emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
         } else if (cmd.op === 'start1cr' || cmd.op === 'stop1cr' || cmd.op === 'schedule1cr' || cmd.op === 'invoke_raw') {
             const res = await execute1CR(cmd.op, cmd.params);
             emit({ ev: 'reply', reqId, ok: res.ok, result: res, state: tracker.state });
         } else if (cmd.op === 'schema') {
+            const cfgMap = {};
+            Object.keys(climateProxies).forEach((k) => { cfgMap[k] = climateProxies[k].cfgSummary; });
             emit({
                 ev: 'reply',
                 reqId,
                 ok: true,
                 schema: {
                     interfaces: climateCatalog.interfaces,
+                    openConfigs: cfgMap,
                     live: climateLive,
                     pinnedProfile: readJsonSafe(PROFILE_PATH),
                 },
@@ -1009,17 +1257,23 @@ async function runWorker() {
 
     emit({ ev: 'ready', discoveredClimate: climateCatalog.interfaces.length });
     emit({ ev: 'telemetry', state: tracker.state, activeTrip: null, lastTrip: null });
+    // Read accurate Fuel %, 12V Voltage, Odometer & Temps once shortly after startup
+    setTimeout(() => { readVitalsUDS().catch(() => {}); }, 2500);
 }
 
-/* ---------------- Field heuristic interpreters ---------------- */
+/* ---------------- Strict Field Interpreters ---------------- */
 
-function extractFirstNum(v) {
-    if (typeof v === 'number' && isFinite(v)) return v;
+function pickNamedNum(v, propRe, invalids) {
+    if (typeof v === 'number' && isFinite(v)) {
+        return invalids && invalids.indexOf(v) >= 0 ? null : v;
+    }
     if (!v || typeof v !== 'object') return null;
     const keys = Object.keys(v);
     for (let i = 0; i < keys.length; i++) {
-        const x = v[keys[i]];
-        if (typeof x === 'number' && isFinite(x) && x !== 65535 && x !== 255 && x !== 4095) return x;
+        const k = keys[i];
+        if (propRe && !propRe.test(k)) continue;
+        const x = v[k];
+        if (typeof x === 'number' && isFinite(x) && (!invalids || invalids.indexOf(x) < 0)) return x;
     }
     return null;
 }
@@ -1027,28 +1281,54 @@ function extractFirstNum(v) {
 function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (val === undefined || val === null) return;
     const key = iface + '.' + fname;
-    if (/range|reichweite/i.test(fname)) {
-        const n = extractFirstNum(val);
-        if (n !== null && n >= 0 && n <= 2000) pushPatch({ rangeKm: Math.round(n) });
-    } else if (/tank|fuel/i.test(fname)) {
-        const n = extractFirstNum(val);
-        if (n !== null && n >= 0 && n <= 100) pushPatch({ fuelPct: Math.round(n) });
-    } else if (/odometer|mileage|totalDistance/i.test(fname)) {
-        const n = extractFirstNum(val);
-        if (n !== null && n > 0 && n < 2000000) pushPatch({ odometerKm: Math.round(n) });
-    } else if (/outsideTemp|exteriorTemp|ambientTemp/i.test(fname)) {
-        let n = extractFirstNum(val);
+
+    // Remaining driving range (exclude dynamicRange, speedRange, scaleRange, etc.)
+    if (/(^|status|_)(cruisingRange|remainingRange|tankRange|totalRange|electricRange|reichweite)$/i.test(fname) || /^statusRange/i.test(fname)) {
+        const n = pickNamedNum(val, /range|reichweite|distance|km|value/i, [255, 4095, 65534, 65535]);
+        if (n !== null && n > 0 && n <= 1600) pushPatch({ rangeKm: Math.round(n) });
+        return;
+    }
+
+    // Fuel percentage / tank level
+    if (/tank|fuel|kraftstoff|fuellstand/i.test(fname) && !/consumption|verbrauch|cap|flap/i.test(fname)) {
+        const pct = pickNamedNum(val, /percent|pct|relativ|level/i, [255, 4095, 65535]);
+        if (pct !== null && pct >= 0 && pct <= 100) {
+            pushPatch({ fuelPct: Math.round(pct) });
+            return;
+        }
+        const lit = pickNamedNum(val, /liter|volume|inhalt|content|quantity/i, [255, 4095, 65535]);
+        if (lit !== null && lit >= 0 && lit <= 120) {
+            pushPatch({ fuelLiters: +lit.toFixed(1) });
+        }
+        return;
+    }
+
+    // Total odometer (exclude trip / service / CBS distance!)
+    if (/(kilometerstand|odometer|totalDistance|gesamtkilometer)/i.test(fname) && !/trip|reise|service|cbs|reset/i.test(fname)) {
+        const n = pickNamedNum(val, /kilometer|odometer|distance|mileage|total|value/i, [65535, 16777215, 4294967295]);
+        if (n !== null && n >= 1 && n < 1500000) pushPatch({ odometerKm: Math.round(n) });
+        return;
+    }
+
+    if (/outsideTemp|exteriorTemp|ambientTemp/i.test(fname)) {
+        let n = pickNamedNum(val, /temp|value/i, [255, 65535]);
         if (n !== null) {
             if (n > 65 && n < 220) n = n * 0.5 - 40;
             if (n >= -45 && n <= 60) pushPatch({ ambientC: +n.toFixed(1) });
         }
-    } else if (/lock/i.test(fname)) {
+        return;
+    }
+
+    if (/centralLock|lockState|^statusLock/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
         if (/LOCKED|SECURED/.test(s) && !/UNLOCKED/.test(s)) pushPatch({ locked: true });
         else if (/UNLOCKED/.test(s)) pushPatch({ locked: false });
-    } else if (/door|tailgate|trunk|bonnet|hood/i.test(key)) {
+        return;
+    }
+
+    if (/door|tailgate|trunk|bonnet|hood/i.test(key) && !/mirror|light|handle|heating/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
-        const isOpen = /OPEN|AJAR/.test(s) && !/CLOSED|NOT_OPEN/.test(s);
+        const isOpen = /\"OPEN\"|_OPEN|AJAR/.test(s) && !/CLOSED|NOT_OPEN/.test(s);
         if (/tailgate|trunk/i.test(key)) pushPatch({ trunkOpen: isOpen });
         else if (/bonnet|hood/i.test(key)) pushPatch({ hoodOpen: isOpen });
         else if (isOpen && curState.doorsOpen.indexOf(fname) < 0) {
@@ -1069,11 +1349,11 @@ function interpretClimateField(iface, fieldDesc, val, pushPatch, curState) {
     }
     if (fieldDesc.roles.indexOf('direct_read') >= 0 || fieldDesc.roles.indexOf('direct_write') >= 0) {
         c1.rawState = fieldDesc.name + '=' + s.slice(0, 60);
-        if (/ON|ACTIVE|RUNNING|START/i.test(s) && !/OFF|INACTIVE|STOP/i.test(s)) c1.active = true;
+        if (/\"ON\"|\"ACTIVE\"|\"RUNNING\"|\"START\"|_ON\"|_ACTIVE\"/i.test(s) && !/OFF|INACTIVE|STOP/i.test(s)) c1.active = true;
         else if (/OFF|INACTIVE|STOP/i.test(s)) c1.active = false;
     }
     if (fieldDesc.roles.indexOf('temp_read') >= 0 && /interior|cabin|innen/i.test(fieldDesc.name)) {
-        const n = extractFirstNum(val);
+        const n = pickNamedNum(val, /temp|value/i, [255, 65535]);
         if (n !== null && n >= -20 && n <= 70) pushPatch({ cabinC: +n.toFixed(1) });
     }
     pushPatch({ climate1cr: c1 });
@@ -1098,6 +1378,7 @@ module.exports = {
     haversineKm,
     classifyClimateMember,
     discoverClimateCatalog,
+    resolveTypeDef,
     pickEnumOrBool,
     buildDirectPayload,
     buildTimerPayload,

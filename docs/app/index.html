@@ -10,16 +10,16 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=0.4.0">
 <title>MyBMW</title>
 </head>
 <body>
 <div class="app-shell">
   <div class="topbar">
-    <div>
+    <div style="min-width:0;flex:1">
       <div class="car-title" id="carTitle">BMW 5 Series · M Sport</div>
       <div class="sub-meta">
-        <span id="paintBadge" class="paint-chip hidden"></span>
+        <button id="paintBadge" class="paint-chip" onclick="toggleEl('paintSheet')">🎨 Chọn màu &amp; dòng xe</button>
         <span id="updatedLabel">Chưa ghép nối xe</span>
       </div>
     </div>
@@ -30,6 +30,51 @@
   </div>
 
   <div id="toastBar" class="toast hidden"></div>
+
+  <!-- Collapsible BMW Factory Model & Paint Picker Sheet -->
+  <div id="paintSheet" class="glass-card hidden">
+    <div class="card-head">
+      <span>🎨 Mẫu xe &amp; Màu sơn BMW chuẩn hãng</span>
+      <span style="cursor:pointer;color:var(--dim)" onclick="toggleEl('paintSheet')">Đóng ✕</span>
+    </div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
+      Nếu đầu MGU đã code giao diện M5 CS (<code>F90LCI</code>) hoặc đổi màu wrap/sơn, chọn đúng dòng xe &amp; màu thực tế bên dưới — đầu MGU sẽ tự trích xuất mô hình BMW gốc và phủ đúng mã sơn hãng!
+    </div>
+    <div class="btn-row" style="margin-top:0;margin-bottom:10px">
+      <select id="selChassis" style="flex:1.3" onchange="previewAppearanceLocal()">
+        <option value="">Tự động theo đầu MGU</option>
+        <option value="G30LCI">G30 LCI — 5 Series LCI</option>
+        <option value="G30">G30 — 5 Series</option>
+        <option value="G20LCI">G20 LCI — 3 Series LCI</option>
+        <option value="G20">G20 — 3 Series</option>
+        <option value="G05">G05 — X5</option>
+        <option value="G06">G06 — X6</option>
+        <option value="G07">G07 — X7</option>
+        <option value="G01">G01 — X3</option>
+        <option value="G02">G02 — X4</option>
+        <option value="G22">G22 — 4 Series Coupé</option>
+        <option value="G26">G26 — 4 Series Gran Coupé</option>
+        <option value="G12">G12 — 7 Series</option>
+        <option value="F90LCI">F90 LCI — M5 / M5 CS</option>
+        <option value="G80">G80 — M3</option>
+        <option value="G82">G82 — M4</option>
+      </select>
+      <select id="selTrim" style="flex:1" onchange="previewAppearanceLocal()">
+        <option value="">Gói theo xe</option>
+        <option value="m_sportpaket">M Sport</option>
+        <option value="luxury_line">Luxury Line</option>
+        <option value="sport_line">Sport Line</option>
+        <option value="xline">xLine</option>
+        <option value="clubsport">CS</option>
+        <option value="base">Tiêu chuẩn</option>
+      </select>
+    </div>
+    <div id="swatchGrid" class="swatch-grid"></div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn blue" onclick="applyAppearanceToCar(false)">Lưu &amp; Render từ đầu xe</button>
+      <button class="btn" onclick="applyAppearanceToCar(true)">Mặc định MGU</button>
+    </div>
+  </div>
 
   <!-- VIEW 1: MY VEHICLE (HOME) -->
   <section id="view-home">
@@ -124,7 +169,10 @@
     <div class="glass-card">
       <div class="card-head">
         <span>Thông số xe &amp; Môi trường</span>
-        <span id="odoText" style="color:var(--dim)">ODO: -- km</span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <span id="odoText" style="color:var(--dim)">ODO: -- km</span>
+          <button class="mini-refresh" onclick="sendCmd('status')" title="Đọc lại UDS từ xe">↻</button>
+        </span>
       </div>
       <div class="metrics-grid">
         <div class="metric-box"><div class="k">Ắc quy 12V</div><div class="v" id="mBat">-- V</div></div>
@@ -191,7 +239,7 @@
     <div class="glass-card">
       <div class="card-head"><span>🛠️ Dò &amp; Ghim lệnh 1CR từ xa</span></div>
       <div style="font-size:13px;color:var(--dim);line-height:1.45;margin-bottom:10px">
-        Đọc trực tiếp danh sách giao diện <code>Climate / 1CR</code> của đầu MGU qua mạng (không cần chung Wi-Fi). Chọn hàm bất kỳ để chạy thử và ghim cố định cho nút <b>Đề nổ 1CR</b>.
+        Đọc trực tiếp danh sách giao diện <code>Climate / 1CR</code> của đầu MGU qua mạng (không cần chung Wi-Fi). Lưu ý chuẩn BMW: để hộp BDC đề nổ động cơ từ xa, xe phải <b>đóng kín cửa &amp; khoá xe từ bên ngoài</b> (nếu ngồi trong xe chưa khoá, lệnh sẽ bật quạt làm mát cabin).
       </div>
       <div class="btn-row">
         <button class="btn blue" onclick="requestSchema()">🔍 Tải danh sách hàm Climate từ xe</button>
@@ -224,14 +272,15 @@
         Quét mã QR trên màn hình <b>MyBMW &amp; 1CR</b> của xe (cả iPhone và Android dùng chung 1 mã đều đồng bộ tức thì).<br>
         • <b>Trên iPhone:</b> Sau khi quét mở trang này trong Safari, bấm nút <b>Chia sẻ → Thêm vào MH chính</b> để dùng full màn hình như App hãng!
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị tuỳ chỉnh (để trống = tự lấy theo đời xe MGU):</div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Tên hiển thị tuỳ chỉnh (để trống = tự lấy theo dòng xe):</div>
       <input type="text" id="inpCarName" placeholder="Tự nhận diện từ đầu xe (VD: BMW 5 Series LCI · M Sport)" onchange="saveCarName()">
       <div class="switch-row" style="margin-top:6px">
-        <span>Ưu tiên hình xe gốc quét trực tiếp từ đầu MGU</span>
+        <span>Ưu tiên hình xe gốc trích xuất từ đầu MGU</span>
         <input type="checkbox" id="chkUseFactoryHero" checked onchange="toggleHeroPref()">
       </div>
       <div class="btn-row">
-        <button class="btn" onclick="sendCmd('refresh_hero')">🔄 Quét lại mẫu xe &amp; màu sơn gốc từ xe</button>
+        <button class="btn" onclick="toggleEl('paintSheet');switchView('home',document.querySelectorAll('.nav-tab')[0])">🎨 Chọn màu sơn &amp; dòng xe</button>
+        <button class="btn" onclick="sendCmd('refresh_hero')">🔄 Tải lại hình từ MGU</button>
       </div>
 
       <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Mã ghép nối xe (Pair Code hoặc Link QR):</div>
@@ -275,6 +324,6 @@
 </nav>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js"></script>
+<script src="app.js?v=0.4.0"></script>
 </body>
 </html>

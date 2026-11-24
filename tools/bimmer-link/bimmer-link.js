@@ -4,9 +4,12 @@
  *
  * Responsibilities:
  *   1. Supervises `car-link.js worker` (SOME/IP + UDS vehicle telemetry & 1CR Remote Start / Departure Timer engine).
- *   2. Runs `TelegramController` over `mgu-uplink` (UID-isolated HTTPS) for remote commands, Park Snapshot photos, and Valet alerts.
- *   3. Serves the PIN-protected mobile configuration & 1CR Inspector portal on HTTP port 8139 (with automatic `nftables` port rule).
- *   4. Exchanges zero-flash-wear live state & commands with `apps/bimmer_link` through `/run/bimmer-link/`.
+ *   2. Extracts & shades genuine BMW factory 2D studio vehicle PNG (`car-hero.js`) with optional owner paint/model override,
+ *      retrying chunked Cloud upload until confirmed so phones always display the exact car & paint color.
+ *   3. Runs `CloudBridge` (AES-256-GCM over `ntfy.sh` with server-cursor command polling + instant `cmd_ack` replies)
+ *      and `TelegramController` over `mgu-uplink`.
+ *   4. Serves the PIN-protected local setup & 1CR Inspector portal on HTTP port 8139 (with `nftables` rule).
+ *   5. Exchanges zero-flash-wear live state & commands with `apps/bimmer_link` through `/run/bimmer-link/`.
  *
  * Node 8, zero dependencies.
  */
@@ -25,7 +28,7 @@ const CarLink = require('./car-link');
 const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 
-const VERSION = '0.3.1';
+const VERSION = '0.4.0';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -77,6 +80,11 @@ function defaultConfig() {
         wakeNotify: false,
         autoSyncTimer: false,
         dailyTimer: '07:30',
+        appearance: {
+            chassis: '',
+            trimLine: '',
+            colour: '',
+        },
         valet: {
             enabled: false,
             maxSpeed: 45,
@@ -91,6 +99,7 @@ function normalizeConfig(raw) {
     const d = defaultConfig();
     const r = raw && typeof raw === 'object' ? raw : {};
     const v = r.valet && typeof r.valet === 'object' ? r.valet : {};
+    const ap = r.appearance && typeof r.appearance === 'object' ? r.appearance : {};
     return {
         botToken: typeof r.botToken === 'string' ? r.botToken.trim() : '',
         chatId: r.chatId !== undefined && r.chatId !== null ? String(r.chatId).trim() : '',
@@ -99,6 +108,11 @@ function normalizeConfig(raw) {
         wakeNotify: !!r.wakeNotify,
         autoSyncTimer: !!r.autoSyncTimer,
         dailyTimer: /^\d{2}:\d{2}$/.test(String(r.dailyTimer || '')) ? String(r.dailyTimer) : d.dailyTimer,
+        appearance: {
+            chassis: typeof ap.chassis === 'string' ? ap.chassis.trim().toUpperCase().slice(0, 20) : '',
+            trimLine: typeof ap.trimLine === 'string' ? ap.trimLine.trim().slice(0, 40) : '',
+            colour: typeof ap.colour === 'string' ? ap.colour.trim().slice(0, 60) : '',
+        },
         valet: {
             enabled: !!v.enabled,
             maxSpeed: Math.max(20, Math.min(140, Number(v.maxSpeed) || d.valet.maxSpeed)),
@@ -166,7 +180,6 @@ async function fwEnsure(port, iface, nft) {
     nft = nft || execNft;
     let out;
     try { out = await nft(['-a', 'list', 'chain', 'ip', 'filter', 'input']); } catch (e) { if (e.absent) return 'absent'; throw e; }
-    const want = (iface ? 'iifname "' + iface + '" ' : '') + 'tcp dport ' + port + ' accept comment "' + FW_TAG + '"';
     const mine = fwMine(fwRules(out));
     if (mine.length === 1 && mine[0].indexOf('tcp dport ' + port) >= 0 && (!iface || mine[0].indexOf('"' + iface + '"') >= 0)) return 'kept';
     for (let i = 0; i < mine.length; i++) {
@@ -253,8 +266,8 @@ function createService(customCfg) {
         message: 'Sẵn sàng. Quét mã QR bên trái để ghép App MyBMW (iPhone / Android).',
         messageKind: 'dim',
         seenCmdId: -1,
-        valetAlerts: {},       // kind -> lastMs
-        badPins: {},           // remoteIp -> { count, until }
+        valetAlerts: {},
+        badPins: {},
         worker: null,
         pendingReqs: {},
         reqSeq: 1,
@@ -281,38 +294,81 @@ function createService(customCfg) {
     });
 
     const identity = Cloud.loadOrCreateIdentity(path.join(C.state, 'cloud-identity.json'));
-    let heroData = { detected: false, meta: { chassis: '', modelTitle: 'BMW iDrive 7', series: 'BMW', trimLabel: '', paintLabel: '' }, png: null };
-    let heroPushedSig = '';
+    let heroData = { detected: false, meta: { chassis: '', modelTitle: 'BMW iDrive 7', series: 'BMW', trimLabel: '', paintLabel: '', paintRgb: null, availableModels: [] }, png: null };
+    let heroConfirmedSig = '';
+
+    function computeHeroSig() {
+        return JSON.stringify([heroData.meta.chassis, heroData.meta.trimLine, heroData.meta.colour]) + '|' + (heroData.png ? heroData.png.length : 0);
+    }
 
     function refreshFactoryHero(forcePush) {
         try {
-            const scanned = CarHero.scanFactoryVehicle({ procDir: C.proc });
-            if (scanned && scanned.detected) {
+            const scanned = CarHero.scanFactoryVehicle({ procDir: C.proc, override: config.appearance });
+            if (scanned && (scanned.detected || scanned.png)) {
                 heroData = scanned;
                 if (scanned.png) {
                     try { writeAtomic(path.join(C.run, 'hero.png'), scanned.png, 0o644); } catch (e) {}
                 }
             }
-        } catch (e) {}
-        const sig = JSON.stringify(heroData.meta) + '|' + (heroData.png ? heroData.png.length : 0);
-        if ((forcePush || sig !== heroPushedSig) && heroData.png) {
-            heroPushedSig = sig;
-            cloud.publishHero(heroData.png, { title: heroData.meta.modelTitle, at: Date.now() }).catch(() => {});
+        } catch (e) { log('hero scan err: ' + e.message); }
+
+        const sig = computeHeroSig();
+        if (forcePush) heroConfirmedSig = '';
+        if (heroData.png && sig !== heroConfirmedSig) {
+            cloud.publishHero(heroData.png, {
+                title: heroData.meta.modelTitle,
+                paint: heroData.meta.paintLabel,
+                at: Date.now(),
+            }).then((ok) => {
+                if (ok) {
+                    heroConfirmedSig = sig;
+                    log('factory hero uploaded (' + heroData.meta.chassis + ' ' + heroData.meta.paintLabel + ', ' + heroData.png.length + ' bytes)');
+                }
+            }).catch((e) => {
+                log('hero upload deferred: ' + e.message);
+            });
         }
+        writeStatus();
     }
 
     const cloud = new Cloud.CloudBridge({
         identity,
         upOpts,
         relayHost: C.relayHost || undefined,
+        seenFile: path.join(C.state, 'seen-cmds.json'),
         enabled: !C.noCloud,
         log,
         onCommand: async (cmdObj) => {
             const c = String(cmdObj.cmd || '');
             const a = cmdObj.arg || {};
+            const ack = (ok, message, detail) => cloud.publishDiag({
+                t: 'cmd_ack',
+                id: cmdObj.id,
+                cmd: c,
+                ok: !!ok,
+                message: String(message || ''),
+                detail: detail || null,
+                at: Date.now(),
+            }).catch(() => {});
+
             if (c === 'refresh_hero') {
                 refreshFactoryHero(true);
                 syncCloudState(true);
+                await ack(true, 'Đang đồng bộ lại mẫu xe & màu sơn từ đầu MGU (' + (heroData.meta.modelTitle || 'BMW') + ')…');
+                return;
+            }
+            if (c === 'set_appearance') {
+                if (a.reset) {
+                    config.appearance = { chassis: '', trimLine: '', colour: '' };
+                } else {
+                    config.appearance = normalizeConfig({ appearance: Object.assign({}, config.appearance, a) }).appearance;
+                }
+                saveConfig();
+                refreshFactoryHero(true);
+                const desc = heroData.meta.modelTitle + (heroData.meta.paintLabel ? (' · ' + heroData.meta.paintLabel) : '');
+                tell('Đã cập nhật giao diện xe: ' + desc, 'go');
+                syncCloudState(true);
+                await ack(true, 'Đã render xe chuẩn hãng: ' + desc);
                 return;
             }
             if (c === 'schema') {
@@ -336,6 +392,7 @@ function createService(customCfg) {
                 saveConfig();
                 tell('Đã cập nhật ngưỡng Valet từ App MyBMW.', 'go');
                 syncCloudState(true);
+                await ack(true, 'Đã lưu ngưỡng giám sát Valet mới!');
                 return;
             }
             if (c === 'timer_prefs' && a) {
@@ -343,10 +400,13 @@ function createService(customCfg) {
                 if (a.dailyTimer) config.dailyTimer = String(a.dailyTimer);
                 saveConfig();
                 syncCloudState(true);
+                await ack(true, 'Đã lưu tuỳ chọn tự đồng bộ hẹn giờ 1CR!');
                 return;
             }
-            await executeAction(c, a, cmdObj.device || 'MyBMW App');
+
+            const out = await executeAction(c, a, cmdObj.device || 'MyBMW App');
             syncCloudState(true);
+            await ack(out && out.ok, (out && (out.message || out.error)) || 'Đã xử lý lệnh.', out && out.detail);
         },
     });
 
@@ -354,6 +414,7 @@ function createService(customCfg) {
         return Object.assign({
             version: VERSION,
             vehicleProfile: heroData.meta,
+            appearanceOverride: config.appearance,
             hasFactoryHero: !!heroData.png,
             telemetry: S.telemetry,
             lastTrip: S.lastTrip,
@@ -453,10 +514,8 @@ function createService(customCfg) {
             S.lastTrip = trip;
             saveTrips();
         }
-        // Read fresh 12V battery voltage before sleep
-        await callWorker('refresh_vitals', {}, 3000);
+        await callWorker('refresh_vitals', {}, 3500);
 
-        // If daily auto-sync 1CR Departure Timer is enabled, push timer into BDC/IHKA before MGU sleeps
         if (config.autoSyncTimer && /^\d{2}:\d{2}$/.test(config.dailyTimer)) {
             const parts = config.dailyTimer.split(':');
             await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true }, 4500);
@@ -515,14 +574,13 @@ function createService(customCfg) {
         }
     }
 
-    /** Unified action handler called by Telegram Bot, Phone QR Portal, and In-Car App. */
+    /** Unified action handler called by MyBMW Cloud App, Telegram Bot, Phone QR Portal, and In-Car App. */
     async function executeAction(action, arg, source) {
         arg = arg || {};
         source = source || 'App';
         if (action === 'help') {
             const helpMsg =
                 '🤖 Trợ lý MyBMW & 1CR (MGU Store)\n' +
-                '• Bấm các nút bên dưới hoặc gõ lệnh:\n' +
                 '  /status — Xem vị trí, xăng, bình 12V, cửa\n' +
                 '  /photo — Chụp ảnh thẻ trạng thái / cam 360\n' +
                 '  /1cr — Kích nổ máy / làm mát từ xa 1CR ngay\n' +
@@ -535,14 +593,14 @@ function createService(customCfg) {
         }
 
         if (action === 'status') {
-            await callWorker('refresh_vitals', {}, 2500);
+            await callWorker('refresh_vitals', {}, 3500);
             const txt = Tg.formatStatusCaption('TRẠNG THÁI HIỆN TẠI', S.telemetry, { trip: S.lastTrip, valet: config.valet });
             if (config.botToken && config.chatId) await tg.sendMessage(txt, S.telemetry, config.valet.enabled);
-            return { ok: true, message: 'Đã cập nhật trạng thái.' };
+            return { ok: true, message: 'Đã cập nhật thông số xe mới nhất.' };
         }
 
         if (action === 'snap_now') {
-            await callWorker('refresh_vitals', {}, 2500);
+            await callWorker('refresh_vitals', {}, 3500);
             const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRANG THAI TRUC TIEP', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true);
             const cloudSent = await cloud.publishSnapshot(snap.png, { title: 'Ảnh chụp trực tiếp', at: Date.now() }).catch(() => false);
@@ -552,24 +610,23 @@ function createService(customCfg) {
                 tell('Đã chụp và đồng bộ lên App MyBMW & Telegram!', 'go');
                 return { ok: true, message: S.message };
             }
-            tell(cloudSent ? 'Đã chụp và đồng bộ lên App MyBMW!' : 'Đã chụp trạng thái xe.', 'go');
+            tell(cloudSent ? 'Đã chụp và đồng bộ ảnh lên App MyBMW!' : 'Đã chụp trạng thái xe.', 'go');
             return { ok: true, message: S.message };
         }
 
         if (action === 'start1cr' || action === 'stop1cr') {
             const wantOn = action === 'start1cr';
-            const rep = await callWorker(action, {}, 6000);
+            const rep = await callWorker(action, {}, 8000);
             const resObj = (rep && rep.result) || {};
             if (rep && rep.ok) {
-                const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR (' : 'Đã gửi lệnh tắt 1CR (') + (resObj.method || 'SOME/IP') + ')';
+                const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + (resObj.method || 'SOME/IP');
                 tell(plain, 'go');
                 if (config.botToken && config.chatId) {
                     tg.sendMessage((wantOn ? '🔥 ' : '⏹ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
                 }
                 return { ok: true, message: plain, detail: resObj };
             }
-            // Simulated / bench feedback when not on car bus yet
-            const errText = (resObj && resObj.error) || (rep && rep.error) || 'Không nhận được phản hồi từ hộp điều hoà';
+            const errText = (resObj && resObj.error) || (rep && rep.error) || 'Chưa nhận được phản hồi từ hộp điều hoà';
             tell('1CR: ' + errText, 'warn');
             if (source === 'Telegram' && config.botToken && config.chatId) {
                 tg.sendMessage('⚠️ 1CR: ' + errText, S.telemetry, config.valet.enabled).catch(() => {});
@@ -584,16 +641,16 @@ function createService(customCfg) {
             if (en) config.dailyTimer = hhmm;
             else config.autoSyncTimer = false;
             saveConfig();
-            const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en }, 5000);
+            const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en }, 6000);
             S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
             const plain = en
-                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? ' (đã nạp xuống BDC/IHKA)' : ' (đã lưu lịch)'))
+                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? (' (' + ((rep.result && rep.result.method) || 'BDC/IHKA') + ')') : ' (đã lưu lịch)'))
                 : 'Đã tắt hẹn giờ nổ máy 1CR.';
             tell(plain, 'go');
             if (config.botToken && config.chatId) {
                 tg.sendMessage((en ? '⏰ ' : '❌ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
             }
-            return { ok: true, message: plain };
+            return { ok: true, message: plain, detail: rep && rep.result };
         }
 
         if (action === 'valet_toggle' || action === 'valet_set') {
@@ -685,7 +742,9 @@ function createService(customCfg) {
         if (S.seenCmdId < 0) { S.seenCmdId = newest.id; return; }
         if (newest.id === S.seenCmdId) return;
         S.seenCmdId = newest.id;
-        executeAction(newest.cmd, newest.arg || {}, 'Màn hình xe').catch((e) => tell('Lỗi: ' + e.message, 'crit'));
+        executeAction(newest.cmd, newest.arg || {}, 'Màn hình xe')
+            .then(() => syncCloudState(true))
+            .catch((e) => tell('Lỗi: ' + e.message, 'crit'));
     }
 
     function fwCheck() {
@@ -772,6 +831,8 @@ function createService(customCfg) {
             return sendJson(res, 200, {
                 ok: true,
                 version: VERSION,
+                vehicleProfile: heroData.meta,
+                appearance: config.appearance,
                 cloudUrl: cloud.pairingUrl(),
                 pairCode: identity.pairCode,
                 cloudOk: cloud.lastOkAt > 0,
@@ -784,6 +845,7 @@ function createService(customCfg) {
                     wakeNotify: config.wakeNotify,
                     autoSyncTimer: config.autoSyncTimer,
                     dailyTimer: config.dailyTimer,
+                    appearance: config.appearance,
                     valet: config.valet,
                 },
                 telemetry: S.telemetry,
@@ -792,6 +854,13 @@ function createService(customCfg) {
                 message: S.message,
                 tgError: tg.lastError,
             });
+        }
+
+        if (req.method === 'GET' && pathname === '/api/hero.png') {
+            if (!heroData.png) return sendJson(res, 404, { ok: false, error: 'No factory hero image' });
+            res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Content-Length': heroData.png.length });
+            res.end(heroData.png);
+            return;
         }
 
         if (req.method === 'GET' && pathname === '/api/snapshot.png') {
@@ -816,12 +885,15 @@ function createService(customCfg) {
             const merged = Object.assign({}, config, b);
             if (!b.botToken && config.botToken && b.keepToken !== false) merged.botToken = config.botToken;
             if (b.valet) merged.valet = Object.assign({}, config.valet, b.valet);
+            if (b.appearance) merged.appearance = Object.assign({}, config.appearance, b.appearance);
             if (merged.valet.enabled && !merged.valet.anchorPos && S.telemetry.pos) {
                 merged.valet.anchorPos = { lat: S.telemetry.pos.lat, lon: S.telemetry.pos.lon };
             }
             config = normalizeConfig(merged);
             saveConfig();
+            if (b.appearance) refreshFactoryHero(true);
             tell('Đã lưu cấu hình từ điện thoại.', 'go');
+            syncCloudState(true);
             return sendJson(res, 200, { ok: true, message: S.message });
         }
 
@@ -859,12 +931,14 @@ function createService(customCfg) {
         if (req.method === 'POST' && pathname === '/api/action') {
             const b = await readBodyJson(req);
             const out = await executeAction(String(b.action || ''), b.arg || {}, 'Điện thoại');
+            syncCloudState(true);
             return sendJson(res, 200, out);
         }
 
         if (req.method === 'POST' && pathname === '/api/1cr-raw') {
             const b = await readBodyJson(req);
             const rep = await callWorker('invoke_raw', b, 6000);
+            syncCloudState(true);
             return sendJson(res, 200, (rep && rep.result) || rep || { ok: false });
         }
 
@@ -872,7 +946,6 @@ function createService(customCfg) {
     }
 
     function start() {
-        // Ensure uplink UID drop-in is registered early
         try { Up.pickUid(upOpts); } catch (e) {}
         startWorker();
 
@@ -903,13 +976,22 @@ function createService(customCfg) {
             writeStatus();
             tg.pollOnce();
             cloud.pollCommandsOnce();
-        }, 1800);
+        }, 1500);
 
-        const fwTimer = setInterval(fwCheck, 30000);
-        refreshFactoryHero(false);
-        setTimeout(() => refreshFactoryHero(false), 20000);
+        const fwTimer = setInterval(() => {
+            fwCheck();
+            // Retry uploading factory hero automatically until confirmed!
+            if (!heroData.png || computeHeroSig() !== heroConfirmedSig) {
+                refreshFactoryHero(false);
+            }
+        }, 25000);
+
+        // Scan factory hero locally first, then push to cloud once uplink settles (3s)
+        setTimeout(() => {
+            refreshFactoryHero(false);
+            syncCloudState(true, { event: 'online' });
+        }, 2800);
         writeStatus();
-        setTimeout(() => syncCloudState(true, { event: 'online' }), 2500);
 
         if (config.wakeNotify && config.botToken && config.chatId) {
             setTimeout(() => {

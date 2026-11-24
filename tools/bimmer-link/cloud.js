@@ -10,9 +10,9 @@
  *   - Channels on `ntfy.sh` (or custom relay host):
  *       bl_st_<topicId>  Car -> Phones encrypted vehicle state, trip log & status (cached 12h while car sleeps 0W!)
  *       bl_ph_<topicId>  Car -> Phones encrypted chunked PNG snapshot (<3.6KB/chunk so all chunks stay cached 12h!)
- *       bl_cm_<topicId>  Phones -> Car encrypted remote commands (`start1cr`, `stop1cr`, `timer_set`, `valet_set`, `snap_now`, `schema`, `invoke_raw`)
- *       bl_dg_<topicId>  Car -> Phones encrypted 1CR SOME/IP schema & raw diagnostic replies
- *   - Wire format: `BL2:<base64(iv12 || ciphertext || authTag16)>` — 100% compatible with Browser WebCrypto & Android `javax.crypto.Cipher`.
+ *       bl_hr_<topicId>  Car -> Phones encrypted genuine factory BMW 2D studio vehicle PNG
+ *       bl_cm_<topicId>  Phones -> Car encrypted remote commands (polled via server event-ID cursor, immune to MGU clock skew!)
+ *       bl_dg_<topicId>  Car -> Phones encrypted command ACKs, 1CR SOME/IP schema & raw diagnostic replies
  *
  * Node 8.16 compatible, zero external dependencies.
  */
@@ -24,6 +24,8 @@ const Up = require('./uplink');
 const DEFAULT_RELAY_HOST = 'ntfy.sh';
 const DEFAULT_APP_BASE = 'https://marilykinson-glitch.github.io/bimmer-link/app/';
 const CHUNK_BYTES = 2400; // ~3.2 KB base64 per chunk (< 4096-byte inline message cache limit)
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function toBase64Url(buf) {
     return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -138,6 +140,7 @@ class CloudBridge {
         this.upOpts = opts.upOpts;
         this.relayHost = opts.relayHost || DEFAULT_RELAY_HOST;
         this.appBase = opts.appBase || DEFAULT_APP_BASE;
+        this.seenFile = opts.seenFile || '';
         this.onCommand = opts.onCommand;   // async (cmdObj) => resultObj
         this.log = opts.log || (() => {});
         this.enabled = opts.enabled !== false;
@@ -145,10 +148,32 @@ class CloudBridge {
         this.lastPushAt = 0;
         this.lastOkAt = 0;
         this.lastError = '';
-        this.seenCmdIds = {};
-        this.lastCmdTime = Math.floor(Date.now() / 1000) - 10;
+        this.seenCmdIds = this._loadSeen();
+        this.lastCmdCursor = '';           // server-side event ID cursor (zero local clock dependency!)
+        this.bootSynced = false;
         this.polling = false;
+        this.uploadingHero = false;
         this.stopped = false;
+    }
+
+    _loadSeen() {
+        if (!this.seenFile) return {};
+        try {
+            const j = JSON.parse(fs.readFileSync(this.seenFile, 'utf8'));
+            return (j && typeof j === 'object') ? j : {};
+        } catch (e) { return {}; }
+    }
+
+    _saveSeen() {
+        if (!this.seenFile) return;
+        try {
+            const keys = Object.keys(this.seenCmdIds);
+            const trimmed = {};
+            keys.slice(-120).forEach((k) => { trimmed[k] = 1; });
+            this.seenCmdIds = trimmed;
+            fs.writeFileSync(this.seenFile + '.tmp', JSON.stringify(trimmed));
+            fs.renameSync(this.seenFile + '.tmp', this.seenFile);
+        } catch (e) {}
     }
 
     pairingUrl() {
@@ -157,21 +182,35 @@ class CloudBridge {
 
     async _postTopic(topic, textBody, timeoutMs) {
         if (!this.enabled) return null;
-        const res = await Up.request(this.upOpts, {
-            host: this.relayHost,
-            path: '/' + topic,
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-            body: textBody,
-            timeoutMs: timeoutMs || 15000,
-        });
-        if (res.status < 200 || res.status >= 300) {
-            this.lastError = 'HTTP ' + res.status;
-            throw new Error('cloud POST HTTP ' + res.status);
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const res = await Up.request(this.upOpts, {
+                    host: this.relayHost,
+                    path: '/' + topic,
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+                    body: textBody,
+                    timeoutMs: timeoutMs || 15000,
+                });
+                if (res.status >= 200 && res.status < 300) {
+                    this.lastError = '';
+                    this.lastOkAt = Date.now();
+                    return res;
+                }
+                lastErr = new Error('cloud POST HTTP ' + res.status);
+                if (res.status === 429 || res.status >= 500) {
+                    await sleep(1100 * (attempt + 1));
+                    continue;
+                }
+                break;
+            } catch (e) {
+                lastErr = e;
+                if (attempt < 2) await sleep(600 * (attempt + 1));
+            }
         }
-        this.lastError = '';
-        this.lastOkAt = Date.now();
-        return res;
+        this.lastError = lastErr ? lastErr.message : 'POST failed';
+        throw lastErr || new Error('cloud POST failed');
     }
 
     /** Publish compact encrypted vehicle state (debounced unless `force` is true, e.g. on park/action/alert). */
@@ -179,10 +218,14 @@ class CloudBridge {
         if (!this.enabled || this.stopped) return false;
         const now = Date.now();
         const coreSig = JSON.stringify([
+            statePayload.vehicleProfile,
+            statePayload.hasFactoryHero,
             statePayload.telemetry && statePayload.telemetry.condition,
             statePayload.telemetry && statePayload.telemetry.engineRunning,
             statePayload.telemetry && Math.round((statePayload.telemetry.speed || 0) / 3),
             statePayload.telemetry && statePayload.telemetry.fuelPct,
+            statePayload.telemetry && statePayload.telemetry.rangeKm,
+            statePayload.telemetry && statePayload.telemetry.odometerKm,
             statePayload.telemetry && statePayload.telemetry.battery12v,
             statePayload.telemetry && statePayload.telemetry.locked,
             statePayload.telemetry && statePayload.telemetry.doorsOpen,
@@ -193,7 +236,7 @@ class CloudBridge {
             statePayload.alert,
         ]);
         if (!force && coreSig === this.lastPushHash && (now - this.lastPushAt < 25000)) return false;
-        if (!force && (now - this.lastPushAt < 4000)) return false;
+        if (!force && (now - this.lastPushAt < 3500)) return false;
 
         this.lastPushHash = coreSig;
         this.lastPushAt = now;
@@ -202,11 +245,12 @@ class CloudBridge {
         return true;
     }
 
-    /** Publish an encrypted PNG snapshot across 12h-cached chunks so sleeping-car opens still show the photo. */
+    /** Publish an encrypted PNG snapshot across 12h-cached chunks with gentle pacing so ntfy never drops chunks. */
     async publishSnapshot(pngBuf, meta) {
         if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
         const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, meta);
         for (let i = 0; i < chunks.length; i++) {
+            if (i > 0) await sleep(130);
             await this._postTopic(this.identity.topics.photo, chunks[i], 15000);
         }
         return true;
@@ -214,18 +258,24 @@ class CloudBridge {
 
     /** Publish the genuine factory-shaded 2D vehicle hero PNG extracted from the head unit. */
     async publishHero(pngBuf, meta) {
-        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
-        const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, Object.assign({ id: 'hero' }, meta || {}));
-        for (let i = 0; i < chunks.length; i++) {
-            await this._postTopic(this.identity.topics.hero, chunks[i], 15000);
+        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf) || this.uploadingHero) return false;
+        this.uploadingHero = true;
+        try {
+            const heroId = 'h_' + Date.now().toString(36);
+            const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, Object.assign({}, meta || {}, { id: heroId }));
+            for (let i = 0; i < chunks.length; i++) {
+                if (i > 0) await sleep(140);
+                await this._postTopic(this.identity.topics.hero, chunks[i], 15000);
+            }
+            return true;
+        } finally {
+            this.uploadingHero = false;
         }
-        return true;
     }
 
-    /** Publish encrypted 1CR schema or command result to `diag` topic. */
+    /** Publish encrypted command ACK, 1CR schema, or diagnostic result to `diag` topic. */
     async publishDiag(payload) {
         if (!this.enabled || this.stopped) return false;
-        // Trim large schema arrays if needed to fit 3.8KB message limit cleanly
         const compact = JSON.stringify(payload);
         if (compact.length <= 2600) {
             await this._postTopic(this.identity.topics.diag, encryptPacket(this.identity.aesKey, compact), 12000);
@@ -234,6 +284,7 @@ class CloudBridge {
         const total = Math.ceil(compact.length / 2200);
         const did = Date.now().toString(36);
         for (let i = 0; i < total; i++) {
+            if (i > 0) await sleep(110);
             await this._postTopic(this.identity.topics.diag, encryptJson(this.identity.aesKey, {
                 t: 'diag_chunk', id: did, idx: i, total, part: compact.slice(i * 2200, (i + 1) * 2200),
             }), 12000);
@@ -241,37 +292,59 @@ class CloudBridge {
         return true;
     }
 
-    /** Poll incoming encrypted commands sent from iPhone PWA or Android APK. */
+    /**
+     * Poll incoming encrypted commands sent from iPhone PWA or Android APK.
+     * Uses server-side `ev.id` cursor (`since=<lastCmdCursor>`) after initial `since=10m` bootstrap,
+     * so MGU head-unit clock skew (+7h timezone or unset RTC) NEVER drops or delays remote commands!
+     */
     async pollCommandsOnce() {
         if (!this.enabled || this.polling || this.stopped) return;
         this.polling = true;
         try {
-            const since = Math.max(0, this.lastCmdTime);
+            const sinceParam = this.lastCmdCursor ? encodeURIComponent(this.lastCmdCursor) : '10m';
             const res = await Up.request(this.upOpts, {
                 host: this.relayHost,
-                path: '/' + this.identity.topics.cmd + '/json?poll=1&since=' + since,
+                path: '/' + this.identity.topics.cmd + '/json?poll=1&since=' + sinceParam,
                 method: 'GET',
-                timeoutMs: 10000,
+                timeoutMs: 9000,
             });
-            if (res.status === 200 && res.body) {
+            if (res.status === 200) {
                 this.lastOkAt = Date.now();
                 this.lastError = '';
-                const lines = res.body.split('\n').filter(Boolean);
+                const lines = String(res.body || '').split('\n').filter(Boolean);
+                const parsedEvents = [];
+                let maxServerTime = 0;
                 for (let i = 0; i < lines.length; i++) {
                     let ev = null;
                     try { ev = JSON.parse(lines[i]); } catch (e) { continue; }
                     if (!ev || ev.event !== 'message' || typeof ev.message !== 'string') continue;
-                    if (typeof ev.time === 'number' && ev.time >= this.lastCmdTime) this.lastCmdTime = ev.time + 1;
+                    if (typeof ev.time === 'number' && ev.time > maxServerTime) maxServerTime = ev.time;
+                    parsedEvents.push(ev);
+                }
+
+                const isBootstrap = !this.bootSynced;
+                this.bootSynced = true;
+                let dirtySeen = false;
+
+                for (let i = 0; i < parsedEvents.length; i++) {
+                    const ev = parsedEvents[i];
+                    if (ev.id) this.lastCmdCursor = ev.id;
                     if (ev.id && this.seenCmdIds[ev.id]) continue;
-                    if (ev.id) this.seenCmdIds[ev.id] = true;
+                    if (ev.id) { this.seenCmdIds[ev.id] = 1; dirtySeen = true; }
+
                     const cmdObj = decryptJson(this.identity.aesKey, ev.message);
                     if (!cmdObj || !cmdObj.cmd) continue;
-                    // Ignore stale commands older than 5 minutes unless explicitly flagged `queueIfAsleep`
-                    if (cmdObj.at && (Date.now() - cmdObj.at > 5 * 60000) && !cmdObj.queueIfAsleep) continue;
-                    if (cmdObj.id && this.seenCmdIds['c_' + cmdObj.id]) continue;
-                    if (cmdObj.id) this.seenCmdIds['c_' + cmdObj.id] = true;
+                    const cid = cmdObj.id ? ('c_' + cmdObj.id) : '';
+                    if (cid && this.seenCmdIds[cid]) continue;
+                    if (cid) { this.seenCmdIds[cid] = 1; dirtySeen = true; }
+
+                    // On initial daemon bootstrap (`since=10m`), skip non-queued commands older than 45s in SERVER time
+                    if (isBootstrap && !cmdObj.queueIfAsleep && maxServerTime > 0 && typeof ev.time === 'number') {
+                        if (maxServerTime - ev.time > 45) continue;
+                    }
                     await this.onCommand(cmdObj);
                 }
+                if (dirtySeen) this._saveSeen();
             }
         } catch (e) {
             // Normal when car has no internet uplink yet

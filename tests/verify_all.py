@@ -97,7 +97,11 @@ def check_js_syntax_and_node8():
     assert m, 'Missing <script> in page.html'
     jxa_html = f'var src = {json.dumps(m.group(1))}; new Function("window", "document", "location", "localStorage", "fetch", src); "OK";'
     assert run_jxa(jxa_html) == 'OK'
-    print(f'[OK] All {len(JS_FILES)} JS files + page.html inline script passed syntax & Node 8 ES2017 checks')
+
+    pwa_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
+    jxa_pwa = f'var src = {json.dumps(pwa_js)}; new Function("window", "document", "location", "localStorage", "fetch", "navigator", "history", "Image", "WebSocket", "crypto", "TextEncoder", "TextDecoder", "L", src); "OK";'
+    assert run_jxa(jxa_pwa) == 'OK', 'Syntax error in docs/app/app.js'
+    print(f'[OK] All {len(JS_FILES)} MGU JS files + page.html + docs/app/app.js passed syntax & Node 8 checks')
 
 
 def check_full_mgu_build_and_real_kit_render(app_ver):
@@ -400,30 +404,43 @@ def check_car_link_logic_in_jxa():
     var pl = C.extractPlaceText(nav);
     if (pl.street !== 'Nguyễn Huệ' || pl.district !== 'Quận 1') throw new Error('bad place');
 
-    // Test 2: 1CR catalog discovery & payload generation
+    // Test 2: Real MGU `db.datatypes` 1CR catalog discovery & dual (string + wire int) payload generation
     var db = {{
       interfaces: {{
-        'de.bmw.infotainment.climate.Climate': {{
+        'de.bmw.infotainment.climate.AirConditioning': {{
           serviceId: 99,
           fields: {{
-            remoteEngineStart: {{ getter: true, setter: true, notifier: true, type: 'OnOff' }},
-            directOperationParkHeating: {{ getter: true, setter: true, notifier: true, type: 'ActEnum' }},
-            departureTimer1: {{ getter: true, setter: true, notifier: true, type: 'TimerT' }}
+            remoteEngineStart: {{ getter: true, setter: true, notifier: true, type: 'ClimateTypes.OnOff' }},
+            directOperationParkHeating: {{ getter: true, setter: true, notifier: true, type: 'ClimateTypes.ActEnum' }},
+            departureTimer1: {{ getter: true, setter: true, notifier: true, type: 'ClimateTypes.TimerT' }}
           }},
           methods: {{}}
         }}
       }},
-      enumerations: {{ OnOff: {{ values: ['OFF', 'ON'] }}, ActEnum: {{ values: ['INACTIVE', 'ACTIVE'] }} }},
-      structs: {{ TimerT: {{ fields: [{{ name: 'operationHour', type: 'UInt8' }}, {{ name: 'operationMinute', type: 'UInt8' }}, {{ name: 'active', type: 'Boolean' }}] }} }}
+      datatypes: {{
+        OnOff: {{ type: 'enum', items: {{ OFF: {{ value: 0 }}, ON: {{ value: 1 }} }} }},
+        ActEnum: {{ type: 'enum', items: {{ INACTIVE: {{ value: 0 }}, ACTIVE: {{ value: 2 }} }} }},
+        TimerT: {{
+          type: 'struct',
+          fields: {{
+            operationHour: {{ type: 'UInt8' }},
+            operationMinute: {{ type: 'UInt8' }},
+            status: {{ type: 'ActEnum' }}
+          }}
+        }}
+      }}
     }};
     var disc = C.discoverClimateCatalog(db);
     if (disc.interfaces.length !== 1) throw new Error('expected 1 climate iface');
     var df = disc.interfaces[0].fields.filter(function(x){{ return x.name === 'directOperationParkHeating'; }})[0];
-    if (C.buildDirectPayload(df, true) !== 'ACTIVE') throw new Error('expected ACTIVE');
-    if (C.buildDirectPayload(df, false) !== 'INACTIVE') throw new Error('expected INACTIVE');
+    if (C.buildDirectPayload(df, true, undefined, false) !== 'ACTIVE') throw new Error('expected ACTIVE string');
+    if (C.buildDirectPayload(df, true, undefined, true) !== 2) throw new Error('expected wire int 2 for ACTIVE');
+    if (C.buildDirectPayload(df, false, undefined, false) !== 'INACTIVE') throw new Error('expected INACTIVE');
     var tf = disc.interfaces[0].fields.filter(function(x){{ return x.name === 'departureTimer1'; }})[0];
-    var tp = C.buildTimerPayload(tf, 17, 15, true);
-    if (tp.operationHour !== 17 || tp.operationMinute !== 15 || tp.active !== true) throw new Error('bad timer payload');
+    var tp = C.buildTimerPayload(tf, 17, 15, true, undefined, false);
+    if (tp.operationHour !== 17 || tp.operationMinute !== 15 || tp.status !== 'ACTIVE') throw new Error('bad timer struct payload: ' + JSON.stringify(tp));
+    var tpNum = C.buildTimerPayload(tf, 17, 15, true, undefined, true);
+    if (tpNum.status !== 2) throw new Error('bad numeric timer struct payload: ' + JSON.stringify(tpNum));
 
     // Test 3: Trip & Park Snapshot trigger
     var trk = new C.TelemetryTracker();
