@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.6.0">
+<link rel="stylesheet" href="styles.css?v=0.6.1">
 <title>MyBMW</title>
 </head>
 <body>
@@ -34,7 +34,7 @@
   <!-- Collapsible BMW Factory Model & Paint Picker Sheet -->
   <div id="paintSheet" class="glass-card hidden">
     <div class="card-head">
-      <span>🎨 Mẫu xe &amp; Màu sơn BMW chuẩn hãng</span>
+      <span>🎨 Mẫu xe &amp; Màu sơn hãng</span>
       <span style="cursor:pointer;color:var(--dim)" onclick="toggleEl('paintSheet')">Đóng ✕</span>
     </div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
@@ -94,6 +94,7 @@
       <div class="lock-banner" id="securityBanner">ĐÃ KHOÁ AN TOÀN</div>
     </div>
     <div id="securityPills" class="security-pills"></div>
+    <div id="homeCcList"></div>
 
     <!-- Fuel & Range Card -->
     <div class="range-card">
@@ -179,7 +180,7 @@
     <!-- Vehicle Vitals Grid -->
     <div class="glass-card">
       <div class="card-head">
-        <span>Thông số xe &amp; Môi trường</span>
+        <span>Thông số xe &amp; Nhiệt độ</span>
         <span style="display:flex;align-items:center;gap:8px">
           <span id="odoText" style="color:var(--dim)">ODO: -- km</span>
           <button class="mini-refresh" onclick="sendCmd('status')" title="Đọc lại UDS từ xe">↻</button>
@@ -187,8 +188,8 @@
       </div>
       <div class="metrics-grid">
         <div class="metric-box"><div class="k">Ắc quy 12V</div><div class="v" id="mBat">-- V</div></div>
-        <div class="metric-box"><div class="k">Nhiệt độ ngoài / Cabin</div><div class="v" id="mTemp">-- °C</div></div>
-        <div class="metric-box"><div class="k">Nhiệt độ nước / Dầu</div><div class="v" id="mEngTemp">-- °C</div></div>
+        <div class="metric-box"><div class="k">Ngoài trời / Cabin</div><div class="v" id="mTemp">-- °C</div></div>
+        <div class="metric-box"><div class="k">Nước mát / Dầu máy</div><div class="v" id="mEngTemp">-- °C</div></div>
         <div class="metric-box"><div class="k">Trạng thái 1CR</div><div class="v" id="m1cr">Sẵn sàng</div></div>
       </div>
     </div>
@@ -274,7 +275,7 @@
         <span>📍 Vị trí đỗ xe</span>
         <span id="posSourceBadge" style="color:var(--go)">MGU NAV</span>
       </div>
-      <div id="addrText" style="font-size:14px;font-weight:600;margin-bottom:10px">Đang chờ toạ độ từ xe…</div>
+      <div id="addrText" style="font-size:14px;font-weight:600;margin-bottom:10px;overflow-wrap:anywhere">Đang chờ toạ độ từ xe…</div>
       <div id="mapBox"></div>
       <div class="btn-row">
         <button class="btn blue" onclick="openExternalMaps()">🧭 Mở chỉ đường tới xe</button>
@@ -341,15 +342,16 @@
   <section id="view-1cr" class="hidden">
     <div class="glass-card">
       <div class="card-head">
-        <span>🩺 Sức khoẻ Hệ thống &amp; 8 Hộp ECU</span>
+        <span>🩺 Sức khoẻ Hệ thống &amp; ECU</span>
         <span id="healthTimeBadge" style="color:var(--dim);text-transform:none;font-weight:600">Chỉ đọc UDS</span>
       </div>
       <div id="healthBanner" class="health-banner">
-        Chưa quét phiên này · Bấm nút bên dưới để đọc trạng thái 8 hộp điều khiển chính (DME, Hộp số ZF, BDC, DSC, Điều hoà, Đồng hồ, MGU, Cam 360°).
+        Chưa quét phiên này · Bấm nút bên dưới để đọc trạng thái các hộp điều khiển (DME, Hộp số ZF, BDC, DSC, Điều hoà, Đồng hồ, MGU, Cam 360°).
       </div>
       <div class="btn-row" style="margin-top:0">
-        <button type="button" class="btn blue" onclick="triggerHealthScan()">🩺 Quét sức khoẻ 8 hộp ECU ngay</button>
+        <button type="button" class="btn blue" id="btnScanHealth" onclick="triggerHealthScan()">🩺 Quét sức khoẻ các hộp ECU ngay</button>
       </div>
+      <div id="healthCcList" style="margin-top:8px"></div>
       <div id="ecuHealthGrid" class="ecu-grid"></div>
       <div id="dtcFaultList" style="margin-top:8px"></div>
       <div style="font-size:11.5px;color:var(--dim);margin-top:9px;line-height:1.4">
@@ -359,9 +361,10 @@
 
     <div class="glass-card">
       <div class="card-head">
-        <span>🔧 Nhắc lịch Bảo dưỡng theo ODO thực tế</span>
+        <span>🔧 Bảo dưỡng định kỳ (CBS)</span>
         <span id="svcOdoBadge" style="color:var(--dim);text-transform:none;font-weight:600">ODO: -- km</span>
       </div>
+      <div id="kombiCbsBox" style="margin-bottom:6px"></div>
 
       <div class="svc-block">
         <div class="svc-row">
@@ -524,6 +527,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.6.0"></script>
+<script src="app.js?v=0.6.1"></script>
 </body>
 </html>

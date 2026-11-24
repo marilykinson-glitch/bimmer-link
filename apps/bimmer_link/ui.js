@@ -188,8 +188,14 @@ function draw(cv, G, t, v, act) {
     const card2Line2 = dst
         ? ('Điểm đến App: ' + dst.name)
         : (hasOpen
-            ? ((tel.windowsOpen && tel.windowsOpen.length) ? ('Mở: ' + tel.windowsOpen.join(', ')) : 'Chú ý: Cửa / cốp mở hoặc chưa khoá!')
-            : ('4 cửa & kính kín · ' + tireSummary));
+            ? (tel.hoodOpen
+                ? 'Chú ý: Nắp ca-pô đang mở!'
+                : (tel.trunkOpen
+                    ? 'Chú ý: Cốp sau đang mở!'
+                    : ((tel.doorsOpen && tel.doorsOpen.length)
+                        ? ('Chú ý: Mở ' + tel.doorsOpen.join(', '))
+                        : ((tel.windowsOpen && tel.windowsOpen.length) ? ('Mở: ' + tel.windowsOpen.join(', ')) : 'Chú ý: Cửa xe đang mở khoá'))))
+            : ('4 cửa, kính & capo kín · ' + tireSummary));
     infoCard(cv, G, t, rx + cw + gap, cy, cw, ch, {
         key: 'blCardCar',
         title: 'Vị trí & Trạng thái',

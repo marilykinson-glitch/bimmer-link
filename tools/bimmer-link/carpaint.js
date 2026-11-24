@@ -396,13 +396,15 @@ function readLuaTrimRules(luaFile) {
 }
 
 function resolveHeroTrim(model, trimLine, luaFile) {
-    const cleanModel = String(model || '').replace(/^[a-z0-9]+-/, '');
+    const cleanModel = String(model || '').replace(/^[a-z0-9]+-/i, '');
+    const upModel = cleanModel.toUpperCase();
     const tl = !trimLine || trimLine === 'not_defined' ? 'base' : String(trimLine);
     const lua = readLuaTrimRules(luaFile);
-    if (lua && lua[cleanModel]) {
-        return lua[cleanModel][tl] || lua[cleanModel].base || 'A';
+    const luaEntry = lua && (lua[cleanModel] || lua[upModel]);
+    if (luaEntry) {
+        return luaEntry[tl] || luaEntry.base || 'A';
     }
-    const rule = TRIM_RULES[cleanModel] || TRIM_RULES._default;
+    const rule = TRIM_RULES[cleanModel] || TRIM_RULES[upModel] || TRIM_RULES._default;
     const base = rule._base || 'A';
     if (tl === 'base') return base;
     return rule[tl] || base;

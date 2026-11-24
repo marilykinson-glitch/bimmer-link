@@ -110,12 +110,13 @@ function prettifyPaint(raw) {
 
 function formatVehicleIdentity(info) {
     const code = String((info && (info.modelName || info.baureihe)) || '').replace(/^bmwm-|^mini-/i, '').toUpperCase();
-    const series = SERIES_TITLES[code] || (code ? ('BMW ' + code) : 'BMW iDrive 7');
-    const trimLabel = TRIM_LABELS[info && info.trimLine] || '';
+    const isM5Cs = (code === 'F90LCI' || code === 'F90') && info && info.trimLine === 'clubsport';
+    const series = isM5Cs ? 'BMW M5 CS' : (SERIES_TITLES[code] || (code ? ('BMW ' + code) : 'BMW iDrive 7'));
+    const trimLabel = isM5Cs ? 'CS' : (TRIM_LABELS[info && info.trimLine] || '');
     const paintLabel = prettifyPaint((info && info.colour) || (info && info.paint && info.paint.name) || '');
     return {
         chassis: code,
-        modelTitle: series + (trimLabel && series.indexOf(trimLabel) < 0 ? (' · ' + trimLabel) : ''),
+        modelTitle: isM5Cs ? 'BMW M5 CS' : (series + (trimLabel && series.indexOf(trimLabel) < 0 ? (' · ' + trimLabel) : '')),
         series,
         trimLine: (info && info.trimLine) || '',
         trimLabel,
@@ -306,32 +307,38 @@ function scanFactoryVehicle(opts) {
     }
 
     // Determine effective chassis, trimLine & colour:
-    // 1) User override on App MyBMW wins first
-    // 2) True chassis read from BDC/DME VIN or FA wins when HU_MGU was Kombi-coded to M5 CS (F90LCI)
-    // 3) HU_MGU rawcodingdata + HmiMain3D open vehicle bundles
-    const overChassis = String(override.chassis || '').trim().toUpperCase();
+    // 1) User override on App MyBMW wins first (auto-promoting F90 + clubsport -> F90LCI where M5 CS TrimL lives)
+    // 2) HU_MGU live coding (`rawcodingdata` BAUREIHE + TRIM_LINE + VEHICLE_COLOUR, e.g. F90LCI clubsport M5 CS!)
+    // 3) HmiMain3D / HmiKombi open vehicle bundles, falling back to VIN trueChassis only if MGU coding is absent
+    let overChassis = String(override.chassis || '').trim().toUpperCase();
     const overTrim = String(override.trimLine || '').trim();
     const overColour = String(override.colour || '').trim();
     const trueChassis = String(opts.trueChassis || '').trim().toUpperCase();
     const codedBaureihe = coding.valid && coding.baureihe ? coding.baureihe.toUpperCase() : '';
-    const isKombiCodedM = !overChassis && codedBaureihe && /^F9\d|^G8\d/.test(codedBaureihe) &&
-        (opts.kombiSpoofed || (trueChassis && trueChassis !== codedBaureihe));
 
-    const wantedCode = overChassis || (isKombiCodedM && trueChassis ? trueChassis : '') || codedBaureihe || kombiModel.toUpperCase();
+    const effectiveTrimLine = overTrim || (coding.valid ? coding.trimLine : '');
+    if (overChassis === 'F90' && (effectiveTrimLine === 'clubsport' || codedBaureihe === 'F90LCI')) {
+        overChassis = 'F90LCI';
+    }
+
+    let wantedCode = overChassis || codedBaureihe || kombiModel.toUpperCase() || trueChassis;
+    if (wantedCode === 'F90' && effectiveTrimLine === 'clubsport') {
+        wantedCode = 'F90LCI';
+    }
     let chosenBase = find2dForCode(wantedCode);
     if (!chosenBase) {
         const openWith2d = open2d.concat(open3d).filter((b) => fs.existsSync(path.join(b, 'vehicle2D_big', 'bitmaps.res')) || fs.existsSync(path.join(b, 'vehicle2D_small', 'bitmaps.res')));
         chosenBase = openWith2d[0] || '';
     }
     if (!chosenBase && availableModels.length) {
-        const pref = availableModels.find((c) => c === 'G30LCI' || c === 'G30' || c === 'G01LCI' || c === 'G01' || c === 'G20') || availableModels.find((c) => c !== 'F40') || availableModels[0];
+        const pref = availableModels.find((c) => c === 'F90LCI' || c === 'G30LCI' || c === 'G30' || c === 'G01LCI' || c === 'G01' || c === 'G20') || availableModels.find((c) => c !== 'F40') || availableModels[0];
         if (pref && modelMap[pref]) chosenBase = modelMap[pref].base;
     }
     if (!chosenBase && wantedCode && modelMap[wantedCode]) {
         chosenBase = modelMap[wantedCode].base;
     }
 
-    const modelName = overChassis || (isKombiCodedM && trueChassis ? trueChassis : '') || (codedBaureihe || (chosenBase ? path.basename(chosenBase) : kombiModel));
+    const modelName = overChassis || codedBaureihe || (chosenBase ? path.basename(chosenBase) : (kombiModel || trueChassis));
     const renderModelName = chosenBase ? path.basename(chosenBase) : modelName;
     const brand = chosenBase && chosenBase.indexOf('/bmwm/') >= 0 ? 'bmwm' : (chosenBase && chosenBase.indexOf('/mini/') >= 0 ? 'mini' : 'bmw');
 
@@ -342,11 +349,10 @@ function scanFactoryVehicle(opts) {
         return fs.existsSync(p2) ? p2 : '';
     };
 
-    const effectiveTrimLine = overTrim || (isKombiCodedM ? 'm_sportpaket' : (coding.valid ? coding.trimLine : ''));
     const effectiveColour = overColour || (coding.valid ? coding.colour : '');
 
     let trim = kombiTrim || 'A';
-    if (renderModelName && (overTrim || isKombiCodedM || (coding.valid && coding.trimCode !== 0) || !kombiTrim)) {
+    if (renderModelName && (overTrim || (coding.valid && coding.trimCode !== 0) || !kombiTrim)) {
         trim = CARPAINT.resolveHeroTrim(renderModelName, effectiveTrimLine || 'base', hmiFile('script/hmi_script.lua')) || trim;
     }
 
@@ -368,19 +374,21 @@ function scanFactoryVehicle(opts) {
     });
     meta.codedChassis = codedBaureihe;
     meta.trueChassis = trueChassis;
-    meta.kombiSpoofed = !!isKombiCodedM;
+    meta.kombiSpoofed = !!(trueChassis && codedBaureihe && trueChassis !== codedBaureihe);
 
-    // Extract genuine 2D studio bitmap + exact paint mask from `<chosenBase>/vehicle2D_big` (or `vehicle2D_small`)
+    // Extract genuine 2D studio bitmap + exact paint mask across BOTH `vehicle2D_big` and `vehicle2D_small`,
+    // ranking exact trim match (e.g. F90LCI TrimL gold wheels & gold grille) ahead of bitmap size!
     let pngBuf = null;
     let heroNote = '';
     if (chosenBase) {
         const subs = ['vehicle2D_big', 'vehicle2D_small'];
-        for (let si = 0; si < subs.length && !pngBuf; si++) {
+        const candidates = [];
+        const cleanBaseName = path.basename(chosenBase);
+        for (let si = 0; si < subs.length; si++) {
             const sub = subs[si];
             const dir = path.join(chosenBase, sub);
             const idsPath = path.join(dir, 'bitmaps.res.ids');
             const resPath = path.join(dir, 'bitmaps.res');
-            const cleanBaseName = path.basename(chosenBase);
             const origBackup = path.join(mguStudioBackupDir, 'car-' + (brand === 'bmw' ? '' : brand + '-') + cleanBaseName + '-' + sub.slice(10) + '.res.orig');
             const actualRes = fs.existsSync(origBackup) ? origBackup : resPath;
             if (!fs.existsSync(actualRes) || !fs.existsSync(idsPath)) continue;
@@ -390,27 +398,47 @@ function scanFactoryVehicle(opts) {
                 const isMask = (k) => (scene && scene.picOfMask[k] && parsed.byKey[scene.picOfMask[k]] ? true : /_mask_?\d*_bitmap$/.test(k));
                 const trimOf = (k) => {
                     if (scene && scene.trimOfPic[k]) return scene.trimOfPic[k];
-                    const m = /trim([A-Za-z]+)\d*_bitmap$/i.exec(k);
+                    const m = /trim_?([A-Za-z]+)(?:_?\d+)?_bitmap$/i.exec(k);
                     return m ? m[1].toUpperCase() : '';
                 };
                 const pics = parsed.entries.filter((e) => !isMask(e.key));
                 const masks = parsed.entries.filter((e) => isMask(e.key));
                 if (!pics.length) continue;
 
-                let pick = null;
-                if (scene && scene.byTrim && scene.byTrim[trim] && parsed.byKey[scene.byTrim[trim].pic]) {
-                    pick = parsed.byKey[scene.byTrim[trim].pic];
-                } else {
-                    pics.sort((a, b) => {
-                        const ra = trimOf(a.key) === trim ? 0 : (trimOf(a.key) === 'E' ? 1 : (trimOf(a.key) === 'A' ? 2 : 3));
-                        const rb = trimOf(b.key) === trim ? 0 : (trimOf(b.key) === 'E' ? 1 : (trimOf(b.key) === 'A' ? 2 : 3));
-                        return ra - rb || (b.w - a.w);
+                const exactSceneKey = (scene && scene.byTrim && scene.byTrim[trim] && parsed.byKey[scene.byTrim[trim].pic])
+                    ? scene.byTrim[trim].pic
+                    : '';
+                for (let pi = 0; pi < pics.length; pi++) {
+                    const pEntry = pics[pi];
+                    const pTrim = trimOf(pEntry.key);
+                    const rank = (pEntry.key === exactSceneKey || pTrim === trim) ? 0
+                        : (pTrim === 'E' ? 1 : (pTrim === 'A' ? 2 : 3));
+                    candidates.push({
+                        sub,
+                        parsed,
+                        scene,
+                        masks,
+                        pick: pEntry,
+                        rank,
                     });
-                    pick = pics[0];
                 }
-                const maskEntry = findMaskForPic(pick.key, masks, scene);
-                const rawPic = parsed.rgba(pick.key);
-                const rawMask = maskEntry ? parsed.rgba(maskEntry.key) : Buffer.alloc(pick.w * pick.h * 4);
+            } catch (e) {
+                heroNote = 'err:' + e.message;
+            }
+        }
+
+        candidates.sort((a, b) => (a.rank - b.rank) || (b.pick.w - a.pick.w));
+        for (let ci = 0; ci < candidates.length && !pngBuf; ci++) {
+            const c = candidates[ci];
+            const pick = c.pick;
+            try {
+                let maskEntry = null;
+                if (c.scene && c.scene.byTrim && c.scene.byTrim[trim] && c.scene.byTrim[trim].pic === pick.key && c.scene.byTrim[trim].mask) {
+                    maskEntry = c.masks.find((m) => m.key === c.scene.byTrim[trim].mask) || null;
+                }
+                if (!maskEntry) maskEntry = findMaskForPic(pick.key, c.masks, c.scene);
+                const rawPic = c.parsed.rgba(pick.key);
+                const rawMask = maskEntry ? c.parsed.rgba(maskEntry.key) : Buffer.alloc(pick.w * pick.h * 4);
                 let shaded = CARPAINT.shadeCarpaint(rawPic, rawMask, paint);
 
                 // Ensure ultra-dark paints (e.g. Black2 / Sapphire Black) still show crisp studio highlights against #050811
@@ -421,7 +449,7 @@ function scanFactoryVehicle(opts) {
                         if (shaded[p] + shaded[p + 1] + shaded[p + 2] > 42) brightPx++;
                     }
                 }
-                if (opaquePx < 60) continue; // Skip empty/corrupted bitmap entry and try next bundle
+                if (opaquePx < 60) continue; // Skip empty/corrupted bitmap entry and try next candidate
                 if (brightPx < opaquePx * 0.14 && paint && paint.base && paint.spec && paint.refl) {
                     const liftedPaint = {
                         name: paint.name,
@@ -438,7 +466,7 @@ function scanFactoryVehicle(opts) {
                 const targetH = Math.max(1, Math.round(cropped.h * targetW / cropped.w));
                 const scaled = W.resize(cropped.rgba, cropped.w, cropped.h, targetW, targetH);
                 pngBuf = encodeCompactPng(scaled, targetW, targetH);
-                heroNote = cleanBaseName + '/' + sub + ':' + pick.key + (maskEntry ? '+' + maskEntry.key : '');
+                heroNote = cleanBaseName + '/' + c.sub + ':' + pick.key + (maskEntry ? '+' + maskEntry.key : '');
             } catch (e) {
                 heroNote = 'err:' + e.message;
             }

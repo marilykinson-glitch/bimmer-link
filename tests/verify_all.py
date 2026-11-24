@@ -774,11 +774,11 @@ def check_car_link_logic_in_jxa():
       throw new Error('PairTagger postSeiFrames>=2 alignment failed: ' + JSON.stringify([r0a, r09]));
     }}
 
-    // Test 5 (v0.6.0): LSCDataSink 4-Wheel TPMS, 4-Window/Sunroof, DWA Alarm, KOMBI Range & UDS 0x19 02 DTC Parser
-    if (C.scaleTireBar(25) !== 2.5 || C.scaleTireBar(125) !== 2.5 || C.scaleTireBar(250) !== 2.5) {{
+    // Test 5 (v0.6.0/v0.6.1): TPMS / LSCDataSink 4-Wheel TPMS, 4-Window/Sunroof, DWA Alarm, KOMBI Range & UDS 0x19 02 DTC Parser
+    if (C.scaleTireBar(25) !== 2.5 || Math.abs(C.scaleTireBar(362) - 2.5) > 0.02 || C.scaleTireBar(2500) !== 2.5) {{
       throw new Error('scaleTireBar scaling mismatch');
     }}
-    if (C.scaleTireBar(63) !== null || C.scaleTireBar(255) !== null || C.scaleTireBar(4095) !== null) {{
+    if (C.scaleTireBar(0) !== null || C.scaleTireBar(255) !== null || C.scaleTireBar(65535) !== null) {{
       throw new Error('scaleTireBar must reject invalid sentinel values');
     }}
     var lscTrk = new C.TelemetryTracker();
@@ -800,6 +800,10 @@ def check_car_link_logic_in_jxa():
     if (lscTrk.state.windowsOpen.length !== 1 || lscTrk.state.windowsOpen[0] !== 'Kính Phụ' || lscTrk.state.windowDetails.sunroof !== 'closed') {{
       throw new Error('Window/Sunroof decode mismatch: ' + JSON.stringify(lscTrk.state));
     }}
+    applyLsc('dWAStatus', {{ statusDWAArming: 'DWA_ENTSCHAERFT', statusDWAAlarmHour: 252, statusDWAAlarmReason: 'KEIN_ALARM' }});
+    if (lscTrk.state.locked === false) {{
+      throw new Error('Non-302 DWA_ENTSCHAERFT must NEVER force locked=false before DWA_GESCHAERFT is seen!');
+    }}
     applyLsc('dWAStatus', {{ statusDWAArming: 'DWA_GESCHAERFT', statusDWAAlarmReason: 'KEIN_ALARM' }});
     if (lscTrk.state.dwaArmed !== true || lscTrk.state.locked !== true || lscEvents.length !== 0) {{
       throw new Error('DWA armed decode mismatch: ' + JSON.stringify(lscTrk.state));
@@ -818,6 +822,45 @@ def check_car_link_logic_in_jxa():
     if (!dtcHit.ok || dtcHit.dtcs.length !== 2 || dtcHit.dtcs[0].severity !== 'crit' || dtcHit.dtcs[1].severity !== 'warn') {{
       throw new Error('UDS DTC parser mismatch: ' + JSON.stringify(dtcHit));
     }}
+
+    // Test 6 (v0.6.1): CheckControlTracker ('Mở nắp ca-pô' -> hoodOpen=true & clear), Closure leaves, TPMS units/temp, KOMBI CBS
+    var ccTrk = new C.CheckControlTracker();
+    var ccState = new C.TelemetryTracker().state;
+    ccTrk.feedCcNames({{ ccList: [{{ cCIdentifer: 215, cCShortName: 'Mở nắp ca-pô', cCColor: 'RED' }}] }});
+    ccTrk.feedBasicList({{ basicList: [{{ ccmId: 215, activeState: 'AKTIV', requestorDiagAddr: 0x40, reason: 'CC_MESSAGE' }}] }});
+    ccTrk.applyToState(function(p) {{ Object.assign(ccState, p); }}, ccState);
+    if (ccState.hoodOpen !== true || ccState.checkControl.length !== 1 || ccState.checkControl[0].severity !== 'crit') {{
+      throw new Error('CheckControl hoodOpen detection failed: ' + JSON.stringify(ccState));
+    }}
+    ccTrk.feedBasicList({{ basicList: [] }});
+    ccTrk.applyToState(function(p) {{ Object.assign(ccState, p); }}, ccState);
+    if (ccState.hoodOpen !== false || ccState.checkControl.length !== 0) {{
+      throw new Error('CheckControl hoodOpen clear failed: ' + JSON.stringify(ccState));
+    }}
+
+    var clState = new C.TelemetryTracker().state;
+    C.interpretClosureLeaves('Vehicle.doorsAndFlaps', {{
+      statusDoorDriver: 'GESCHLOSSEN',
+      statusFrontFlap: 'GEOEFFNET'
+    }}, function(p) {{ Object.assign(clState, p); }}, clState);
+    if (clState.hoodOpen !== true || clState.doorsOpen.length !== 0) {{
+      throw new Error('interpretClosureLeaves hoodOpen mismatch: ' + JSON.stringify(clState));
+    }}
+
+    if (Math.abs(C.scaleTireBar(360, 'PSI') - 2.48) > 0.02 || C.scaleTireBar(25, 'BAR') !== 2.5 || C.scaleTireBar(2500, 'KPA') !== 2.5) {{
+      throw new Error('scaleTireBar unit conversion mismatch');
+    }}
+    if (C.scaleTireTempC(74, 'C') !== 34) throw new Error('scaleTireTempC mismatch');
+    var tpState = new C.TelemetryTracker().state;
+    C.interpretTpmsField('statusTyreTemperature', {{ actualValueTemperatureTyreFLH: 75, actualValueTemperatureTyreFRH: 76 }}, {{ temp: 'C' }}, function(p) {{ Object.assign(tpState, p); }}, tpState);
+    if (tpState.tires.tempFl !== 35 || tpState.tires.tempFr !== 36) {{
+      throw new Error('interpretTpmsField temp mismatch: ' + JSON.stringify(tpState.tires));
+    }}
+
+    var cbs = C.parseKombiCbsList([{{ cBSIdentifier: 1, cBSServcieName: 'Dầu động cơ', cBSServiceWay: '8.000 km', cBSServiceDate: '11/2027', cBSColor: 'GREEN' }}]);
+    if (!cbs || cbs.length !== 1 || cbs[0].name !== 'Dầu động cơ' || cbs[0].severity !== 'ok') {{
+      throw new Error('parseKombiCbsList mismatch: ' + JSON.stringify(cbs));
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)
@@ -833,6 +876,20 @@ def check_pwa_and_manifest_filtering():
         assert run_jxa(code) == 'PWA_SYNTAX_OK'
     app_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
     assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js and 'mqttBuildPublish' in app_js and 'selectCamView' in app_js and 'ensureSnapCrops' in app_js
+    assert 'ans === 0' in app_js and 'renderCheckControlAlerts' in app_js and 'kombiCbsBox' in app_js
+
+    # Verify HTML IDs, JS handlers & CSS overflow-proof grid rules
+    html_src = open(os.path.join(ROOT, 'docs/app/index.html'), encoding='utf-8').read()
+    css_src = open(os.path.join(ROOT, 'docs/app/styles.css'), encoding='utf-8').read()
+    for grid_cls in ('.ecu-grid', '.metrics-grid', '.tpms-stage', '.swatch-grid', '.cam-tabs', '.action-dock'):
+        idx = css_src.find(grid_cls)
+        assert idx >= 0, f'Missing CSS rule {grid_cls}'
+        block = css_src[idx:css_src.find('}', idx)]
+        assert 'minmax(0, 1fr)' in block, f'{grid_cls} must use minmax(0, 1fr) to prevent right-side column overflow!'
+    for req_id in ('homeCcList', 'healthCcList', 'kombiCbsBox', 'btnScanHealth', 'ecuHealthGrid', 'securityPills'):
+        assert f'id="{req_id}"' in html_src, f'Missing #{req_id} in index.html'
+    for fn_call in re.findall(r'on(?:click|change)="([a-zA-Z0-9_]+)\(', html_src):
+        assert f'function {fn_call}(' in app_js, f'Missing handler {fn_call}() in docs/app/app.js'
 
     # Test 24-bit Baseline JPEG encoder (`jpeg.js`) at full 960x816 4-camera resolution + native macOS `sips` decode check!
     jpeg_src = open(os.path.join(ROOT, 'tools/bimmer-link/jpeg.js'), encoding='utf-8').read()
@@ -1092,6 +1149,89 @@ def check_pwa_and_manifest_filtering():
         """)
         parsed_proc = json.loads(proc_check)
         assert parsed_proc['id'] == 'bimmer_link2' and parsed_proc['uid'] == 5099 and parsed_proc['fromProc'] is True, f"VietMap cwd UID failed: {parsed_proc}"
+
+        # Verify CarHero F90LCI M5 CS (TrimL gold wheels/grille in vehicle2D_small beating TrimA in vehicle2D_big + F90->F90LCI heal)
+        hero_src = open(os.path.join(ROOT, 'tools/bimmer-link/car-hero.js'), encoding='utf-8').read()
+        hero_check = run_jxa(f"""
+        function enhanceBuf(u) {{ u._isBuf = true; u.copy = function(d, o, s0, s1) {{ d.set(u.subarray(s0||0, s1===undefined?u.length:s1), o||0); }}; u.slice = function(a, b) {{ return enhanceBuf(Uint8Array.prototype.slice.call(u, a, b)); }}; u.writeUInt32BE = function(){{}}; u.write = function(s, o) {{ for (var i=0;i<s.length;i++) u[(o||0)+i] = s.charCodeAt(i); }}; return u; }}
+        var Buffer = {{
+          alloc: function(n) {{ return enhanceBuf(new Uint8Array(n)); }},
+          allocUnsafe: function(n) {{ return enhanceBuf(new Uint8Array(n)); }},
+          from: function(a) {{ var u = new Uint8Array(a.length); for (var i=0; i<a.length; i++) u[i] = typeof a === 'string' ? a.charCodeAt(i) : a[i]; return enhanceBuf(u); }},
+          concat: function(l) {{ var t=0; for (var i=0;i<l.length;i++) t+=l[i].length; var o=Buffer.alloc(t), p=0; for(var j=0;j<l.length;j++){{o.set(l[j],p);p+=l[j].length;}} return o; }}
+        }};
+        var dirs = {{
+          '/hmi/bmwm/widgetasset/vehicles': ['F90', 'F90LCI'],
+          '/hmi/bmw/widgetasset/vehicles': ['G30LCI'],
+          '/proc': []
+        }};
+        var exists = {{
+          '/hmi/bmwm/widgetasset/vehicles/F90/vehicle2D_big/bitmaps.res': 1,
+          '/hmi/bmwm/widgetasset/vehicles/F90/vehicle2D_big/bitmaps.res.ids': 1,
+          '/hmi/bmwm/widgetasset/vehicles/F90LCI/vehicle2D_big/bitmaps.res': 1,
+          '/hmi/bmwm/widgetasset/vehicles/F90LCI/vehicle2D_big/bitmaps.res.ids': 1,
+          '/hmi/bmwm/widgetasset/vehicles/F90LCI/vehicle2D_small/bitmaps.res': 1,
+          '/hmi/bmwm/widgetasset/vehicles/F90LCI/vehicle2D_small/bitmaps.res.ids': 1,
+          '/hmi/bmw/widgetasset/vehicles/G30LCI/vehicle2D_big/bitmaps.res': 1,
+          '/hmi/bmw/widgetasset/vehicles/G30LCI/vehicle2D_big/bitmaps.res.ids': 1
+        }};
+        var fs = {{
+          readdirSync: function(p) {{ if (!dirs[p]) throw new Error('no ' + p); return dirs[p]; }},
+          existsSync: function(p) {{ return !!exists[p]; }},
+          realpathSync: function(p) {{ return p; }},
+          readFileSync: function(p) {{ return p; }}
+        }};
+        var path = {{
+          join: function() {{ return Array.prototype.slice.call(arguments).join('/').replace(/[/]+/g, '/'); }},
+          basename: function(p) {{ return p.split('/').pop(); }}
+        }};
+        function makeSolidRgba(w, h, r, g, b) {{
+          var u = Buffer.alloc(w * h * 4);
+          for (var i = 0; i < u.length; i += 4) {{ u[i]=r; u[i+1]=g; u[i+2]=b; u[i+3]=255; }}
+          return u;
+        }}
+        var W = {{
+          Bundle: function(resPath) {{
+            if (resPath.indexOf('F90LCI/vehicle2D_big') >= 0) {{
+              this.entries = [{{ key: 'f90lci_trimA_0_bitmap', w: 600, h: 300 }}];
+            }} else if (resPath.indexOf('F90LCI/vehicle2D_small') >= 0) {{
+              this.entries = [{{ key: 'f90lci_trimL_0_bitmap', w: 420, h: 210 }}];
+            }} else {{
+              this.entries = [{{ key: 'other_trimA_0_bitmap', w: 600, h: 300 }}];
+            }}
+            var byKey = {{}};
+            for (var i=0;i<this.entries.length;i++) byKey[this.entries[i].key] = this.entries[i];
+            this.byKey = byKey;
+            this.rgba = function(k) {{ var e = byKey[k]; return makeSolidRgba(e.w, e.h, 120, 140, 180); }};
+          }},
+          flipRows: function(rgba) {{ return rgba; }},
+          resize: function(rgba, sw, sh, dw, dh) {{ return makeSolidRgba(dw, dh, 40, 110, 210); }},
+          crc32: function() {{ return 0; }}
+        }};
+        var CARPAINT = {{
+          readRawCoding: function() {{ return {{ valid: true, baureihe: 'F90LCI', trimLine: 'clubsport', trimCode: 6, colour: 'phytonicblau_metallic' }}; }},
+          resolveHeroTrim: function(m, tl) {{ return tl === 'clubsport' ? 'L' : 'A'; }},
+          resolvePaint: function() {{ return {{ name: 'phytonicblau_WC1M', base: [0.08, 0.22, 0.48, 3.2], spec: [0.55, 0.78, 1.15, 10.5], refl: [0.88, 0.96, 1.08, 1.0] }}; }},
+          readSceneTrims: function() {{ return {{ byTrim: {{}}, trimOfPic: {{}}, picOfMask: {{}} }}; }},
+          shadeCarpaint: function(pic) {{ return pic; }}
+        }};
+        var req = function(n) {{
+          if (n === 'fs') return fs;
+          if (n === 'path') return path;
+          if (n === 'zlib') return {{ deflateSync: function(x) {{ return x.slice(0, 16); }} }};
+          if (n === './wbm') return W;
+          if (n === './carpaint') return CARPAINT;
+          return {{}};
+        }};
+        var mod = {{ exports: {{}} }};
+        new Function('require', 'module', 'exports', 'Buffer', {json.dumps(hero_src)})(req, mod, mod.exports, Buffer);
+        var rAuto = mod.exports.scanFactoryVehicle({{ hmiRoot: '/hmi', procDir: '/proc', trueChassis: 'G30LCI', kombiSpoofed: true, override: {{}} }});
+        var rHeal = mod.exports.scanFactoryVehicle({{ hmiRoot: '/hmi', procDir: '/proc', trueChassis: 'G30LCI', override: {{ chassis: 'F90', trimLine: 'clubsport' }} }});
+        JSON.stringify({{ auto: rAuto.meta, heal: rHeal.meta }});
+        """)
+        hc = json.loads(hero_check)
+        assert hc['auto']['chassis'] == 'F90LCI' and hc['auto']['modelTitle'] == 'BMW M5 CS' and 'f90lci_trimL_0_bitmap' in hc['auto']['renderSource'], f"Auto M5 CS failed: {hc}"
+        assert hc['heal']['chassis'] == 'F90LCI' and hc['heal']['modelTitle'] == 'BMW M5 CS' and 'f90lci_trimL_0_bitmap' in hc['heal']['renderSource'], f"F90->F90LCI CS heal failed: {hc}"
     print('[OK] PWA client syntax, black-canvas guard, and OAP SOME/IP catalog filtering verified')
 
 

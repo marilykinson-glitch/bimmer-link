@@ -239,6 +239,112 @@ mgu.run({
             }));
         }
 
+        /* ---- OAP-ACL Live Closure (Doors / Hood / Trunk / Lock / CheckControl) & TPMS Watcher ---- */
+        const oapBodyLive = {};
+        let oapBodySeq = 0;
+        let oapBodyFlushTimer = null;
+
+        function decodeWireBySchema(val, sc) {
+            if (val === null || val === undefined || !sc || typeof sc !== 'object') return val;
+            const tp = String(sc.t || '');
+            if (/^enum$/i.test(tp) && sc.e && typeof sc.e === 'object' && typeof val === 'number') {
+                const names = Object.keys(sc.e);
+                for (let i = 0; i < names.length; i++) {
+                    if (sc.e[names[i]] === val) return names[i];
+                }
+                return val;
+            }
+            if (/^struct$/i.test(tp) && Array.isArray(sc.e) && typeof val === 'object' && !Array.isArray(val)) {
+                const out = {};
+                const keys = Object.keys(val);
+                for (let i = 0; i < keys.length; i++) {
+                    const k = keys[i];
+                    let fSc = null;
+                    for (let j = 0; j < sc.e.length; j++) {
+                        if (sc.e[j] && (sc.e[j].n === k || sc.e[j].name === k)) { fSc = sc.e[j]; break; }
+                    }
+                    out[k] = fSc ? decodeWireBySchema(val[k], fSc) : val[k];
+                }
+                return out;
+            }
+            return val;
+        }
+
+        function scheduleOapBodyFlush() {
+            if (oapBodyFlushTimer) return;
+            oapBodyFlushTimer = setTimeout(() => {
+                oapBodyFlushTimer = null;
+                writeAppFile('oap-body.json', { seq: ++oapBodySeq, at: Date.now(), fields: oapBodyLive });
+            }, 220);
+        }
+
+        async function startOapBodyWatchers() {
+            if (!signals || !signals.hasNative || !signals.hasNative()) return;
+            const dirs = [
+                path.resolve(__dirname, '..', 'someipInterfaces'),
+                path.resolve(__dirname, '..', '..', 'someipInterfaces'),
+                path.resolve(__dirname, 'someipdefs'),
+            ];
+            let files = [], chosenDir = '';
+            for (let d = 0; d < dirs.length; d++) {
+                try {
+                    const list = fs.readdirSync(dirs[d]).filter((f) => /\.json$/i.test(f));
+                    if (list.length) { files = list; chosenDir = dirs[d]; break; }
+                } catch (e) {}
+            }
+            if (!files.length) return;
+
+            const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager)(\.|$)/i;
+            const wantFieldRe = /(basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|lockState|^statusLock|verriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition)/i;
+            const skipFieldRe = /(dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
+            const pollTargets = [];
+
+            for (let fi = 0; fi < files.length; fi++) {
+                let cfg = null;
+                try { cfg = JSON.parse(fs.readFileSync(path.join(chosenDir, files[fi]), 'utf8')); } catch (e) { continue; }
+                const stem = files[fi].replace(/\.json$/i, '');
+                const ifn = (cfg && cfg.interfaceName ? String(cfg.interfaceName).replace(/\//g, '.') : '') || stem.replace(/_/g, '.');
+                if (skipIfaceRe.test(ifn)) continue;
+                const fieldsObj = (cfg && cfg.fields) || {};
+                const matched = Object.keys(fieldsObj).filter((fn) => wantFieldRe.test(fn) && !skipFieldRe.test(fn));
+                if (!matched.length) continue;
+
+                const list = await getOapInstances(stem);
+                if (!list.length) continue;
+
+                for (let li = 0; li < list.length; li++) {
+                    const px = list[li].px;
+                    for (let mi = 0; mi < matched.length; mi++) {
+                        const fname = matched[mi];
+                        const fMeta = fieldsObj[fname] || {};
+                        const fullKey = ifn + '.' + fname;
+                        const onVal = (rawVal) => {
+                            if (rawVal === undefined || rawVal === null) return;
+                            oapBodyLive[fullKey] = fMeta.schema ? decodeWireBySchema(rawVal, fMeta.schema) : rawVal;
+                            scheduleOapBodyFlush();
+                        };
+                        if (fMeta.event || fMeta.notifier) {
+                            try { signals.on(px, fname, onVal, log); } catch (e) {}
+                        }
+                        if (fMeta.getter) {
+                            oapGet(px, fname, 1800).then(onVal).catch(() => {});
+                            if (li === 0) pollTargets.push({ px, fname, onVal });
+                        }
+                    }
+                }
+            }
+
+            if (pollTargets.length) {
+                setInterval(() => {
+                    for (let i = 0; i < pollTargets.length; i++) {
+                        const pt = pollTargets[i];
+                        oapGet(pt.px, pt.fname, 1500).then(pt.onVal).catch(() => {});
+                    }
+                }, 20000);
+            }
+        }
+        startOapBodyWatchers().catch(() => {});
+
         async function readOap1crLive() {
             const out = {};
             const probes = [

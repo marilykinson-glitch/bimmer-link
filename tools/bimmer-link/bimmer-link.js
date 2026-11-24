@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -385,6 +385,11 @@ function createService(customCfg) {
             });
             if (scanned && (scanned.detected || scanned.png)) {
                 heroData = scanned;
+                if (config.appearance && config.appearance.chassis === 'F90' &&
+                    (config.appearance.trimLine === 'clubsport' || (scanned.meta && scanned.meta.codedChassis === 'F90LCI'))) {
+                    config.appearance.chassis = 'F90LCI';
+                    saveConfig();
+                }
                 if (scanned.png) {
                     try { writeAtomic(path.join(C.run, 'hero.png'), scanned.png, 0o644); } catch (e) {}
                 }
@@ -596,7 +601,9 @@ function createService(customCfg) {
             if (msg.lastTrip) S.lastTrip = msg.lastTrip;
             if (S.telemetry && S.telemetry.trueChassis && S.telemetry.trueChassis !== lastTrueChassis) {
                 lastTrueChassis = S.telemetry.trueChassis;
-                refreshFactoryHero(true);
+                if (!heroData.meta || !heroData.meta.chassis) {
+                    refreshFactoryHero(true);
+                }
                 syncCloudState(true);
             }
             checkValetViolations();
@@ -1020,15 +1027,20 @@ function createService(customCfg) {
         }
 
         if (action === 'scan_health') {
-            const rep = await callWorker('scan_health', {}, 15000);
+            const rep = await callWorker('scan_health', {}, 28000);
             if (!rep || !rep.ok || !rep.result) {
                 const err = (rep && rep.error) || 'Không thể kết nối cổng chẩn đoán UDS InternalTasu';
                 tell('Sức khoẻ xe: ' + err, 'warn');
                 return { ok: false, error: err };
             }
             const h = rep.result;
+            if (!h.ecusAnswered) {
+                const noAns = 'Chưa nhận được phản hồi UDS (0 hộp ECU trả lời) — hãy kiểm tra khoá điện xe rồi bấm Quét lại.';
+                tell(noAns, 'warn');
+                return { ok: false, error: noAns, detail: h };
+            }
             const summary = (h.activeFaultCount === 0 && h.storedFaultCount === 0)
-                ? ('Tất cả hệ thống hoạt động hoàn hảo (' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU 0 lỗi, 12V ' + (S.telemetry.battery12v || '--') + 'V)!')
+                ? ('Tất cả hệ thống hoạt động hoàn hảo (' + h.ecusAnswered + ' hộp ECU phản hồi · 0 mã lỗi, 12V ' + (S.telemetry.battery12v || '--') + 'V)!')
                 : ('Đã quét ' + h.ecusAnswered + ' hộp ECU: ' + h.activeFaultCount + ' lỗi đang hiện hữu, ' + h.storedFaultCount + ' mã lưu bộ nhớ.');
             tell(summary, h.activeFaultCount > 0 ? 'warn' : 'go');
             if (source === 'Telegram' && config.botToken && config.chatId) {
@@ -1133,6 +1145,18 @@ function createService(customCfg) {
 
     function pollAppCommands() {
         const app = ensureAppRamDir(C.run, C.oap, C.proc);
+        const bodyCandidates = [path.join(C.run, 'app', 'oap-body.json')];
+        if (app) bodyCandidates.push(path.join(app.root, 'data', 'oap-body.json'));
+        let newestBody = null;
+        bodyCandidates.forEach((f) => {
+            const b = readJson(f);
+            if (b && typeof b.seq === 'number' && (!newestBody || b.seq > newestBody.seq)) newestBody = b;
+        });
+        if (newestBody && newestBody.seq !== S.seenBodySeq && newestBody.fields) {
+            S.seenBodySeq = newestBody.seq;
+            callWorker('ingest_oap_body', { fields: newestBody.fields }, 2000).catch(() => {});
+        }
+
         const candidates = [path.join(C.run, 'app', 'command.json')];
         if (app) candidates.push(path.join(app.root, 'data', 'command.json'));
         let newest = null;

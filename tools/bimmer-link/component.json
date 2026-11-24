@@ -1,7 +1,7 @@
 {
   "id": "bimmer-link",
   "kind": "tool",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "title": "Trợ thủ MyBMW & 1CR",
   "description": "Dịch vụ nền cho ứng dụng MyBMW & 1CR: tự động quét đúng dòng xe qua VIN/FA, màu sơn gốc và hình xe 2D chuẩn hãng trên đầu MGU; chụp ảnh 4 camera 360° quanh xe từ xa (ICAM2) kèm thẻ vị trí đỗ hầm; giám sát Valet; điều khiển đề nổ 1CR và hẹn giờ BDC/IHKA.",
   "license": "GPL-3.0-or-later",

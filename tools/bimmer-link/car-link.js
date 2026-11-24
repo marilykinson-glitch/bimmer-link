@@ -1025,6 +1025,7 @@ class TelemetryTracker {
             tires: {
                 fl: null, fr: null, rl: null, rr: null,
                 targetFl: null, targetFr: null, targetRl: null, targetRr: null,
+                tempFl: null, tempFr: null, tempRl: null, tempRr: null,
                 updatedAt: 0,
             },
             locked: null,
@@ -1033,6 +1034,8 @@ class TelemetryTracker {
             dwaAlarmReason: '',
             trunkOpen: false,
             hoodOpen: false,
+            checkControl: [],
+            cbsList: [],
             pos: null,
             health: null,
             climate1cr: {
@@ -1200,13 +1203,43 @@ function toBytes(b) {
     return [];
 }
 
+function decodeWireVal(val, sc) {
+    if (val === null || val === undefined || !sc || typeof sc !== 'object') return val;
+    const tp = String(sc.t || '');
+    if (/^enum$/i.test(tp) && sc.e && typeof sc.e === 'object' && typeof val === 'number') {
+        const names = Object.keys(sc.e);
+        for (let i = 0; i < names.length; i++) {
+            if (sc.e[names[i]] === val) return names[i];
+        }
+        return val;
+    }
+    if (/^struct$/i.test(tp) && Array.isArray(sc.e) && typeof val === 'object' && !Array.isArray(val)) {
+        const out = {};
+        const keys = Object.keys(val);
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            let fSc = null;
+            for (let j = 0; j < sc.e.length; j++) {
+                if (sc.e[j] && (sc.e[j].n === k || sc.e[j].name === k)) { fSc = sc.e[j]; break; }
+            }
+            out[k] = fSc ? decodeWireVal(val[k], fSc) : val[k];
+        }
+        return out;
+    }
+    return val;
+}
+
 async function runWorker() {
     const emit = (msg) => {
         try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) {}
     };
 
     const tracker = new TelemetryTracker();
+    const ccTracker = new CheckControlTracker();
+    const carUnits = { press: null, temp: null };
     const climateLive = {};        // "iface.field" -> latest value
+    const bodyLive = {};           // "iface.field" -> latest body/closure value
+    const bodyPollers = [];        // [() => void] re-read on refresh_vitals
     const climateProxies = {};     // iface -> { list: [{ inst, proxy, available }], desc, cfgSummary }
     let climateCatalog = { interfaces: [] };
     let tasuProxy = null;
@@ -1343,9 +1376,13 @@ async function runWorker() {
                         pushPatch({ rpm: rpm < 400 ? 0 : Math.round(rpm) });
                     } else if (f === 'statusEngineTemperature') {
                         const patch = {};
-                        if (v.temperatureEngineDrive !== undefined && v.temperatureEngineDrive !== 255) patch.coolantC = v.temperatureEngineDrive - 48;
-                        if (v.temperatureEngineOilDrive !== undefined && v.temperatureEngineOilDrive !== 255) patch.oilC = v.temperatureEngineOilDrive - 48;
-                        pushPatch(patch);
+                        if (v.temperatureEngineDrive !== undefined && v.temperatureEngineDrive < 250 && v.temperatureEngineDrive !== 48) {
+                            patch.coolantC = v.temperatureEngineDrive - 48;
+                        }
+                        if (v.temperatureEngineOilDrive !== undefined && v.temperatureEngineOilDrive < 250 && v.temperatureEngineOilDrive !== 48) {
+                            patch.oilC = v.temperatureEngineOilDrive - 48;
+                        }
+                        if (Object.keys(patch).length) pushPatch(patch);
                     }
                 },
             },
@@ -1379,12 +1416,65 @@ async function runWorker() {
                     }
                 },
             },
+            'de.bmw.infotainment.vehicle.Vehicle': {
+                fields: ['statusNewCurrentUnitsStatusExt'],
+                onField: (f, v) => {
+                    if (!v || typeof v !== 'object') return;
+                    const pm = { 1: 'BAR', 2: 'KPA', 3: 'PSI', BAR: 'BAR', KPA: 'KPA', PSI: 'PSI' }[v.unitOfMeasurementAirPressure];
+                    const tm = { 1: 'C', 2: 'F', C: 'C', F: 'F' }[v.unitOfMeasurementTemperature];
+                    if (pm) carUnits.press = pm;
+                    if (tm) carUnits.temp = tm;
+                },
+            },
+            'de.bmw.infrastructure.EnvironmentalInformation': {
+                fields: ['ExteriorTemperature'],
+                onField: (f, v) => {
+                    if (v && typeof v.temperatureExterior === 'number' && v.temperatureExterior < 250) {
+                        const amb = +(v.temperatureExterior * 0.5 - 40).toFixed(1);
+                        if (amb >= -45 && amb <= 60) pushPatch({ ambientC: amb });
+                    }
+                },
+            },
+            'de.bmw.infotainment.vehicle.TPMS': {
+                fields: ['statusTyrePressure', 'statusTargetTyrePressure', 'statusTyreTemperature'],
+                onField: (f, v) => {
+                    interpretTpmsField(f, v, carUnits, pushPatch, tracker.state);
+                },
+            },
+            'de.bmw.infotainment.checkcontrol.CheckControlMaster': {
+                fields: ['basicList'],
+                onField: (f, v) => {
+                    ccTracker.feedBasicList(v);
+                    ccTracker.applyToState(pushPatch, tracker.state);
+                },
+            },
+            'de.bmw.infotainment.KombiInterface_2': {
+                fields: ['ccList', 'newCCMessage', 'cbsDataServiceList'],
+                onField: (f, v) => {
+                    if (f === 'cbsDataServiceList') {
+                        const list = parseKombiCbsList(v);
+                        if (list) pushPatch({ cbsList: list });
+                    } else {
+                        ccTracker.feedCcNames(v);
+                        ccTracker.applyToState(pushPatch, tracker.state);
+                    }
+                },
+            },
         };
 
-        const BODY_FIELD_RE = /(^|status|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|window|centralLock|lockState|tailgate|trunk|bonnet|hood|tyrePressure|tirePressure|pressureTyre)/i;
+        const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|\.lsc\.|steeringwheel|cameraproxy|xview)/i;
+        const BODY_FIELD_RE = /(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|doors|tuer|tueren|flap|flaps|klappe|klappen|window|fenster|centralLock|lockState|verriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|tyrePressure|tirePressure|pressureTyre)/i;
+        const BODY_SKIP_FIELD_RE = /(dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
         const targetIfaces = {};
         Object.keys(coreMap).forEach((k) => { targetIfaces[k] = true; });
-        allIfaces.forEach((k) => { if (BODY_IFACE_RE.test(k)) targetIfaces[k] = true; });
+        allIfaces.forEach((k) => {
+            if (BODY_SKIP_IFACE_RE.test(k)) return;
+            const iv = db.interfaces && db.interfaces[k];
+            const fnames = Object.keys((iv && iv.fields) || {});
+            if (BODY_IFACE_RE.test(k) || fnames.some((f) => BODY_FIELD_RE.test(f) && !BODY_SKIP_FIELD_RE.test(f))) {
+                targetIfaces[k] = true;
+            }
+        });
 
         const targetList = Object.keys(targetIfaces);
         for (let i = 0; i < targetList.length; i++) {
@@ -1393,7 +1483,7 @@ async function runWorker() {
             if (!iv || !iv.fields) continue;
             const cs = coreMap[name] || null;
             const fnames = Object.keys(iv.fields);
-            const bodyWant = BODY_IFACE_RE.test(name) ? fnames.filter((f) => BODY_FIELD_RE.test(f) && !/dynamicRange|speedRange|scaleRange|freqRange|audio/i.test(f)).slice(0, 32) : [];
+            const bodyWant = fnames.filter((f) => BODY_FIELD_RE.test(f) && !BODY_SKIP_FIELD_RE.test(f)).slice(0, 40);
             const coreWant = cs ? cs.fields.filter((f) => !!iv.fields[f]) : [];
             const merged = {};
             coreWant.concat(bodyWant).forEach((fname) => {
@@ -1403,20 +1493,34 @@ async function runWorker() {
             const mergedKeys = Object.keys(merged);
             if (!mergedKeys.length) continue;
             try {
-                let opened = await openDynamicProxies(name, merged, [], [], 1);
-                if (!opened.list.length) opened = await openWildcardProxies(name, 1);
+                let opened = await openWildcardProxies(name, 3);
+                if (!opened.list.length) opened = await openDynamicProxies(name, merged, [], [], 3);
                 if (!opened.list.length) continue;
-                const px = opened.list[0].proxy;
-                mergedKeys.forEach((fname) => {
-                    const fm = iv.fields[fname] || {};
-                    const isCore = cs && cs.fields.indexOf(fname) >= 0;
-                    const isBody = bodyWant.indexOf(fname) >= 0;
-                    const handler = (val) => {
-                        if (isCore) cs.onField(fname, val);
-                        if (isBody) interpretBodyField(name, fname, val, pushPatch, tracker.state);
-                    };
-                    if (fm.notifier !== false) { try { px.subscribe({ name: fname, onReceive: handler }); } catch (e) {} }
-                    if (fm.getter !== false) { try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {} }
+                const cfgFields = (opened.cfg && opened.cfg.fields) || {};
+                opened.list.forEach((instItem, instIdx) => {
+                    const px = instItem.proxy;
+                    mergedKeys.forEach((fname) => {
+                        const fm = iv.fields[fname] || {};
+                        const cf = cfgFields[fname] || {};
+                        const canGet = cf.getter !== undefined ? !!cf.getter : (fm.getter !== false);
+                        const canSub = (cf.event !== undefined || cf.notifier !== undefined) ? !!(cf.event || cf.notifier) : (fm.notifier !== false);
+                        const isCore = cs && cs.fields.indexOf(fname) >= 0;
+                        const isBody = bodyWant.indexOf(fname) >= 0;
+                        const handler = (rawVal) => {
+                            if (rawVal === undefined || rawVal === null) return;
+                            const val = cf.schema ? decodeWireVal(rawVal, cf.schema) : rawVal;
+                            bodyLive[name + '.' + fname] = val;
+                            if (isCore) cs.onField(fname, val);
+                            if (isBody) interpretBodyField(name, fname, val, pushPatch, tracker.state);
+                        };
+                        if (canSub) { try { px.subscribe({ name: fname, onReceive: handler }); } catch (e) {} }
+                        if (canGet) {
+                            try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {}
+                            if (instIdx === 0 && (isBody || /\.TPMS$|CheckControl|KombiInterface/i.test(name))) {
+                                bodyPollers.push(() => { try { px.getValue(fname, 1600).then(handler).catch(() => {}); } catch (e) {} });
+                            }
+                        }
+                    });
                 });
             } catch (e) {}
         }
@@ -1476,7 +1580,12 @@ async function runWorker() {
                         }
                     };
                     if (f.notifier) { try { px.subscribe({ name: f.name, onReceive: onVal }); } catch (e) {} }
-                    if (f.getter) { try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {} }
+                    if (f.getter) {
+                        try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {}
+                        if (/\.lsc\./i.test(desc.iface) && /pressureTyre|mileageRange|^range$|dataRangeDisplay|fuelSupply|positionWindow|positionSHD|dWAStatus/i.test(f.name)) {
+                            bodyPollers.push(() => { try { px.getValue(f.name, 1600).then(onVal).catch(() => {}); } catch (e) {} });
+                        }
+                    }
                 });
             });
         }
@@ -1507,9 +1616,13 @@ async function runWorker() {
         }
     }
 
+    // Number of request bytes echoed in a positive UDS response (ISO 14229: 0x19 echoes ONLY sub-function [0], NOT statusMask [1]!)
+    const UDS_ECHO_LEN = { 0x10: 1, 0x11: 1, 0x19: 1, 0x27: 1, 0x22: 2, 0x01: 1, 0x09: 1 };
+
     /** Send a single physical UDS/OBD read over InternalTasu with proper echo matching & busy retry. */
     async function udsQuery(ecu, sid, reqBytes, timeoutMs) {
         if (!tasuProxy) return null;
+        const echoLen = UDS_ECHO_LEN[sid] !== undefined ? UDS_ECHO_LEN[sid] : reqBytes.length;
         return new Promise((resolve) => {
             let done = false, timer = null;
             const onFrame = (f) => {
@@ -1517,10 +1630,10 @@ async function runWorker() {
                 const u = f.uds;
                 if (u[0] === 0x7F && u[1] === sid && u[2] === 0x78) {
                     clearTimeout(timer);
-                    timer = setTimeout(() => finish(null), 5000);
+                    timer = setTimeout(() => finish(null), 6000);
                     return;
                 }
-                const matchPos = u[0] === sid + 0x40 && reqBytes.every((b, idx) => u[idx + 1] === b);
+                const matchPos = u[0] === sid + 0x40 && reqBytes.slice(0, echoLen).every((b, idx) => u[idx + 1] === b);
                 const matchNeg = u[0] === 0x7F && u[1] === sid;
                 if (!matchPos && !matchNeg) return;
                 finish(matchPos ? u : null);
@@ -1534,18 +1647,83 @@ async function runWorker() {
                 resolve(v);
             };
             tasuListeners.push(onFrame);
-            timer = setTimeout(() => finish(null), timeoutMs || 2200);
+            timer = setTimeout(() => finish(null), (timeoutMs || 2400) + 3500);
 
             const sendAttempt = (n) => {
                 nativeTick(() => tasuProxy.callMethod('sendTasuRequest', {
                     sourceAddress: 0xF2, targetAddress: ecu, serviceID: sid, subroutineID: 0,
                     udsDataLength: reqBytes.length, udsData: Buffer.from(reqBytes), deadlockTime: 0,
-                }, 2200)).then((r) => {
-                    const verdict = r && typeof r === 'object' ? String(r.TasuErrorEnum || '') : '';
-                    if (/TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(verdict) && n < 2 && !done) {
-                        setTimeout(() => { if (!done) sendAttempt(n + 1); }, 220 * (n + 1));
+                }, 3500)).then((r) => {
+                    const v = r && typeof r === 'object' ? (r.TasuErrorEnum || Object.keys(r).map((k) => r[k]).find((x) => typeof x === 'string')) : r;
+                    const verdict = v === undefined ? 'NO_ERROR' : String(v);
+                    if (/TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(verdict) && n < 4 && !done) {
+                        setTimeout(() => { if (!done) sendAttempt(n + 1); }, 350 * (n + 1));
+                        return;
+                    }
+                    if (!done) {
+                        clearTimeout(timer);
+                        timer = setTimeout(() => finish(null), timeoutMs || 2400);
                     }
                 }).catch(() => finish(null));
+            };
+            sendAttempt(0);
+        });
+    }
+
+    /** Send a functional UDS broadcast (0xDF) to all awake ECUs at once, matching BMW ts_diagnostic_service. */
+    async function udsFunctional(sid, reqBytes, idleMs, maxMs) {
+        if (!tasuProxy) return {};
+        const echoLen = UDS_ECHO_LEN[sid] !== undefined ? UDS_ECHO_LEN[sid] : reqBytes.length;
+        const waitIdle = idleMs || 2500;
+        const waitMax = maxMs || 13000;
+        return new Promise((resolve) => {
+            const replies = {};
+            let done = false, idleTimer = null, hardTimer = null;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                clearTimeout(idleTimer);
+                clearTimeout(hardTimer);
+                const idx = tasuListeners.indexOf(onFrame);
+                if (idx >= 0) tasuListeners.splice(idx, 1);
+                resolve(replies);
+            };
+            const kick = (ms) => {
+                clearTimeout(idleTimer);
+                idleTimer = setTimeout(finish, ms);
+            };
+            const onFrame = (f) => {
+                const u = f.uds;
+                if (!u || !u.length) return;
+                const matchPos = u[0] === sid + 0x40 && reqBytes.slice(0, echoLen).every((b, idx) => u[idx + 1] === b);
+                const matchNeg = u[0] === 0x7F && u[1] === sid;
+                if (!matchPos && !matchNeg) return;
+                const pending = u[0] === 0x7F && u[2] === 0x78;
+                if (!pending || !replies[f.ecu]) replies[f.ecu] = u;
+                kick(pending ? 8000 : waitIdle);
+            };
+            tasuListeners.push(onFrame);
+            hardTimer = setTimeout(finish, waitMax + 6000);
+
+            const sendAttempt = (n) => {
+                nativeTick(() => tasuProxy.callMethod('sendTasuRequest', {
+                    sourceAddress: 0xF2, targetAddress: 0xDF, serviceID: sid, subroutineID: 0,
+                    udsDataLength: reqBytes.length, udsData: Buffer.from(reqBytes), deadlockTime: 0,
+                }, 5000)).then((r) => {
+                    const v = r && typeof r === 'object' ? (r.TasuErrorEnum || Object.keys(r).map((k) => r[k]).find((x) => typeof x === 'string')) : r;
+                    const verdict = v === undefined ? 'NO_ERROR' : String(v);
+                    if (/TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(verdict) && n < 4 && !done) {
+                        setTimeout(() => { if (!done) sendAttempt(n + 1); }, 800 * (n + 1));
+                        return;
+                    }
+                    if (!/^(NO_ERROR|REQUEST_PENDING|0|1)$/i.test(verdict)) {
+                        finish();
+                        return;
+                    }
+                    clearTimeout(hardTimer);
+                    hardTimer = setTimeout(finish, waitMax);
+                    if (!done && !idleTimer) kick(waitIdle + 1800);
+                }).catch(() => finish());
             };
             sendAttempt(0);
         });
@@ -1638,6 +1816,14 @@ async function runWorker() {
             if (u && u.length > idx && u[idx] !== 255) {
                 const cl = u[idx] - 40;
                 if (cl >= -40 && cl <= 150) patch.coolantC = cl;
+            }
+        }
+        if (tracker.state.oilC === null) {
+            u = (await udsQuery(0x12, 0x22, [0xF4, 0x5C], 1400)) || (await udsQuery(0x12, 0x01, [0x5C], 1400));
+            const idx = u && (u[0] === 0x62 ? 3 : 2);
+            if (u && u.length > idx && u[idx] !== 255 && u[idx] !== 40) {
+                const oil = u[idx] - 40;
+                if (oil >= -35 && oil <= 165) patch.oilC = oil;
             }
         }
 
@@ -2034,23 +2220,51 @@ async function runWorker() {
     /** Perform read-only Multi-ECU Health Scan (ISO 14229 UDS 0x19 02 0C — zero erase/write) over InternalTasu. */
     async function scanVehicleHealth() {
         await readVitalsUDS();
-        const targets = [0x12, 0x18, 0x40, 0x29, 0x78, 0x60, 0x63, 0x57];
+        bodyPollers.forEach((fn) => { try { fn(); } catch (e) {} });
+
+        const coreTargets = [0x12, 0x18, 0x40, 0x29, 0x78, 0x60, 0x63, 0x06];
+        const funcMap = tasuProxy ? await udsFunctional(0x19, [0x02, 0x0C], 1600, 9000) : {};
+
+        // Physical fallback for any of the 8 core ECUs not yet in the 0xDF broadcast map
+        if (tasuProxy) {
+            for (let i = 0; i < coreTargets.length; i++) {
+                const addr = coreTargets[i];
+                if (funcMap[addr] && funcMap[addr][0] === 0x59) continue;
+                const u = await udsQuery(addr, 0x19, [0x02, 0x0C], 1600);
+                if (u) funcMap[addr] = u;
+                else if (addr === 0x06 && !funcMap[0x57]) {
+                    const u57 = await udsQuery(0x57, 0x19, [0x02, 0x0C], 1200);
+                    if (u57) funcMap[0x57] = u57;
+                }
+            }
+        }
+
+        // Order: 8 core ECUs first, followed by any additional awake ECUs discovered via 0xDF
+        const seenAddr = {};
+        const orderedAddrs = [];
+        coreTargets.forEach((a) => {
+            const actualAddr = (a === 0x06 && !funcMap[0x06] && funcMap[0x57]) ? 0x57 : a;
+            if (!seenAddr[actualAddr]) { seenAddr[actualAddr] = true; orderedAddrs.push(actualAddr); }
+        });
+        Object.keys(funcMap).map(Number).sort((a, b) => a - b).forEach((a) => {
+            if (!seenAddr[a] && funcMap[a] && funcMap[a][0] === 0x59) {
+                seenAddr[a] = true;
+                orderedAddrs.push(a);
+            }
+        });
+
         const modules = [];
         const faults = [];
         let answered = 0;
         let activeFaultCount = 0;
         let storedFaultCount = 0;
 
-        for (let i = 0; i < targets.length; i++) {
-            const addr = targets[i];
+        for (let i = 0; i < orderedAddrs.length; i++) {
+            const addr = orderedAddrs[i];
             const ecuHex = (addr < 16 ? '0' : '') + addr.toString(16).toUpperCase();
             const ecuName = ECU_NAMES[addr] || ('ECU 0x' + ecuHex);
-            if (!tasuProxy) {
-                modules.push({ ecu: ecuHex, name: ecuName, ok: null, faultCount: 0 });
-                continue;
-            }
-            const u = await udsQuery(addr, 0x19, [0x02, 0x0C], 1400);
-            if (!u) {
+            const u = funcMap[addr];
+            if (!u || u[0] !== 0x59) {
                 modules.push({ ecu: ecuHex, name: ecuName, ok: null, faultCount: 0 });
                 continue;
             }
@@ -2088,7 +2302,7 @@ async function runWorker() {
         const report = {
             checkedAt: Date.now(),
             tasuReady: !!tasuProxy,
-            ecusScanned: targets.length,
+            ecusScanned: orderedAddrs.length,
             ecusAnswered: answered,
             activeFaultCount,
             storedFaultCount,
@@ -2097,7 +2311,7 @@ async function runWorker() {
             batteryStatus,
             lowTires,
             openEntries,
-            overall: needsAttention ? 'attention' : 'all_good',
+            overall: answered === 0 ? 'no_link' : (needsAttention ? 'attention' : 'all_good'),
         };
         pushPatch({ health: report });
         return report;
@@ -2106,7 +2320,46 @@ async function runWorker() {
     async function handleParentCmd(cmd) {
         const reqId = cmd.reqId;
         if (cmd.op === 'refresh_vitals') {
+            bodyPollers.forEach((fn) => { try { fn(); } catch (e) {} });
             await readVitalsUDS();
+            emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
+        } else if (cmd.op === 'ingest_oap_body') {
+            const fMap = (cmd.params && cmd.params.fields) || {};
+            Object.keys(fMap).forEach((fullKey) => {
+                const val = fMap[fullKey];
+                if (val === undefined || val === null) return;
+                bodyLive[fullKey] = val;
+                const dot = fullKey.lastIndexOf('.');
+                const ifn = dot > 0 ? fullKey.slice(0, dot) : '';
+                const fname = dot > 0 ? fullKey.slice(dot + 1) : fullKey;
+                if (fname === 'VehicleCondition') {
+                    const c = parseCondition(val && val.statusConditionVehicle !== undefined ? val.statusConditionVehicle : val);
+                    if (c !== null) pushPatch({ condition: c });
+                } else if (fname === 'statusNewCurrentUnitsStatusExt' && val && typeof val === 'object') {
+                    const pm = { 1: 'BAR', 2: 'KPA', 3: 'PSI', BAR: 'BAR', KPA: 'KPA', PSI: 'PSI' }[val.unitOfMeasurementAirPressure];
+                    const tm = { 1: 'C', 2: 'F', C: 'C', F: 'F' }[val.unitOfMeasurementTemperature];
+                    if (pm) carUnits.press = pm;
+                    if (tm) carUnits.temp = tm;
+                } else if (fname === 'ExteriorTemperature' && val && typeof val.temperatureExterior === 'number' && val.temperatureExterior < 250) {
+                    const amb = +(val.temperatureExterior * 0.5 - 40).toFixed(1);
+                    if (amb >= -45 && amb <= 60) pushPatch({ ambientC: amb });
+                } else if (fname === 'basicList') {
+                    ccTracker.feedBasicList(val);
+                    ccTracker.applyToState(pushPatch, tracker.state);
+                } else if (fname === 'ccList' || fname === 'newCCMessage') {
+                    ccTracker.feedCcNames(val);
+                    ccTracker.applyToState(pushPatch, tracker.state);
+                } else if (fname === 'cbsDataServiceList') {
+                    const cbs = parseKombiCbsList(val);
+                    if (cbs) pushPatch({ cbsList: cbs });
+                } else if (/^status(Target)?Tyre(Pressure|Temperature)$/i.test(fname)) {
+                    interpretTpmsField(fname, val, carUnits, pushPatch, tracker.state);
+                }
+                if (/\.lsc\./i.test(ifn) || /positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|pressureTyre|tyrePressure/i.test(fname)) {
+                    interpretLscField(fname, val, pushPatch, tracker.state, carUnits);
+                }
+                interpretBodyField(ifn, fname, val, pushPatch, tracker.state);
+            });
             emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
         } else if (cmd.op === 'scan_health') {
             const report = await scanVehicleHealth();
@@ -2125,7 +2378,7 @@ async function runWorker() {
             const cfgMap = {};
             Object.keys(climateProxies).forEach((k) => { cfgMap[k] = climateProxies[k].cfgSummary; });
             const relatedInterfaces = Object.keys((db && db.interfaces) || {}).filter((n) =>
-                !NON_CLIMATE_IFACE_RE.test(n) && /lsc|timer|zeitschalt|stand|park|remote|rcn|precon|climate|charge|teleservice/i.test(n)
+                !NON_CLIMATE_IFACE_RE.test(n) && /lsc|timer|zeitschalt|stand|park|remote|rcn|precon|climate|charge|teleservice|door|flap|klappe|checkcontrol|cbs/i.test(n)
             ).sort();
             emit({
                 ev: 'reply',
@@ -2136,6 +2389,7 @@ async function runWorker() {
                     relatedInterfaces,
                     openConfigs: cfgMap,
                     live: climateLive,
+                    bodyLive,
                     pinnedProfile: readJsonSafe(PROFILE_PATH),
                 },
             });
@@ -2144,8 +2398,13 @@ async function runWorker() {
 
     emit({ ev: 'ready', discoveredClimate: climateCatalog.interfaces.length });
     emit({ ev: 'telemetry', state: tracker.state, activeTrip: null, lastTrip: null });
-    // Read accurate Fuel %, 12V Voltage, Odometer & Temps once shortly after startup
+    // Read accurate Fuel %, 12V Voltage, Odometer & Temps once shortly after startup, and refresh non-notifying SOME/IP getters gently
     setTimeout(() => { readVitalsUDS().catch(() => {}); }, 2500);
+    if (bodyPollers.length) {
+        setInterval(() => {
+            for (let i = 0; i < bodyPollers.length; i++) bodyPollers[i]();
+        }, 15000);
+    }
 }
 
 /* ---------------- VIN / VCM FA Chassis Decoder & Strict Field Interpreters ---------------- */
@@ -2257,10 +2516,10 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/centralLock|lockState|^statusLock/i.test(fname)) {
+    if (/centralLock|lockState|^statusLock|zentralverriegelung|verriegelung/i.test(fname) && !/bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
-        if (/LOCKED|SECURED/.test(s) && !/UNLOCKED/.test(s)) pushPatch({ locked: true });
-        else if (/UNLOCKED/.test(s)) pushPatch({ locked: false });
+        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) pushPatch({ locked: true });
+        else if (/(^|_|")(UNLOCKED|ENTRIEGELT)(_|$|")/.test(s) && !/LOCKED|VERRIEGELT/.test(s)) pushPatch({ locked: false });
         return;
     }
 
@@ -2269,30 +2528,117 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/door|tailgate|trunk|bonnet|hood/i.test(key) && !/mirror|light|handle|heating/i.test(fname)) {
-        const s = JSON.stringify(val).toUpperCase();
-        const isOpen = /\"OPEN\"|_OPEN|AJAR/.test(s) && !/CLOSED|NOT_OPEN/.test(s);
-        if (/tailgate|trunk/i.test(key)) pushPatch({ trunkOpen: isOpen });
-        else if (/bonnet|hood/i.test(key)) pushPatch({ hoodOpen: isOpen });
-        else if (isOpen && curState.doorsOpen.indexOf(fname) < 0) {
-            pushPatch({ doorsOpen: curState.doorsOpen.concat([fname]).slice(0, 4) });
-        } else if (!isOpen && curState.doorsOpen.indexOf(fname) >= 0) {
-            pushPatch({ doorsOpen: curState.doorsOpen.filter((x) => x !== fname) });
-        }
+    if (/door|tuer|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|flap|klappe|checkControl/i.test(key) &&
+        !/mirror|spiegel|light|licht|handle|griff|heating|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tank|charge|lade/i.test(fname)) {
+        interpretClosureLeaves(key, val, pushPatch, curState);
     }
 }
 
+const CLOSURE_SKIP_KEY_RE = /exhaust|abgas|radiator|kuehler|jalousie|cooling|climate|airFlap|vent|defrost|charge|charging|lade|tank|fuel|sunroof|shd|window|fenster|mirror|spiegel|handle|griff|light|licht|heating|lock|verriegel|available|verfuegbar|coding|codier/i;
+const CLOSURE_INVALID_VAL_RE = /UNGUELTIG|UNBEFUELLT|INVALID|UNKNOWN|UNAVAILABLE|NICHT_VERFUEGBAR|KEINE_ANGABE|NO_VALUE|INIT/i;
+const CLOSURE_CLOSED_VAL_RE = /(^|_)(CLOSED|GESCHLOSSEN|ZU|NOT_OPEN|NICHT_OFFEN|NICHT_GEOEFFNET)(_|$)/i;
+const CLOSURE_OPEN_VAL_RE = /(^|_)(OPEN|OPENED|OFFEN|GEOEFFNET|AJAR|ZWISCHENSTELLUNG|NOT_CLOSED|NICHT_GESCHLOSSEN)(_|$)/i;
+
+function friendlyDoorLabel(pathKey) {
+    if (/DRDR|driverRear|rearLeft|backLeft|HL\b|RL\b/i.test(pathKey)) return 'Cửa Sau Trái';
+    if (/PSDR|passengerRear|rearRight|backRight|HR\b|RR\b/i.test(pathKey)) return 'Cửa Sau Phải';
+    if (/DRD\b|driver|frontLeft|VL\b|FL\b/i.test(pathKey)) return 'Cửa Tài';
+    if (/PSD\b|passenger|frontRight|VR\b|FR\b/i.test(pathKey)) return 'Cửa Phụ';
+    return 'Cửa xe';
+}
+
+function interpretClosureLeaves(rootKey, val, pushPatch, curState) {
+    const doorMap = Object.assign({}, curState._doorMap || {});
+    let doorsTouched = false;
+    let nextHood = curState.hoodOpen;
+    let nextTrunk = curState.trunkOpen;
+
+    const visit = (kPath, v, depth) => {
+        if (v === null || v === undefined || depth > 5) return;
+        if (typeof v === 'object') {
+            if (Array.isArray(v)) {
+                for (let i = 0; i < v.length; i++) visit(kPath + '[' + i + ']', v[i], depth + 1);
+            } else {
+                const ks = Object.keys(v);
+                for (let i = 0; i < ks.length; i++) {
+                    if (CLOSURE_SKIP_KEY_RE.test(ks[i])) continue;
+                    visit(kPath + '.' + ks[i], v[ks[i]], depth + 1);
+                }
+            }
+            return;
+        }
+        if (CLOSURE_SKIP_KEY_RE.test(kPath)) return;
+        const sv = String(v).toUpperCase();
+        if (CLOSURE_INVALID_VAL_RE.test(sv)) return;
+
+        // CheckControl explicit text/enum identifiers
+        if (/checkControl/i.test(kPath) && typeof v === 'string') {
+            if (/FRONTKLAPPE|MOTORHAUBE|BONNET|ENGINE_HOOD|HOOD_OPEN|CA_PO|CAPO/i.test(sv)) nextHood = true;
+            if (/HECKKLAPPE|BOOT_LID|TAILGATE_OPEN|TRUNK_OPEN/i.test(sv)) nextTrunk = true;
+            return;
+        }
+
+        let isClosed = false, isOpen = false;
+        if (typeof v === 'string') {
+            isClosed = CLOSURE_CLOSED_VAL_RE.test(sv);
+            isOpen = !isClosed && CLOSURE_OPEN_VAL_RE.test(sv);
+        } else if (typeof v === 'boolean') {
+            if (/open|offen|geoeffnet|ajar/i.test(kPath)) { isOpen = v; isClosed = !v; }
+            else if (/closed|geschlossen/i.test(kPath)) { isClosed = v; isOpen = !v; }
+        }
+        if (!isOpen && !isClosed) return;
+
+        if (/frontFlap|engineFlap|engineHood|motorhaube|frontklappe|bonnet|\bhood\b|hoodContact|hoodSwitch/i.test(kPath)) {
+            nextHood = isOpen;
+        } else if (/rearFlap|tailgate|trunk|bootLid|luggageCompartment|heckklappe|heckdeckel|kofferraum|gepaeckraum|splitDoor/i.test(kPath)) {
+            nextTrunk = isOpen;
+        } else if (/(door|tuer)/i.test(kPath) && !/garage/i.test(kPath)) {
+            const lbl = friendlyDoorLabel(kPath);
+            if (doorMap[lbl] !== isOpen) {
+                doorMap[lbl] = isOpen;
+                doorsTouched = true;
+            }
+        }
+    };
+
+    visit(rootKey, val, 0);
+    const patch = {};
+    if (nextHood !== curState.hoodOpen) patch.hoodOpen = nextHood;
+    if (nextTrunk !== curState.trunkOpen) patch.trunkOpen = nextTrunk;
+    if (doorsTouched) {
+        patch._doorMap = doorMap;
+        patch.doorsOpen = Object.keys(doorMap).filter((k) => doorMap[k]);
+    }
+    if (Object.keys(patch).length) pushPatch(patch);
+}
+
 const ECU_NAMES = {
-    0x12: 'DME (Động cơ)',
-    0x18: 'EGS (Hộp số ZF 8HP)',
-    0x40: 'BDC (Thân vỏ & Chìa)',
-    0x29: 'DSC (Phanh ABS/DSC)',
-    0x78: 'IHKA (Điều hoà)',
-    0x60: 'KOMBI (Đồng hồ)',
-    0x63: 'HU_MGU (Màn hình trung tâm)',
-    0x57: 'ICAM/TRSVC (Cam 360°)',
     0x01: 'ACSM (Túi khí)',
-    0x56: 'FZD (Báo động DWA)',
+    0x06: 'ICAM (Cam 360°)',
+    0x0D: 'HKFM (Cốp điện)',
+    0x10: 'BDC-GW (Cổng trung tâm)',
+    0x12: 'DME (Động cơ)',
+    0x18: 'EGS (Hộp số ZF)',
+    0x29: 'DSC (Phanh DSC)',
+    0x2C: 'USS (Cảm biến đỗ)',
+    0x30: 'EPS (Thước lái)',
+    0x37: 'RAM (Âm thanh)',
+    0x38: 'VTG (Hộp phụ xDrive)',
+    0x39: 'DSC2 (Trợ lực phanh)',
+    0x40: 'BDC (Thân vỏ & Chìa)',
+    0x43: 'FLM-L (Đèn pha trái)',
+    0x44: 'FLM-R (Đèn pha phải)',
+    0x56: 'FZD (Trần xe/DWA)',
+    0x57: 'TRSVC (Cam 360°)',
+    0x5D: 'KAFAS (Cam kính lái)',
+    0x5E: 'GWS (Cần số)',
+    0x60: 'KOMBI (Đồng hồ)',
+    0x61: 'ATM (Viễn thông)',
+    0x63: 'HU_MGU (Màn hình)',
+    0x64: 'PDC (Đỗ xe)',
+    0x67: 'ZBE (Núm iDrive)',
+    0x6D: 'SM (Ghế điện)',
+    0x78: 'IHKA (Điều hoà)',
 };
 
 function parseDtcResponse(uds) {
@@ -2314,28 +2660,214 @@ function parseDtcResponse(uds) {
     return { ok: true, dtcs: out };
 }
 
-/** Scale BMW LSCDataSink / RDC raw tire pressure value to bar (`25` -> `2.5 bar`, `125` -> `2.5 bar`, `250` -> `2.5 bar`). */
-function scaleTireBar(raw) {
+/** Scale BMW TPMS / LSCDataSink raw tire pressure value to bar (0.1 * raw in car unit: bar 0.5..6, psi 7..60, kPa 60..600; >=65532 or 255 invalid). */
+function scaleTireBar(raw, pressUnit) {
     if (typeof raw !== 'number' || !isFinite(raw)) return null;
-    if (raw <= 0 || raw === 63 || raw === 127 || raw === 254 || raw === 255 || raw === 511 || raw >= 4094) return null;
+    if (raw <= 0 || raw === 255 || raw >= 65532) return null;
     if (raw >= 0.8 && raw <= 5.5 && Math.floor(raw) !== raw) return +raw.toFixed(2);
-    if (raw >= 1 && raw <= 5 && Math.floor(raw) === raw) return +raw.toFixed(2);
-    if (raw >= 8 && raw <= 55) return +(raw * 0.1).toFixed(2);
-    if (raw >= 56 && raw <= 179) return +(raw * 0.02).toFixed(2);
-    if (raw >= 180 && raw <= 520) return +(raw * 0.01).toFixed(2);
+    const v = raw * 0.1;
+    if (pressUnit === 'BAR') return (v >= 0.5 && v <= 6.0) ? +v.toFixed(2) : null;
+    if (pressUnit === 'PSI') return (v >= 7 && v <= 90) ? +(v / 14.5038).toFixed(2) : null;
+    if (pressUnit === 'KPA') return (v >= 50 && v <= 600) ? +(v / 100).toFixed(2) : null;
+    if (v >= 0.5 && v <= 6.0) return +v.toFixed(2);
+    if (v >= 7 && v < 60) return +(v / 14.5038).toFixed(2);
+    if (v >= 60 && v <= 600) return +(v / 100).toFixed(2);
     return null;
 }
 
-/** Decode BMW ConnectedDrive Last State Call (`LSCDataSink`) TPMS, 4-Window, Sunroof, DWA Alarm & KOMBI Range structs. */
-function interpretLscField(fname, val, pushPatch, curState) {
-    if (val === undefined || val === null) return;
+function scaleTireTempC(raw, tempUnit) {
+    if (typeof raw !== 'number' || !isFinite(raw) || raw === 255 || raw >= 65532 || raw < 0) return null;
+    let t = raw - 40;
+    if (tempUnit === 'F') t = (t - 32) * 5 / 9;
+    if (t < -40 || t > 150) return null;
+    return Math.round(t);
+}
 
-    // 1. 4-Wheel Tire Pressure (`actualValuePressureTyre` & `statusTargetTyrePressure`)
+function interpretTpmsField(fname, val, units, pushPatch, curState) {
+    if (!val || typeof val !== 'object') return;
+    const u = units || {};
+    if (/Temperature/i.test(fname)) {
+        const curTires = Object.assign({
+            fl: null, fr: null, rl: null, rr: null,
+            targetFl: null, targetFr: null, targetRl: null, targetRr: null,
+            tempFl: null, tempFr: null, tempRl: null, tempRr: null,
+            updatedAt: 0,
+        }, curState.tires || {});
+        let changed = false;
+        const tSlots = [
+            ['actualValueTemperatureTyreFLH', 'tempFl'],
+            ['actualValueTemperatureTyreFRH', 'tempFr'],
+            ['actualValueTemperatureTyreRLH', 'tempRl'],
+            ['actualValueTemperatureTyreRRH', 'tempRr'],
+        ];
+        for (let i = 0; i < tSlots.length; i++) {
+            const tc = scaleTireTempC(val[tSlots[i][0]], u.temp);
+            if (tc !== null && curTires[tSlots[i][1]] !== tc) {
+                curTires[tSlots[i][1]] = tc;
+                changed = true;
+            }
+        }
+        if (changed) {
+            curTires.updatedAt = Date.now();
+            pushPatch({ tires: curTires });
+        }
+        return;
+    }
+    interpretLscField(fname, val, pushPatch, curState, u);
+}
+
+/** Stateful tracker combining CheckControlMaster.basicList + KombiInterface_2.ccList / newCCMessage. */
+class CheckControlTracker {
+    constructor() {
+        this.active = {};    // id -> { ecu, reason }
+        this.names = {};     // id -> { name, color }
+        this.sawList = false;
+    }
+
+    _walk(o, fn, depth) {
+        if (!o || typeof o !== 'object' || (depth || 0) > 6) return;
+        if (Array.isArray(o)) {
+            for (let i = 0; i < o.length; i++) this._walk(o[i], fn, (depth || 0) + 1);
+            return;
+        }
+        fn(o);
+        const ks = Object.keys(o);
+        for (let i = 0; i < ks.length; i++) {
+            if (o[ks[i]] && typeof o[ks[i]] === 'object') this._walk(o[ks[i]], fn, (depth || 0) + 1);
+        }
+    }
+
+    feedCcNames(v) {
+        this._walk(v, (o) => {
+            const id = o.cCIdentifer !== undefined ? o.cCIdentifer : o.cCIdentifier;
+            const nm = o.cCShortName || o.cCName;
+            if (id !== undefined && nm) {
+                this.names[String(id)] = {
+                    name: String(nm).replace(/[\x00-\x1f\x7f]/g, '').trim(),
+                    color: String(o.cCColor !== undefined ? o.cCColor : '').toUpperCase(),
+                };
+            }
+        }, 0);
+    }
+
+    feedBasicList(v) {
+        this.sawList = true;
+        const isFullArray = Array.isArray(v) || (v && typeof v === 'object' && (Array.isArray(v.basicList) || Array.isArray(v.value)));
+        const next = isFullArray ? {} : Object.assign({}, this.active);
+        this._walk(v, (o) => {
+            if (o.ccmId === undefined) return;
+            const id = String(o.ccmId);
+            const on = o.activeState === 'AKTIV' || o.activeState === 0 || o.activeState === true;
+            if (on) next[id] = { ecu: o.requestorDiagAddr, reason: String(o.reason || '') };
+            else delete next[id];
+        }, 0);
+        this.active = next;
+    }
+
+    applyToState(pushPatch, curState) {
+        if (!this.sawList) return;
+        const list = [];
+        let ccHood = false;
+        let ccTrunk = false;
+        const ccDoors = [];
+        const ids = Object.keys(this.active);
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            const meta = this.names[id] || {};
+            const nm = meta.name || '';
+            const col = meta.color || '';
+            const sev = (col === 'RED' || col === '1') ? 'crit' : ((col === 'YELLOW' || col === 'ORANGE' || col === '2' || col === '4') ? 'warn' : 'info');
+            list.push({
+                id: Number(id) || id,
+                name: nm || ('Check-Control #' + id),
+                severity: sev,
+                ecu: this.active[id].ecu,
+            });
+            if (nm) {
+                if (/ca-pô|ca pô|capo|nắp máy|bonnet|engine hood|\bhood\b|frontklappe|motorhaube/i.test(nm)) {
+                    ccHood = true;
+                } else if (/cốp|khoang hành lý|cửa hậu|cửa sau mở|tailgate|boot lid|\bboot open\b|\btrunk\b|heckklappe|gepaeckraum/i.test(nm)) {
+                    ccTrunk = true;
+                } else if (/cửa.*(mở|chưa đóng)|mở cửa|door open|front door|rear door|driver.*door|passenger.*door|tür offen|tuer offen|fahrertür|beifahrertür/i.test(nm) &&
+                    !/ca-pô|ca pô|capo|cốp|sổ trời|kính|xăng|sạc/i.test(nm)) {
+                    ccDoors.push(nm);
+                }
+            }
+        }
+        const patch = { checkControl: list };
+        if (ccHood) {
+            patch.hoodOpen = true;
+            patch._ccHood = true;
+        } else if (curState._ccHood) {
+            patch.hoodOpen = false;
+            patch._ccHood = false;
+        }
+        if (ccTrunk) {
+            patch.trunkOpen = true;
+            patch._ccTrunk = true;
+        } else if (curState._ccTrunk) {
+            patch.trunkOpen = false;
+            patch._ccTrunk = false;
+        }
+        if (ccDoors.length) {
+            patch.doorsOpen = ccDoors.slice(0, 4);
+            patch._ccDoors = true;
+        } else if (curState._ccDoors) {
+            patch.doorsOpen = Object.keys(curState._doorMap || {}).filter((k) => curState._doorMap[k]);
+            patch._ccDoors = false;
+        }
+        pushPatch(patch);
+    }
+}
+
+const CBS_FALLBACK_NAMES = {
+    1: 'Dầu động cơ', 2: 'Má phanh trước', 3: 'Dầu phanh',
+    6: 'Má phanh sau', 10: 'Bugi đánh lửa', 17: 'Kiểm tra xe định kỳ',
+    32: 'Đăng kiểm xe', 100: 'Kiểm tra xe định kỳ',
+};
+
+function findSubKey(v, key, depth) {
+    if (!v || typeof v !== 'object' || (depth || 0) > 5) return null;
+    if (v[key] !== undefined) return v;
+    const ks = Object.keys(v);
+    for (let i = 0; i < ks.length; i++) {
+        const r = findSubKey(v[ks[i]], key, (depth || 0) + 1);
+        if (r) return r;
+    }
+    return null;
+}
+
+function parseKombiCbsList(v) {
+    const arr = Array.isArray(v) ? v : (v && (v.cbsDataServiceList || v.value));
+    if (!Array.isArray(arr)) return null;
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+        const s = findSubKey(arr[i], 'cBSIdentifier', 0);
+        if (!s || s.cBSIdentifier === undefined) continue;
+        const id = Number(s.cBSIdentifier);
+        const rawName = String(s.cBSServcieName || s.cBSServiceName || '').replace(/[\x00-\x1f\x7f]/g, '').trim();
+        const name = (rawName && !/[?\ufffd]/.test(rawName)) ? rawName : (CBS_FALLBACK_NAMES[id] || ('Bảo dưỡng #' + id));
+        const way = String(s.cBSServiceWay || '').replace(/[\x00-\x1f\x7f?]/g, '').trim();
+        const date = String(s.cBSServiceDate || '').replace(/[\x00-\x1f\x7f?]/g, '').trim();
+        const col = String(s.cBSColor !== undefined ? s.cBSColor : '').toUpperCase();
+        const severity = (col === 'RED' || col === '1') ? 'crit' : ((col === 'YELLOW' || col === 'ORANGE' || col === '2' || col === '4') ? 'warn' : 'ok');
+        out.push({ id, name, way, date, severity });
+    }
+    return out;
+}
+
+/** Decode BMW ConnectedDrive Last State Call (`LSCDataSink`) TPMS, 4-Window, Sunroof, DWA Alarm & KOMBI Range structs. */
+function interpretLscField(fname, val, pushPatch, curState, units) {
+    if (val === undefined || val === null) return;
+    const pressUnit = units && units.press;
+
+    // 1. 4-Wheel Tire Pressure (`actualValuePressureTyre`, `statusTyrePressure` & `statusTargetTyrePressure`)
     if (/PressureTyre|TyrePressure|TirePressure/i.test(fname) && typeof val === 'object') {
         const isTarget = /target/i.test(fname);
         const curTires = Object.assign({
             fl: null, fr: null, rl: null, rr: null,
             targetFl: null, targetFr: null, targetRl: null, targetRr: null,
+            tempFl: null, tempFr: null, tempRl: null, tempRr: null,
             updatedAt: 0,
         }, curState.tires || {});
         let changed = false;
@@ -2346,7 +2878,7 @@ function interpretLscField(fname, val, pushPatch, curState) {
             [/RRH|RR$|rearRight|HR$/i, isTarget ? 'targetRr' : 'rr'],
         ];
         Object.keys(val).forEach((k) => {
-            const bar = scaleTireBar(val[k]);
+            const bar = scaleTireBar(val[k], pressUnit);
             if (bar === null) return;
             const keyTarget = isTarget || /target/i.test(k);
             for (let i = 0; i < slots.length; i++) {
@@ -2406,15 +2938,19 @@ function interpretLscField(fname, val, pushPatch, curState) {
     }
 
     // 3. DWA Anti-Theft Alarm & Central Lock Arming (`dWAStatus`)
+    // Note: Cars without Option 302 DWA (statusDWAAlarmHour === 252) permanently report DWA_ENTSCHAERFT even when locked!
     if (/^dWAStatus$/i.test(fname) && typeof val === 'object') {
         const patch = {};
         const arm = String(val.statusDWAArming || '').toUpperCase();
         if (arm === 'DWA_GESCHAERFT' || val.statusDWAArming === 1) {
+            patch._sawDwaArmed = true;
             patch.dwaArmed = true;
             patch.locked = true;
         } else if (arm === 'DWA_ENTSCHAERFT' || val.statusDWAArming === 0) {
-            patch.dwaArmed = false;
-            if (curState.locked === null || curState.locked === true) patch.locked = false;
+            if (curState._sawDwaArmed) {
+                patch.dwaArmed = false;
+                patch.locked = false;
+            }
         }
         const reason = String(val.statusDWAAlarmReason !== undefined ? val.statusDWAAlarmReason : '');
         const alarmOn = !!reason && !/^(KEIN_ALARM|NO_ALARM|SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|KEINE_ANGABE|0|252|253|254|255)$/i.test(reason);
@@ -2528,8 +3064,15 @@ module.exports = {
     explain1crError,
     buildTimerPayload,
     interpretClimateField,
+    interpretBodyField,
+    interpretClosureLeaves,
     interpretLscField,
+    decodeWireVal,
     scaleTireBar,
+    scaleTireTempC,
+    interpretTpmsField,
+    CheckControlTracker,
+    parseKombiCbsList,
     parseDtcResponse,
     ECU_NAMES,
     decodeChassisFromVinOrFa,

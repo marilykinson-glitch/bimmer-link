@@ -37,6 +37,11 @@ const CAM_VIEW_LABELS = {
   right: 'Gương Phải',
 };
 let localAppearance = loadLocal('mybmw_appearance') || { chassis: '', trimLine: '', colour: '' };
+if (localAppearance && localAppearance.chassis === 'F90' && (!localAppearance.trimLine || localAppearance.trimLine === 'clubsport')) {
+  localAppearance.chassis = 'F90LCI';
+  saveLocal('mybmw_appearance', localAppearance);
+}
+let healthScanBusy = false;
 let lastSchema = null;
 let photoBuckets = {};
 let heroBuckets = {};
@@ -826,9 +831,19 @@ function onStatePacket(pkt, ts, isLive) {
   if (!vehicleData.at) vehicleData.at = vehicleData.rxAt;
   saveLocal('mybmw_state', vehicleData);
 
-  if (pkt.appearanceOverride && (pkt.appearanceOverride.chassis || pkt.appearanceOverride.colour || pkt.appearanceOverride.trimLine)) {
-    localAppearance = Object.assign({}, localAppearance, pkt.appearanceOverride);
-    saveLocal('mybmw_appearance', localAppearance);
+  if (!heroPendingOverride && pkt.appearanceOverride && typeof pkt.appearanceOverride === 'object') {
+    const ao = Object.assign({ chassis: '', trimLine: '', colour: '' }, pkt.appearanceOverride);
+    const codedCh = pkt.vehicleProfile && pkt.vehicleProfile.codedChassis;
+    if (ao.chassis === 'F90' && (ao.trimLine === 'clubsport' || codedCh === 'F90LCI')) {
+      ao.chassis = 'F90LCI';
+    }
+    if (ao.chassis || ao.colour || ao.trimLine || (pkt.version && pkt.version >= '0.6.1')) {
+      localAppearance = ao;
+      saveLocal('mybmw_appearance', localAppearance);
+    }
+  }
+  if (healthScanBusy && pkt.telemetry && pkt.telemetry.health && pkt.telemetry.health.checkedAt) {
+    setHealthScanBusy(false);
   }
 
   if (pkt.alert && pkt.alert.reason) {
@@ -1109,6 +1124,7 @@ function onDiagPacket(pkt) {
       clearTimeout(pendingAckTimers[pkt.id]);
       delete pendingAckTimers[pkt.id];
     }
+    if (pkt.cmd === 'scan_health') setHealthScanBusy(false);
     const prefix = pkt.ok ? '✅ ' : '⚠️ ';
     showToast(prefix + (pkt.message || 'Xe đã xử lý lệnh.'), pkt.ok ? '#2fd27a' : '#ffb020', 8500);
     if (pkt.detail) {
@@ -1168,7 +1184,7 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
   if (mqttReady && mqttWs && mqttWs.readyState === 1) {
     try {
       mqttWs.send(mqttBuildPublish(identity.mqttTopics.cmd, pkt, false));
-      // Automatic fallback to ntfy if car hasn't ACKed within 4.2s (e.g. asleep or on secondary relay)
+      const ackWaitMs = cmd === 'scan_health' ? 16000 : 4800;
       pendingAckTimers[cmdId] = setTimeout(() => {
         delete pendingAckTimers[cmdId];
         if (!identity) return;
@@ -1178,7 +1194,7 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
           headers: { 'Content-Type': 'text/plain; charset=utf-8' },
           body: pkt,
         }).catch(() => {});
-      }, 4200);
+      }, ackWaitMs);
       showToast('Đã gửi tức thì tới xe — đang chờ phản hồi…', '#38bdf8', 8000);
       return;
     } catch (e) {}
@@ -1361,15 +1377,20 @@ function renderAll() {
   const prof = (vehicleData && vehicleData.vehicleProfile) || {};
   syncAvailableModelsDropdown(prof.availableModels);
 
+  if (localAppearance.chassis === 'F90' && (localAppearance.trimLine === 'clubsport' || prof.codedChassis === 'F90LCI' || prof.chassis === 'F90LCI')) {
+    localAppearance.chassis = 'F90LCI';
+    saveLocal('mybmw_appearance', localAppearance);
+  }
   const effChassis = localAppearance.chassis || prof.chassis || '';
   const effTrim = localAppearance.trimLine || prof.trimLine || '';
   const effColour = localAppearance.colour || prof.colour || '';
   const chosenSwatch = findSwatchByColourOrLabel(effColour, localAppearance.colour ? '' : prof.paintLabel);
 
-  const computedSeries = effChassis ? (SERIES_TITLES[effChassis] || ('BMW ' + effChassis)) : (prof.series || 'BMW 5 Series');
-  const computedTrim = effTrim ? (TRIM_LABELS[effTrim] !== undefined ? TRIM_LABELS[effTrim] : '') : (prof.trimLabel || 'M Sport');
+  const isM5Cs = (effChassis === 'F90LCI' || effChassis === 'F90') && effTrim === 'clubsport';
+  const computedSeries = isM5Cs ? 'BMW M5 CS' : (effChassis ? (SERIES_TITLES[effChassis] || ('BMW ' + effChassis)) : (prof.series || 'BMW 5 Series'));
+  const computedTrim = isM5Cs ? 'CS' : (effTrim ? (TRIM_LABELS[effTrim] !== undefined ? TRIM_LABELS[effTrim] : '') : (prof.trimLabel || 'M Sport'));
   const autoTitle = (localAppearance.chassis || localAppearance.trimLine)
-    ? (computedSeries + (computedTrim && computedSeries.indexOf(computedTrim) < 0 ? (' · ' + computedTrim) : ''))
+    ? (isM5Cs ? 'BMW M5 CS' : (computedSeries + (computedTrim && computedSeries.indexOf(computedTrim) < 0 ? (' · ' + computedTrim) : '')))
     : (prof.modelTitle || 'BMW 5 Series · M Sport');
 
   document.getElementById('carTitle').textContent = customName || autoTitle;
@@ -1471,12 +1492,11 @@ function renderAll() {
   }
 
   renderSecurityPills(tel);
+  renderCheckControlAlerts(tel);
 
-  // Show 1-tap hint if head unit is Kombi-coded to F90LCI (M5 CS) and owner hasn't picked their true chassis yet
   const kombiHint = document.getElementById('kombiHint');
   if (kombiHint) {
-    const showHint = !localAppearance.chassis && !prof.trueChassis && (effChassis === 'F90LCI' || prof.codedChassis === 'F90LCI');
-    kombiHint.classList.toggle('hidden', !showHint);
+    kombiHint.classList.add('hidden');
   }
 
   // Fuel & Range (with client-side tank estimation fallback if car hasn't broadcast KOMBI range yet)
@@ -1599,6 +1619,19 @@ function renderSecurityPills(tel) {
   box.innerHTML = pills.map((p) => '<span class="sec-pill ' + p.cls + '">' + escHtml(p.txt) + '</span>').join('');
 }
 
+function renderCheckControlAlerts(tel) {
+  const cc = (tel && Array.isArray(tel.checkControl)) ? tel.checkControl : [];
+  const html = cc.map((it) => {
+    const isCrit = it.severity === 'crit';
+    const icon = isCrit ? '🔴' : '⚠️';
+    return '<div class="cc-alert-row' + (isCrit ? ' crit' : '') + '"><span>' + icon + ' Check-Control: ' + escHtml(it.name) + '</span></div>';
+  }).join('');
+  const homeBox = document.getElementById('homeCcList');
+  if (homeBox) homeBox.innerHTML = html;
+  const healthBox = document.getElementById('healthCcList');
+  if (healthBox) healthBox.innerHTML = html;
+}
+
 function formatTirePressure(bar) {
   if (bar == null || typeof bar !== 'number' || !isFinite(bar)) return '--';
   if (tireUnit === 'psi') return Math.round(bar * 14.5038) + ' PSI';
@@ -1616,18 +1649,19 @@ function renderTpmsCard(tel) {
   if (btn) btn.textContent = 'Đơn vị: ' + (tireUnit === 'psi' ? 'PSI' : 'bar');
   const tr = (tel && tel.tires) || {};
   const defs = [
-    ['Fl', 'fl', 'targetFl', false],
-    ['Fr', 'fr', 'targetFr', true],
-    ['Rl', 'rl', 'targetRl', false],
-    ['Rr', 'rr', 'targetRr', true],
+    ['Fl', 'fl', 'targetFl', 'tempFl', false],
+    ['Fr', 'fr', 'targetFr', 'tempFr', true],
+    ['Rl', 'rl', 'targetRl', 'tempRl', false],
+    ['Rr', 'rr', 'targetRr', 'tempRr', true],
   ];
   let anyActual = false;
   let anyTarget = false;
   let lowCount = 0;
   for (let i = 0; i < defs.length; i++) {
-    const suf = defs[i][0], ak = defs[i][1], tk = defs[i][2], isRight = defs[i][3];
+    const suf = defs[i][0], ak = defs[i][1], tk = defs[i][2], tmk = defs[i][3], isRight = defs[i][4];
     const actual = tr[ak];
     const tgt = tr[tk];
+    const tempC = tr[tmk];
     if (typeof actual === 'number') anyActual = true;
     if (typeof tgt === 'number') anyTarget = true;
     const isLow = typeof actual === 'number' && (actual < 1.85 || (typeof tgt === 'number' && actual < tgt - 0.3));
@@ -1636,7 +1670,8 @@ function renderTpmsCard(tel) {
     const tgtEl = document.getElementById('tpmsTgt' + suf);
     const boxEl = document.getElementById('tpmsBox' + suf);
     if (valEl) valEl.textContent = formatTirePressure(actual);
-    if (tgtEl) tgtEl.textContent = 'Chuẩn: ' + (typeof tgt === 'number' ? formatTirePressure(tgt) : formatTirePressure(2.4));
+    const tempSuffix = (typeof tempC === 'number' && isFinite(tempC)) ? (' · ' + tempC + '°C') : '';
+    if (tgtEl) tgtEl.textContent = 'Chuẩn: ' + (typeof tgt === 'number' ? formatTirePressure(tgt) : formatTirePressure(2.4)) + tempSuffix;
     if (boxEl) {
       boxEl.className = 'tpms-wheel' + (isRight ? ' right' : '') + (typeof actual === 'number' ? (isLow ? ' warn' : ' ok') : '');
     }
@@ -1654,23 +1689,35 @@ function renderTpmsCard(tel) {
       noteEl.textContent = 'Mức chuẩn xe: ' + formatTirePressure(tr.targetFl || 2.5) + ' (trước) / ' + formatTirePressure(tr.targetRl || 2.5) + ' (sau) · Cảm biến RDC cập nhật áp suất thực khi bánh lăn.';
     } else {
       noteEl.style.color = 'var(--dim)';
-      noteEl.textContent = 'Đọc trực tiếp từ bộ thu RDC / LSCDataSink của xe.';
+      noteEl.textContent = 'Đọc trực tiếp từ bộ thu RDC / TPMS của xe.';
     }
   }
 }
 
 const DEFAULT_ECU_LIST = [
   { name: 'DME (Động cơ)', ok: null },
-  { name: 'EGS (Hộp số ZF 8HP)', ok: null },
+  { name: 'EGS (Hộp số ZF)', ok: null },
   { name: 'BDC (Thân vỏ & Chìa)', ok: null },
-  { name: 'DSC (Phanh ABS/DSC)', ok: null },
+  { name: 'DSC (Phanh DSC)', ok: null },
   { name: 'IHKA (Điều hoà)', ok: null },
   { name: 'KOMBI (Đồng hồ)', ok: null },
   { name: 'HU_MGU (Màn hình)', ok: null },
-  { name: 'ICAM/TRSVC (Cam 360°)', ok: null },
+  { name: 'ICAM (Cam 360°)', ok: null },
 ];
 
+function setHealthScanBusy(on) {
+  healthScanBusy = !!on;
+  const btn = document.getElementById('btnScanHealth');
+  if (!btn) return;
+  btn.disabled = !!on;
+  btn.style.opacity = on ? '0.72' : '1';
+  btn.textContent = on ? '⏳ Đang quét các hộp ECU trên xe…' : '🩺 Quét sức khoẻ các hộp ECU ngay';
+}
+
 function triggerHealthScan() {
+  if (healthScanBusy) return;
+  setHealthScanBusy(true);
+  setTimeout(() => { if (healthScanBusy) setHealthScanBusy(false); }, 25000);
   sendCmd('scan_health', {});
 }
 
@@ -1683,12 +1730,19 @@ function renderHealthAndService(tel, validOdo) {
 
   if (h && h.checkedAt) {
     if (hBadge) hBadge.textContent = relTime(h.checkedAt);
-    const clean = h.activeFaultCount === 0 && h.storedFaultCount === 0;
+    const ans = Number(h.ecusAnswered) || 0;
+    const scanned = Number(h.ecusScanned) || 8;
+    const clean = ans > 0 && h.activeFaultCount === 0 && h.storedFaultCount === 0;
     if (hBanner) {
-      hBanner.className = 'health-banner ' + (h.activeFaultCount > 0 ? 'warn' : 'ok');
-      hBanner.textContent = clean
-        ? ('✅ TẤT CẢ HỆ THỐNG HOÀN HẢO · Đã quét ' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU: 0 mã lỗi!')
-        : ('⚠️ Đã quét ' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU: ' + h.activeFaultCount + ' lỗi hiện hữu · ' + h.storedFaultCount + ' mã lưu bộ nhớ.');
+      if (ans === 0) {
+        hBanner.className = 'health-banner warn';
+        hBanner.textContent = '⚠️ Chưa nhận được phản hồi UDS (0 hộp ECU trả lời) — hãy bật khoá điện / nổ máy xe rồi bấm Quét lại.';
+      } else {
+        hBanner.className = 'health-banner ' + (h.activeFaultCount > 0 ? 'warn' : 'ok');
+        hBanner.textContent = clean
+          ? ('✅ TẤT CẢ HỆ THỐNG HOÀN HẢO · Đã quét ' + ans + ' hộp ECU: 0 mã lỗi!')
+          : ('⚠️ Đã quét ' + ans + '/' + scanned + ' hộp ECU: ' + h.activeFaultCount + ' lỗi hiện hữu · ' + h.storedFaultCount + ' mã lưu bộ nhớ.');
+      }
     }
     if (grid) {
       const mods = (h.modules && h.modules.length) ? h.modules : DEFAULT_ECU_LIST;
@@ -1710,6 +1764,25 @@ function renderHealthAndService(tel, validOdo) {
       grid.innerHTML = DEFAULT_ECU_LIST.map((m) =>
         '<div class="ecu-pill dim"><span class="nm">' + escHtml(m.name) + '</span><span class="st">Chờ quét</span></div>'
       ).join('');
+    }
+  }
+
+  // Native KOMBI CBS Service Items (`KombiInterface_2.cbsDataServiceList`)
+  const kombiCbsBox = document.getElementById('kombiCbsBox');
+  if (kombiCbsBox) {
+    const cbsList = (tel && Array.isArray(tel.cbsList)) ? tel.cbsList : [];
+    if (cbsList.length) {
+      kombiCbsBox.innerHTML =
+        '<div style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;margin-bottom:6px">Trạng thái CBS gốc trên đồng hồ xe</div>' +
+        cbsList.map((it) => {
+          const rightParts = [it.way, it.date].filter(Boolean).join(' · ') || 'OK';
+          const col = it.severity === 'crit' ? 'var(--crit)' : (it.severity === 'warn' ? 'var(--warn)' : 'var(--go)');
+          return '<div class="cbs-native-row ' + escHtml(it.severity || 'ok') + '">' +
+            '<span style="font-weight:700;color:#e2e8f0">' + escHtml(it.name) + '</span>' +
+            '<span style="font-weight:700;color:' + col + '">' + escHtml(rightParts) + '</span></div>';
+        }).join('');
+    } else {
+      kombiCbsBox.innerHTML = '';
     }
   }
 
@@ -2071,16 +2144,16 @@ function renderSchemaCards(schema) {
       .concat((iv.methods || []).map((m) => ({ kind: 'method', name: m.name, roles: m.roles || [], inArgs: m.inArgs })));
     const readables = (iv.fields || []).filter((f) => !f.setter).slice(0, 6);
     const card = document.createElement('div');
-    card.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:11px;margin-bottom:8px;background:#080d18';
-    card.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--cyan);margin-bottom:6px">' + iv.iface + '</div>' +
+    card.style.cssText = 'padding:10px;border:1px solid var(--border);border-radius:11px;margin-bottom:8px;background:#080d18;overflow:hidden';
+    card.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--cyan);margin-bottom:6px;overflow-wrap:anywhere">' + iv.iface + '</div>' +
       (writables.length ? writables.map((w) => {
         const onPayload = buildSmartCardPayload(iv.iface, w, schema.live, true);
         const offPayload = buildSmartCardPayload(iv.iface, w, schema.live, false);
-        return '<div style="padding:8px;background:#0f172a;border-radius:9px;margin-bottom:6px;font-size:12px">' +
+        return '<div style="padding:8px;background:#0f172a;border-radius:9px;margin-bottom:6px;font-size:12px;overflow:hidden">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px">' +
           '<div style="min-width:0;overflow:hidden;text-overflow:ellipsis"><b>' + w.name + '</b> <span style="color:var(--dim)">(' + w.kind + (w.roles && w.roles.length ? ' · ' + w.roles.join(',') : '') + ')</span></div>' +
           '</div>' +
-          '<div style="display:flex;gap:6px">' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           '<button class="btn warn" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(onPayload) + ',null)\'>⚡ Thử Bật</button>' +
           '<button class="btn" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(offPayload) + ',null)\'>⏹ Thử Tắt</button>' +
           '<button class="btn go" style="padding:5px 8px;font-size:11px" onclick=\'quickInvoke1cr(' + JSON.stringify(iv.iface) + ',' + JSON.stringify(w.kind) + ',' + JSON.stringify(w.name) + ',' + JSON.stringify(onPayload) + ',"start")\'>📌 Ghim 1CR</button>' +
@@ -2252,7 +2325,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.0').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.1').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

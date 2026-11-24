@@ -18,6 +18,10 @@
   user-select: none;
 }
 
+html {
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   background: #04060d;
@@ -27,30 +31,39 @@ body {
   padding-top: max(14px, env(safe-area-inset-top));
   padding-bottom: calc(84px + env(safe-area-inset-bottom));
   overflow-x: hidden;
+  width: 100%;
 }
 
 .app-shell {
+  width: 100%;
   max-width: 480px;
   margin: 0 auto;
-  padding: 0 16px;
+  padding: 0 14px;
+  overflow-x: hidden;
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 6px 2px 10px;
 }
 
 .car-title {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 800;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
   gap: 6px;
   padding: 5px 11px;
   border-radius: 999px;
@@ -75,8 +88,9 @@ body {
   font-size: 12px;
   color: var(--dim);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 5px 8px;
   margin-bottom: 6px;
 }
 
@@ -88,7 +102,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  margin: 2px -16px 12px;
+  margin: 2px -14px 12px;
   overflow: hidden;
 }
 
@@ -137,6 +151,10 @@ body {
 .paint-chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   gap: 5px;
   padding: 3px 9px;
   border-radius: 7px;
@@ -150,6 +168,7 @@ body {
 
 select {
   width: 100%;
+  min-width: 0;
   padding: 10px 10px;
   border-radius: 11px;
   border: 1px solid var(--border);
@@ -160,13 +179,15 @@ select {
 
 .swatch-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 7px;
 }
 
 .swatch-item {
   display: flex;
   align-items: center;
+  min-width: 0;
+  overflow: hidden;
   gap: 7px;
   padding: 7px 8px;
   border-radius: 10px;
@@ -250,7 +271,7 @@ select {
 }
 .cam-tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 5px;
   margin-bottom: 9px;
 }
@@ -331,6 +352,10 @@ select {
 
 .lock-banner {
   z-index: 3;
+  max-width: 100%;
+  padding: 0 10px;
+  text-align: center;
+  overflow-wrap: anywhere;
   margin-top: -6px;
   margin-bottom: 4px;
   font-size: 12.5px;
@@ -387,8 +412,8 @@ select {
 /* MyBMW 4 Circular Remote Action Buttons */
 .action-dock {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   margin: 14px 0 16px;
 }
 
@@ -396,6 +421,7 @@ select {
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-width: 0;
   gap: 7px;
 }
 
@@ -432,6 +458,10 @@ select {
 }
 
 .act-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11.5px;
   font-weight: 600;
   color: var(--dim);
@@ -449,6 +479,9 @@ select {
 
 /* Info Grid & Cards */
 .glass-card {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
   background: var(--surface);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -462,21 +495,35 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   font-size: 13px;
   font-weight: 700;
   color: var(--cyan);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
   margin-bottom: 10px;
+}
+.card-head > :first-child {
+  min-width: 0;
+  flex: 1;
+}
+.card-head > :last-child {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .metrics-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 9px;
 }
 
 .metric-box {
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   background: rgba(8, 12, 22, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.1);
   border-radius: 13px;
@@ -487,12 +534,18 @@ select {
   font-size: 11px;
   color: var(--dim);
   text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .metric-box .v {
   font-size: 17px;
   font-weight: 700;
-  margin-top: 3px;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .snap-img {
@@ -561,10 +614,13 @@ input[type="text"], input[type="number"], input[type="time"], textarea {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 10px 0;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
   font-size: 13.5px;
 }
+.trip-item > :first-child { min-width: 0; flex: 1; }
+.trip-item > :last-child { flex-shrink: 0; white-space: nowrap; }
 .trip-item:last-child { border-bottom: none; }
 
 #mapBox {
@@ -661,12 +717,12 @@ pre.code-box {
   color: #fecaca;
 }
 
-/* v0.6.0: 4-Wheel TPMS Chassis Stage */
+/* v0.6.1: 4-Wheel TPMS Chassis Stage (overflow-proof) */
 .tpms-stage {
   display: grid;
-  grid-template-columns: 1fr 78px 1fr;
+  grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1fr);
   grid-template-rows: auto auto;
-  gap: 10px 8px;
+  gap: 9px 7px;
   align-items: center;
   margin-top: 4px;
 }
@@ -679,10 +735,12 @@ pre.code-box {
   opacity: 0.82;
 }
 .tpms-wheel {
+  min-width: 0;
+  overflow: hidden;
   background: rgba(8, 12, 22, 0.78);
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 13px;
-  padding: 10px 11px;
+  padding: 10px 10px;
   transition: border-color 0.25s ease;
 }
 .tpms-wheel.right {
@@ -702,14 +760,18 @@ pre.code-box {
   color: var(--dim);
 }
 .tpms-val {
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 800;
   margin: 2px 0;
   color: var(--text);
+  white-space: nowrap;
 }
 .tpms-sub {
   font-size: 11px;
   color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tpms-note {
   margin-top: 9px;
@@ -719,7 +781,57 @@ pre.code-box {
   line-height: 1.4;
 }
 
-/* v0.6.0: Multi-ECU Health & CBS Service Bars */
+/* v0.6.1: Live Check-Control Alerts & KOMBI Native CBS */
+.cc-alert-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  gap: 8px;
+  padding: 8px 11px;
+  margin-bottom: 8px;
+  border-radius: 11px;
+  font-size: 12.5px;
+  font-weight: 700;
+  background: rgba(66, 38, 9, 0.68);
+  border: 1px solid rgba(255, 176, 32, 0.5);
+  color: #fde68a;
+}
+.cc-alert-row.crit {
+  background: rgba(76, 17, 24, 0.78);
+  border-color: rgba(239, 68, 68, 0.65);
+  color: #fecaca;
+}
+.cbs-native-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  background: rgba(8, 12, 22, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  font-size: 12.5px;
+}
+.cbs-native-row > :first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cbs-native-row > :last-child {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cbs-native-row.ok { border-color: rgba(47, 210, 122, 0.32); }
+.cbs-native-row.warn { border-color: rgba(255, 176, 32, 0.52); }
+.cbs-native-row.crit { border-color: rgba(239, 68, 68, 0.62); }
+
+/* v0.6.1: Multi-ECU Health & CBS Service Bars (overflow-proof) */
 .health-banner {
   padding: 11px 13px;
   border-radius: 13px;
@@ -729,6 +841,7 @@ pre.code-box {
   font-weight: 700;
   margin-bottom: 10px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .health-banner.ok {
   border-color: rgba(47, 210, 122, 0.45);
@@ -742,22 +855,26 @@ pre.code-box {
 }
 .ecu-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 7px;
   margin-top: 10px;
 }
 .ecu-pill {
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 5px;
+  padding: 8px 9px;
   border-radius: 11px;
   background: rgba(8, 12, 22, 0.78);
   border: 1px solid rgba(148, 163, 184, 0.14);
   font-size: 11.5px;
 }
 .ecu-pill .nm {
+  min-width: 0;
+  flex: 1;
   font-weight: 600;
   color: #e2e8f0;
   overflow: hidden;
@@ -766,8 +883,9 @@ pre.code-box {
 }
 .ecu-pill .st {
   font-weight: 700;
-  font-size: 11px;
+  font-size: 10.5px;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .ecu-pill.ok { border-color: rgba(47, 210, 122, 0.32); }
 .ecu-pill.ok .st { color: var(--go); }
@@ -781,12 +899,26 @@ pre.code-box {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  gap: 8px;
   padding: 8px 10px;
   margin-top: 6px;
   border-radius: 10px;
   background: rgba(45, 14, 20, 0.55);
   border: 1px solid rgba(239, 68, 68, 0.35);
   font-size: 12px;
+}
+.dtc-item > :first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dtc-item > :last-child {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .svc-block {
