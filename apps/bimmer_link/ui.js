@@ -180,7 +180,16 @@ function draw(cv, G, t, v, act) {
     const fuelBat = 'Xăng: ' + (tel.fuelPct != null ? tel.fuelPct + '%' : '--') +
         (tel.rangeKm != null ? (' (' + tel.rangeKm + ' km)') : '') +
         ' · Bình: ' + (tel.battery12v != null ? (tel.battery12v + 'V') : 'OK');
-    const hasOpen = (tel.doorsOpen && tel.doorsOpen.length) || tel.trunkOpen || tel.hoodOpen || tel.locked === false;
+    const hasOpen = (tel.doorsOpen && tel.doorsOpen.length) || (tel.windowsOpen && tel.windowsOpen.length) || tel.trunkOpen || tel.hoodOpen || tel.locked === false;
+    const dst = v.destination;
+    const tireSummary = (tel.tires && tel.tires.fl != null)
+        ? ('Lốp: ' + tel.tires.fl + '/' + tel.tires.fr + ' bar')
+        : ('Máy ' + (tel.coolantC != null ? tel.coolantC + '°C' : '--') + ' · Ngoài ' + (tel.ambientC != null ? tel.ambientC + '°C' : '--'));
+    const card2Line2 = dst
+        ? ('Điểm đến App: ' + dst.name)
+        : (hasOpen
+            ? ((tel.windowsOpen && tel.windowsOpen.length) ? ('Mở: ' + tel.windowsOpen.join(', ')) : 'Chú ý: Cửa / cốp mở hoặc chưa khoá!')
+            : ('4 cửa & kính kín · ' + tireSummary));
     infoCard(cv, G, t, rx + cw + gap, cy, cw, ch, {
         key: 'blCardCar',
         title: 'Vị trí & Trạng thái',
@@ -188,8 +197,8 @@ function draw(cv, G, t, v, act) {
         accent: hasOpen ? (t.warn || '#ffb020') : (t.accent2 || '#38bdf8'),
         headline: locTitle,
         line1: fuelBat,
-        line2: hasOpen ? 'Chú ý: Có cửa / cốp mở hoặc chưa khoá!' : ('Cửa kín · Máy ' + (tel.coolantC != null ? tel.coolantC + '°C' : '--') + ' · Ngoài ' + (tel.ambientC != null ? tel.ambientC + '°C' : '--')),
-        line2Color: hasOpen ? (t.warn || '#ffb020') : t.dim,
+        line2: card2Line2,
+        line2Color: dst ? (t.go || '#2fd27a') : (hasOpen ? (t.warn || '#ffb020') : t.dim),
         hint: 'Gửi App',
         onTap: act.snapNow,
     });

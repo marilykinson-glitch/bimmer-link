@@ -149,6 +149,7 @@ mgu.run({
                 tgError: (s && s.tgError) || '',
                 vehicleProfile: (s && s.vehicleProfile) || null,
                 valet: (s && s.valet) || { enabled: false, maxSpeed: 45, maxRpm: 3500, radiusM: 500 },
+                destination: (s && s.destination) || null,
                 telemetry: (s && s.telemetry) || {},
                 lastTrip: (s && s.lastTrip) || null,
                 trips: (s && s.trips) || [],
@@ -163,7 +164,7 @@ mgu.run({
             const vis = ui.isVisible('MAIN');
             const key = JSON.stringify([
                 m.state, m.viewMode, m.qrMode, m.url, m.cloudUrl, m.cloudOk, m.pin, m.telegramOk, m.ownerName, m.tgError,
-                m.vehicleProfile, m.valet, m.telemetry, m.lastTrip, m.trips.length, m.message, m.messageKind, m.armed, vis,
+                m.vehicleProfile, m.valet, m.destination, m.telemetry, m.lastTrip, m.trips.length, m.message, m.messageKind, m.armed, vis,
             ]);
             if (key === lastKey && shown) return;
             lastKey = key;

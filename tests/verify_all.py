@@ -296,9 +296,12 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
             url: 'http://192.168.43.100:8139/?pin=4829', host: '192.168.43.100:8139', pin: '4829',
             cloudOk: true, telegramOk: false,
             vehicleProfile: {{ chassis: 'G30LCI', modelTitle: 'BMW 5 Series LCI · M Sport', paintLabel: 'Carbon Black' }},
+            destination: {{ name: 'Landmark 81', address: 'Bình Thạnh, TP.HCM', lat: 10.795, lon: 106.722 }},
             valet: {{ enabled: false, maxSpeed: 45, maxRpm: 3500, radiusM: 500 }},
             telemetry: {{
               fuelPct: 74, rangeKm: 512, battery12v: 12.6, coolantC: 88, ambientC: 29.5, locked: true, doorsOpen: [],
+              windowsOpen: ['Kính Phụ'],
+              tires: {{ fl: 2.5, fr: 2.5, rl: 2.6, rr: 2.6, targetFl: 2.5, targetFr: 2.5, targetRl: 2.5, targetRr: 2.5 }},
               pos: {{ lat: 10.776889, lon: 106.700806, street: 'Nguyễn Huệ', district: 'Quận 1', city: 'TP.HCM' }},
               climate1cr: {{ active: false, timerText: '07:30', discoveredCount: 2, lastResult: 'Sẵn sàng' }}
             }},
@@ -769,6 +772,51 @@ def check_car_link_logic_in_jxa():
     var r09 = simPairCapture(['09', '0a', '09', '0a', '09', '0a', '09', '0a', '09']);
     if (!r0a || r0a.top !== '09' || r0a.bottom !== '0a' || !r09 || r09.top !== '09' || r09.bottom !== '0a') {{
       throw new Error('PairTagger postSeiFrames>=2 alignment failed: ' + JSON.stringify([r0a, r09]));
+    }}
+
+    // Test 5 (v0.6.0): LSCDataSink 4-Wheel TPMS, 4-Window/Sunroof, DWA Alarm, KOMBI Range & UDS 0x19 02 DTC Parser
+    if (C.scaleTireBar(25) !== 2.5 || C.scaleTireBar(125) !== 2.5 || C.scaleTireBar(250) !== 2.5) {{
+      throw new Error('scaleTireBar scaling mismatch');
+    }}
+    if (C.scaleTireBar(63) !== null || C.scaleTireBar(255) !== null || C.scaleTireBar(4095) !== null) {{
+      throw new Error('scaleTireBar must reject invalid sentinel values');
+    }}
+    var lscTrk = new C.TelemetryTracker();
+    var lscEvents = [];
+    var applyLsc = function(fname, val) {{
+      C.interpretLscField(fname, val, function(p) {{
+        var evs = lscTrk.update(p, 2000000);
+        for (var i = 0; i < evs.length; i++) lscEvents.push(evs[i]);
+      }}, lscTrk.state);
+    }};
+    applyLsc('statusTargetTyrePressure', {{ targetPressureTyreFLH: 25, targetPressureTyreFRH: 25, targetPressureTyreRLH: 26, targetPressureTyreRRH: 26 }});
+    applyLsc('actualValuePressureTyre', {{ pressureTyreFLH: 24, pressureTyreFRH: 25, pressureTyreRLH: 26, pressureTyreRRH: 26 }});
+    if (lscTrk.state.tires.fl !== 2.4 || lscTrk.state.tires.targetRl !== 2.6) {{
+      throw new Error('TPMS decode mismatch: ' + JSON.stringify(lscTrk.state.tires));
+    }}
+    applyLsc('positionWindowRegulatorDRD', 'FENSTER_GESCHLOSSEN');
+    applyLsc('positionWindowRegulatorPSD', 'FENSTER_ZWISCHENSTELLUNG');
+    applyLsc('positionSHD', 'SHD_GESCHLOSSEN');
+    if (lscTrk.state.windowsOpen.length !== 1 || lscTrk.state.windowsOpen[0] !== 'Kính Phụ' || lscTrk.state.windowDetails.sunroof !== 'closed') {{
+      throw new Error('Window/Sunroof decode mismatch: ' + JSON.stringify(lscTrk.state));
+    }}
+    applyLsc('dWAStatus', {{ statusDWAArming: 'DWA_GESCHAERFT', statusDWAAlarmReason: 'KEIN_ALARM' }});
+    if (lscTrk.state.dwaArmed !== true || lscTrk.state.locked !== true || lscEvents.length !== 0) {{
+      throw new Error('DWA armed decode mismatch: ' + JSON.stringify(lscTrk.state));
+    }}
+    applyLsc('dWAStatus', {{ statusDWAArming: 'DWA_GESCHAERFT', statusDWAAlarmReason: 'INNENRAUMSCHUTZ' }});
+    if (!lscTrk.state.dwaAlarmActive || lscEvents.length !== 1 || lscEvents[0].type !== 'dwa_alarm') {{
+      throw new Error('DWA alarm event must fire once on active reason: ' + JSON.stringify(lscEvents));
+    }}
+    applyLsc('mileageRange', {{ mileageRange: 637 }});
+    if (lscTrk.state.rangeKm !== 637 || lscTrk.state.rangeEstimated !== false) {{
+      throw new Error('KOMBI mileageRange decode mismatch: ' + JSON.stringify(lscTrk.state));
+    }}
+    var dtcZero = C.parseDtcResponse([0x59, 0x02, 0xFF]);
+    if (!dtcZero.ok || dtcZero.dtcs.length !== 0) throw new Error('Expected 0 DTCs');
+    var dtcHit = C.parseDtcResponse([0x59, 0x02, 0xFF, 0x11, 0xA0, 0x04, 0x09, 0x80, 0x41, 0xA8, 0x08]);
+    if (!dtcHit.ok || dtcHit.dtcs.length !== 2 || dtcHit.dtcs[0].severity !== 'crit' || dtcHit.dtcs[1].severity !== 'warn') {{
+      throw new Error('UDS DTC parser mismatch: ' + JSON.stringify(dtcHit));
     }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """

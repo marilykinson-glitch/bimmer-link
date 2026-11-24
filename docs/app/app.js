@@ -42,7 +42,9 @@ let photoBuckets = {};
 let heroBuckets = {};
 let diagBuckets = {};
 let arm1crUntil = 0;
-let mapInstance = null, mapMarker = null, mapCircle = null;
+let mapInstance = null, mapMarker = null, mapCircle = null, mapDestMarker = null;
+let tireUnit = localStorage.getItem('mybmw_tire_unit') === 'psi' ? 'psi' : 'bar';
+let lastDestHits = [];
 
 const SERIES_TITLES = {
   G20: 'BMW 3 Series', G20LCI: 'BMW 3 Series LCI', G21: 'BMW 3 Series Touring', G28: 'BMW 3 Series Li',
@@ -109,7 +111,6 @@ function switchView(name, btn) {
   Array.prototype.forEach.call(document.querySelectorAll('.nav-tab'), (b) => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   if (name === 'map') setTimeout(refreshMap, 80);
-  if (name === '1cr' && identity && !lastSchema) requestSchema();
 }
 
 /* ---------------- Photorealistic Studio Bodywork Carpaint Shader (Fallback & Instant Preview) ---------------- */
@@ -831,7 +832,8 @@ function onStatePacket(pkt, ts, isLive) {
   }
 
   if (pkt.alert && pkt.alert.reason) {
-    showToast('🚨 CẢNH BÁO VALET: ' + pkt.alert.reason, '#ef4444', 10000);
+    const prefix = pkt.alert.kind === 'dwa_alarm' ? '🚨 BÁO ĐỘNG CHỐNG TRỘM DWA: ' : '🚨 CẢNH BÁO VALET: ';
+    showToast(prefix + pkt.alert.reason, '#ef4444', 11000);
   }
 
   if (window.AndroidBridge && window.AndroidBridge.onVehicleSummary) {
@@ -1440,13 +1442,26 @@ function renderAll() {
   setConnBadge(awake ? 'live' : 'sleep', awake ? 'Trực tuyến' : 'Đang ngủ (Lưu đệm)');
   document.getElementById('updatedLabel').textContent = relTime(effectiveStateAt);
 
-  const hasDoorWarn = (tel.doorsOpen && tel.doorsOpen.length) || tel.trunkOpen || tel.hoodOpen || tel.locked === false;
+  const hasWinWarn = !!(tel.windowsOpen && tel.windowsOpen.length);
+  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || tel.locked === false);
   glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (c1.active ? ' climate-on' : ''));
 
   const sec = document.getElementById('securityBanner');
   if (hasDoorWarn) {
     sec.className = 'lock-banner warn';
-    sec.textContent = tel.trunkOpen ? '⚠️ CỐP SAU ĐANG MỞ' : (tel.locked === false ? '🔓 XE CHƯA KHOÁ (KHOÁ CỬA ĐỂ ĐỀ NỔ 1CR)' : '⚠️ CÓ CỬA CHƯA ĐÓNG KÍN');
+    if (tel.dwaAlarmActive) {
+      sec.textContent = '🚨 BÁO ĐỘNG CHỐNG TRỘM DWA ĐANG KÍCH HOẠT!';
+    } else if (tel.trunkOpen) {
+      sec.textContent = '⚠️ CỐP SAU ĐANG MỞ';
+    } else if (tel.hoodOpen) {
+      sec.textContent = '⚠️ NẮP CAPO ĐANG MỞ';
+    } else if (tel.doorsOpen && tel.doorsOpen.length) {
+      sec.textContent = '⚠️ CÓ CỬA CHƯA ĐÓNG KÍN';
+    } else if (hasWinWarn) {
+      sec.textContent = '⚠️ KÍNH CHƯA ĐÓNG KÍN (' + tel.windowsOpen.join(', ').toUpperCase() + ')';
+    } else {
+      sec.textContent = '🔓 XE CHƯA KHOÁ (KHOÁ CỬA ĐỂ ĐỀ NỔ 1CR)';
+    }
   } else {
     sec.className = 'lock-banner';
     const c1Banner = c1.mode === 'engine_1cr'
@@ -1454,6 +1469,8 @@ function renderAll() {
       : (c1.mode === 'vent_only' ? '🌬️ QUẠT THÔNG GIÓ CABIN ĐANG CHẠY' : '❄️ ĐANG CHẠY LÀM MÁT TỪ XA (AUTOMODE)');
     sec.textContent = c1.active ? c1Banner : (tel.engineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN');
   }
+
+  renderSecurityPills(tel);
 
   // Show 1-tap hint if head unit is Kombi-coded to F90LCI (M5 CS) and owner hasn't picked their true chassis yet
   const kombiHint = document.getElementById('kombiHint');
@@ -1471,7 +1488,10 @@ function renderAll() {
     isEstRange = true;
   }
   document.getElementById('rangeKm').innerHTML = (dispRange != null ? ((isEstRange ? '~' : '') + dispRange) : '--') + ' <span>km</span>';
-  document.getElementById('fuelPct').textContent = tel.fuelPct != null ? (tel.fuelPct + '%') : (tel.fuelLiters != null ? (tel.fuelLiters + ' L') : '--%');
+  const fuelLabel = tel.fuelPct != null
+    ? (tel.fuelPct + '%' + (tel.fuelLiters != null ? (' · ' + tel.fuelLiters + 'L') : ''))
+    : (tel.fuelLiters != null ? (tel.fuelLiters + ' L') : '--%');
+  document.getElementById('fuelPct').textContent = fuelLabel;
   document.getElementById('fuelFill').style.width = Math.max(0, Math.min(100, tel.fuelPct || 0)) + '%';
 
   const btn1 = document.getElementById('btn1cr');
@@ -1516,15 +1536,407 @@ function renderAll() {
   }
 
   const trips = vehicleData.trips || (vehicleData.lastTrip ? [vehicleData.lastTrip] : []);
+  renderTpmsCard(tel);
+  renderHealthAndService(tel, validOdo);
+  renderActiveDestination(tel);
+  renderTripAnalytics(trips, effChassis);
+  if (mapInstance && !document.getElementById('view-map').classList.contains('hidden')) {
+    refreshMap();
+  }
+
   const tBox = document.getElementById('tripList');
   if (trips.length) {
     tBox.innerHTML = trips.map((tr) => {
       const d = new Date(tr.endedAt || Date.now());
       const when = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ' · ' + d.getDate() + '/' + (d.getMonth() + 1);
-      return '<div class="trip-item"><div><b>' + tr.distanceKm + ' km</b> <span style="color:var(--dim)">(' + tr.durationMin + ' phút)</span><div style="font-size:11.5px;color:var(--dim)">' + when + '</div></div>' +
+      return '<div class="trip-item"><div><b>' + tr.distanceKm + ' km</b> <span style="color:var(--dim)">(' + tr.durationMin + ' phút · TB ' + (tr.avgSpeed || 0) + ' km/h)</span><div style="font-size:11.5px;color:var(--dim)">' + when + '</div></div>' +
         '<div style="text-align:right;color:var(--cyan);font-weight:700">Max ' + tr.maxSpeed + ' km/h' + (tr.fuelUsedPct != null ? '<div style="font-size:11px;color:var(--dim)">-' + tr.fuelUsedPct + '% xăng</div>' : '') + '</div></div>';
     }).join('');
+  } else {
+    tBox.textContent = 'Chưa có chuyến đi nào.';
   }
+}
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderSecurityPills(tel) {
+  const box = document.getElementById('securityPills');
+  if (!box) return;
+  const pills = [];
+  const dOpen = (tel.doorsOpen && tel.doorsOpen.length) || 0;
+  pills.push({
+    cls: dOpen ? 'warn' : 'ok',
+    txt: dOpen ? '⚠️ Cửa đang mở' : '✓ 4 Cửa kín',
+  });
+  const wOpen = tel.windowsOpen || [];
+  const wd = tel.windowDetails || {};
+  const hasKnownClosedWin = wd.fl === 'closed' || wd.fr === 'closed' || wd.rl === 'closed' || wd.rr === 'closed';
+  if (wOpen.length) {
+    pills.push({ cls: 'warn', txt: '⚠️ Mở: ' + wOpen.join(', ') });
+  } else if (hasKnownClosedWin) {
+    pills.push({ cls: 'ok', txt: '✓ 4 Kính kín' + (wd.sunroof === 'closed' ? ' · Cửa trời kín' : '') });
+  } else {
+    pills.push({ cls: 'ok', txt: '✓ Kính đóng kín' });
+  }
+  if (tel.trunkOpen || tel.hoodOpen) {
+    pills.push({ cls: 'warn', txt: tel.trunkOpen ? '⚠️ Cốp sau mở' : '⚠️ Capo mở' });
+  } else {
+    pills.push({ cls: 'ok', txt: '✓ Cốp & Capo kín' });
+  }
+  if (tel.dwaAlarmActive) {
+    pills.push({ cls: 'crit', txt: '🚨 Báo động DWA!' });
+  } else if (tel.dwaArmed === true) {
+    pills.push({ cls: 'ok', txt: '🛡️ Chống trộm DWA' });
+  } else if (tel.locked === false) {
+    pills.push({ cls: 'warn', txt: '🔓 Chưa khoá' });
+  }
+  box.innerHTML = pills.map((p) => '<span class="sec-pill ' + p.cls + '">' + escHtml(p.txt) + '</span>').join('');
+}
+
+function formatTirePressure(bar) {
+  if (bar == null || typeof bar !== 'number' || !isFinite(bar)) return '--';
+  if (tireUnit === 'psi') return Math.round(bar * 14.5038) + ' PSI';
+  return bar.toFixed(1) + ' bar';
+}
+
+function toggleTireUnit() {
+  tireUnit = tireUnit === 'bar' ? 'psi' : 'bar';
+  localStorage.setItem('mybmw_tire_unit', tireUnit);
+  renderAll();
+}
+
+function renderTpmsCard(tel) {
+  const btn = document.getElementById('btnTireUnit');
+  if (btn) btn.textContent = 'Đơn vị: ' + (tireUnit === 'psi' ? 'PSI' : 'bar');
+  const tr = (tel && tel.tires) || {};
+  const defs = [
+    ['Fl', 'fl', 'targetFl', false],
+    ['Fr', 'fr', 'targetFr', true],
+    ['Rl', 'rl', 'targetRl', false],
+    ['Rr', 'rr', 'targetRr', true],
+  ];
+  let anyActual = false;
+  let anyTarget = false;
+  let lowCount = 0;
+  for (let i = 0; i < defs.length; i++) {
+    const suf = defs[i][0], ak = defs[i][1], tk = defs[i][2], isRight = defs[i][3];
+    const actual = tr[ak];
+    const tgt = tr[tk];
+    if (typeof actual === 'number') anyActual = true;
+    if (typeof tgt === 'number') anyTarget = true;
+    const isLow = typeof actual === 'number' && (actual < 1.85 || (typeof tgt === 'number' && actual < tgt - 0.3));
+    if (isLow) lowCount++;
+    const valEl = document.getElementById('tpms' + suf);
+    const tgtEl = document.getElementById('tpmsTgt' + suf);
+    const boxEl = document.getElementById('tpmsBox' + suf);
+    if (valEl) valEl.textContent = formatTirePressure(actual);
+    if (tgtEl) tgtEl.textContent = 'Chuẩn: ' + (typeof tgt === 'number' ? formatTirePressure(tgt) : formatTirePressure(2.4));
+    if (boxEl) {
+      boxEl.className = 'tpms-wheel' + (isRight ? ' right' : '') + (typeof actual === 'number' ? (isLow ? ' warn' : ' ok') : '');
+    }
+  }
+  const noteEl = document.getElementById('tpmsNote');
+  if (noteEl) {
+    if (lowCount > 0) {
+      noteEl.style.color = 'var(--warn)';
+      noteEl.textContent = '⚠️ Phát hiện ' + lowCount + ' lốp non hơi so với áp suất tiêu chuẩn BMW!';
+    } else if (anyActual) {
+      noteEl.style.color = 'var(--go)';
+      noteEl.textContent = '✅ Áp suất 4 lốp đạt chuẩn · Đọc trực tiếp từ cảm biến RDC của xe.';
+    } else if (anyTarget) {
+      noteEl.style.color = 'var(--dim)';
+      noteEl.textContent = 'Mức chuẩn xe: ' + formatTirePressure(tr.targetFl || 2.5) + ' (trước) / ' + formatTirePressure(tr.targetRl || 2.5) + ' (sau) · Cảm biến RDC cập nhật áp suất thực khi bánh lăn.';
+    } else {
+      noteEl.style.color = 'var(--dim)';
+      noteEl.textContent = 'Đọc trực tiếp từ bộ thu RDC / LSCDataSink của xe.';
+    }
+  }
+}
+
+const DEFAULT_ECU_LIST = [
+  { name: 'DME (Động cơ)', ok: null },
+  { name: 'EGS (Hộp số ZF 8HP)', ok: null },
+  { name: 'BDC (Thân vỏ & Chìa)', ok: null },
+  { name: 'DSC (Phanh ABS/DSC)', ok: null },
+  { name: 'IHKA (Điều hoà)', ok: null },
+  { name: 'KOMBI (Đồng hồ)', ok: null },
+  { name: 'HU_MGU (Màn hình)', ok: null },
+  { name: 'ICAM/TRSVC (Cam 360°)', ok: null },
+];
+
+function triggerHealthScan() {
+  sendCmd('scan_health', {});
+}
+
+function renderHealthAndService(tel, validOdo) {
+  const h = tel && tel.health;
+  const hBanner = document.getElementById('healthBanner');
+  const hBadge = document.getElementById('healthTimeBadge');
+  const grid = document.getElementById('ecuHealthGrid');
+  const faultBox = document.getElementById('dtcFaultList');
+
+  if (h && h.checkedAt) {
+    if (hBadge) hBadge.textContent = relTime(h.checkedAt);
+    const clean = h.activeFaultCount === 0 && h.storedFaultCount === 0;
+    if (hBanner) {
+      hBanner.className = 'health-banner ' + (h.activeFaultCount > 0 ? 'warn' : 'ok');
+      hBanner.textContent = clean
+        ? ('✅ TẤT CẢ HỆ THỐNG HOÀN HẢO · Đã quét ' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU: 0 mã lỗi!')
+        : ('⚠️ Đã quét ' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU: ' + h.activeFaultCount + ' lỗi hiện hữu · ' + h.storedFaultCount + ' mã lưu bộ nhớ.');
+    }
+    if (grid) {
+      const mods = (h.modules && h.modules.length) ? h.modules : DEFAULT_ECU_LIST;
+      grid.innerHTML = mods.map((m) => {
+        const cls = m.ok === true ? 'ok' : (m.ok === false ? 'warn' : 'dim');
+        const st = m.ok === true ? '✓ 0 lỗi' : (m.ok === false ? ('⚠️ ' + m.faultCount + ' mã') : 'Ngủ/Chờ');
+        return '<div class="ecu-pill ' + cls + '"><span class="nm">' + escHtml(m.name) + '</span><span class="st">' + escHtml(st) + '</span></div>';
+      }).join('');
+    }
+    if (faultBox) {
+      const fl = h.faults || [];
+      faultBox.innerHTML = fl.map((f) =>
+        '<div class="dtc-item"><div><b>0x' + escHtml(f.code) + '</b> · <span style="color:var(--dim)">' + escHtml(f.ecuName) + '</span></div>' +
+        '<span style="font-weight:700;color:' + (f.severity === 'crit' ? 'var(--crit)' : 'var(--warn)') + '">' + escHtml(f.statusLabel) + '</span></div>'
+      ).join('');
+    }
+  } else {
+    if (grid && !grid.innerHTML) {
+      grid.innerHTML = DEFAULT_ECU_LIST.map((m) =>
+        '<div class="ecu-pill dim"><span class="nm">' + escHtml(m.name) + '</span><span class="st">Chờ quét</span></div>'
+      ).join('');
+    }
+  }
+
+  // Service Plan (ODO-based)
+  const sp = (vehicleData && vehicleData.servicePlan) || { oilDueKm: 0, oilIntervalKm: 8000, checkDueKm: 0, brakeFluidDue: '' };
+  const odoBadge = document.getElementById('svcOdoBadge');
+  if (odoBadge) odoBadge.textContent = 'ODO: ' + (validOdo != null ? validOdo.toLocaleString('vi-VN') : '--') + ' km';
+
+  const selInt = document.getElementById('selOilInterval');
+  if (selInt && document.activeElement !== selInt && sp.oilIntervalKm) {
+    selInt.value = String(sp.oilIntervalKm);
+  }
+  const inpBrake = document.getElementById('inpBrakeFluidDue');
+  if (inpBrake && document.activeElement !== inpBrake) {
+    inpBrake.value = sp.brakeFluidDue || '';
+  }
+  const brakeBadge = document.getElementById('svcBrakeBadge');
+  if (brakeBadge) {
+    brakeBadge.textContent = sp.brakeFluidDue ? ('Hạn: ' + sp.brakeFluidDue) : 'Chưa đặt';
+    brakeBadge.style.color = sp.brakeFluidDue ? 'var(--go)' : 'var(--dim)';
+  }
+
+  // Oil progress
+  const oilRemEl = document.getElementById('svcOilRemain');
+  const oilFillEl = document.getElementById('svcOilFill');
+  const oilSubEl = document.getElementById('svcOilSub');
+  if (oilRemEl && oilFillEl && oilSubEl) {
+    if (sp.oilDueKm > 0 && validOdo != null) {
+      const rem = sp.oilDueKm - validOdo;
+      const span = sp.oilIntervalKm || 8000;
+      const pct = Math.max(4, Math.min(100, Math.round((rem / span) * 100)));
+      oilRemEl.textContent = rem >= 0 ? ('Còn ' + rem.toLocaleString('vi-VN') + ' km') : ('Quá hạn ' + Math.abs(rem).toLocaleString('vi-VN') + ' km!');
+      oilRemEl.style.color = rem <= 0 ? 'var(--crit)' : (rem <= 1200 ? 'var(--warn)' : 'var(--go)');
+      oilFillEl.style.width = (rem <= 0 ? 100 : pct) + '%';
+      oilFillEl.className = 'svc-fill' + (rem <= 0 ? ' crit' : (rem <= 1200 ? ' warn' : ''));
+      oilSubEl.textContent = 'Mốc thay dầu tiếp theo: ' + sp.oilDueKm.toLocaleString('vi-VN') + ' km (chu kỳ ' + span.toLocaleString('vi-VN') + ' km).';
+    } else {
+      oilRemEl.textContent = 'Chưa đặt mốc';
+      oilRemEl.style.color = 'var(--dim)';
+      oilFillEl.style.width = '100%';
+      oilFillEl.className = 'svc-fill';
+      oilSubEl.textContent = validOdo != null
+        ? ('ODO hiện tại ' + validOdo.toLocaleString('vi-VN') + ' km — bấm "Vừa thay dầu xong" để đếm lùi tự động!')
+        : 'Đang chờ ODO thực tế từ xe…';
+    }
+  }
+
+  // Vehicle Check progress
+  const chkRemEl = document.getElementById('svcCheckRemain');
+  const chkFillEl = document.getElementById('svcCheckFill');
+  const chkSubEl = document.getElementById('svcCheckSub');
+  if (chkRemEl && chkFillEl && chkSubEl) {
+    if (sp.checkDueKm > 0 && validOdo != null) {
+      const rem = sp.checkDueKm - validOdo;
+      const pct = Math.max(4, Math.min(100, Math.round((rem / 15000) * 100)));
+      chkRemEl.textContent = rem >= 0 ? ('Còn ' + rem.toLocaleString('vi-VN') + ' km') : ('Quá hạn ' + Math.abs(rem).toLocaleString('vi-VN') + ' km!');
+      chkRemEl.style.color = rem <= 0 ? 'var(--crit)' : (rem <= 1500 ? 'var(--warn)' : 'var(--go)');
+      chkFillEl.style.width = (rem <= 0 ? 100 : pct) + '%';
+      chkFillEl.className = 'svc-fill' + (rem <= 0 ? ' crit' : (rem <= 1500 ? ' warn' : ''));
+      chkSubEl.textContent = 'Mốc kiểm tra tiếp theo: ' + sp.checkDueKm.toLocaleString('vi-VN') + ' km.';
+    } else {
+      chkRemEl.textContent = 'Chưa đặt mốc';
+      chkRemEl.style.color = 'var(--dim)';
+      chkFillEl.style.width = '100%';
+      chkFillEl.className = 'svc-fill';
+    }
+  }
+}
+
+function saveOilInterval() {
+  const interval = Number(document.getElementById('selOilInterval').value) || 8000;
+  sendCmd('service_prefs', { oilIntervalKm: interval }, true);
+}
+
+function resetServiceItem(kind) {
+  if (kind === 'oil') {
+    const interval = Number(document.getElementById('selOilInterval').value) || 8000;
+    sendCmd('service_prefs', { oilIntervalKm: interval, resetOilNow: true }, true);
+  } else if (kind === 'check') {
+    sendCmd('service_prefs', { resetCheckNow: true }, true);
+  }
+}
+
+function saveBrakeFluidDate() {
+  const due = (document.getElementById('inpBrakeFluidDue').value || '').trim();
+  sendCmd('service_prefs', { brakeFluidDue: due }, true);
+}
+
+/* ---------------- Send Destination to Car & Trip Analytics ---------------- */
+
+function haversineClientKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function parseInputCoords(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const mAt = /@(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/.exec(s);
+  const mParam = /[?&](?:q|ll|destination|daddr|query)=(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/.exec(s);
+  const mPair = /^\s*(-?\d{1,2}\.\d{3,})\s*[,;\s]\s*(-?\d{1,3}\.\d{3,})\s*$/.exec(s);
+  const hit = mAt || mParam || mPair;
+  if (!hit) return null;
+  const lat = Number(hit[1]), lon = Number(hit[2]);
+  if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+async function searchDestination() {
+  const qEl = document.getElementById('inpDestQuery');
+  const box = document.getElementById('destResults');
+  const q = (qEl && qEl.value || '').trim();
+  if (!q) return showToast('Hãy nhập tên địa điểm hoặc dán toạ độ trước.', '#ffb020');
+
+  const direct = parseInputCoords(q);
+  if (direct) {
+    lastDestHits = [{
+      name: 'Toạ độ ghim (' + direct.lat.toFixed(4) + ', ' + direct.lon.toFixed(4) + ')',
+      address: direct.lat.toFixed(6) + ', ' + direct.lon.toFixed(6),
+      lat: direct.lat,
+      lon: direct.lon,
+    }];
+    renderDestHits();
+    return;
+  }
+
+  box.innerHTML = '<div style="color:var(--dim);padding:6px 0">Đang tìm địa điểm…</div>';
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=4&accept-language=vi&q=' + encodeURIComponent(q);
+    const r = await fetch(url, { headers: { Accept: 'application/json' } });
+    const arr = await r.json();
+    if (!Array.isArray(arr) || !arr.length) {
+      box.innerHTML = '<div style="color:var(--warn);padding:6px 0">Không tìm thấy địa điểm khớp — bạn có thể dán toạ độ lat,lon từ Google Maps.</div>';
+      return;
+    }
+    lastDestHits = arr.slice(0, 4).map((it) => {
+      const parts = String(it.display_name || '').split(',').map((s) => s.trim()).filter(Boolean);
+      return {
+        name: it.name || parts[0] || q,
+        address: parts.slice(1, 4).join(', '),
+        lat: Number(it.lat),
+        lon: Number(it.lon),
+      };
+    });
+    renderDestHits();
+  } catch (e) {
+    box.innerHTML = '<div style="color:var(--crit);padding:6px 0">Lỗi tìm địa điểm: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderDestHits() {
+  const box = document.getElementById('destResults');
+  if (!box) return;
+  const carPos = vehicleData && vehicleData.telemetry && vehicleData.telemetry.pos;
+  box.innerHTML = lastDestHits.map((h, idx) => {
+    const dist = carPos ? (' · Cách xe ' + haversineClientKm(carPos.lat, carPos.lon, h.lat, h.lon).toFixed(1) + ' km') : '';
+    return '<div class="dest-item">' +
+      '<div style="min-width:0;flex:1"><div style="font-weight:700;color:#f8fafc">' + escHtml(h.name) + '</div>' +
+      '<div style="font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(h.address) + escHtml(dist) + '</div></div>' +
+      '<button type="button" class="btn blue" style="flex:0 0 auto;min-width:86px;padding:7px 11px;font-size:12px" onclick="pickDestResult(' + idx + ')">🚀 Gửi xe</button>' +
+      '</div>';
+  }).join('');
+}
+
+function pickDestResult(idx) {
+  const h = lastDestHits[idx];
+  if (!h) return;
+  sendCmd('send_destination', { name: h.name, address: h.address, lat: h.lat, lon: h.lon }, true);
+  document.getElementById('destResults').innerHTML = '';
+}
+
+function clearCarDestination() {
+  sendCmd('clear_destination', {}, true);
+}
+
+function renderActiveDestination(tel) {
+  const box = document.getElementById('sentDestBox');
+  if (!box) return;
+  const dst = vehicleData && vehicleData.destination;
+  if (!dst || !dst.name) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  const distTxt = (tel && tel.pos && dst.lat != null && dst.lon != null)
+    ? (' · Cách xe ' + haversineClientKm(tel.pos.lat, tel.pos.lon, dst.lat, dst.lon).toFixed(1) + ' km')
+    : '';
+  document.getElementById('sentDestTitle').textContent = '📌 Đang ghim trên xe: ' + dst.name;
+  document.getElementById('sentDestSub').textContent = (dst.address || (dst.lat.toFixed(4) + ', ' + dst.lon.toFixed(4))) + distTxt;
+}
+
+function renderTripAnalytics(trips, effChassis) {
+  const badge = document.getElementById('tripCountBadge');
+  const grid = document.getElementById('tripSummaryGrid');
+  if (badge) badge.textContent = trips.length + ' chuyến';
+  if (!grid) return;
+  if (!trips.length) {
+    grid.classList.add('hidden');
+    return;
+  }
+  grid.classList.remove('hidden');
+  let sumKm = 0, sumMin = 0, sumFuelPct = 0, hasFuel = false, penalty = 0;
+  for (let i = 0; i < trips.length; i++) {
+    const tr = trips[i];
+    sumKm += Number(tr.distanceKm) || 0;
+    sumMin += Number(tr.durationMin) || 0;
+    if (tr.fuelUsedPct != null && tr.fuelUsedPct > 0) {
+      sumFuelPct += Number(tr.fuelUsedPct);
+      hasFuel = true;
+    }
+    if ((tr.maxRpm || 0) > 4200) penalty += 4;
+    else if ((tr.maxRpm || 0) > 3400) penalty += 1.5;
+    if ((tr.maxSpeed || 0) > 125) penalty += 3;
+  }
+  const tankL = /^G0[567]/.test(effChassis) ? 83 : (/^G0[12]/.test(effChassis) ? 65 : 68);
+  const estLiters = (sumFuelPct / 100) * tankL;
+  const score = Math.max(68, Math.min(100, Math.round(98 - (penalty / Math.max(1, trips.length)) * 3)));
+  document.getElementById('tsDist').textContent = sumKm.toFixed(1) + ' km';
+  document.getElementById('tsTime').textContent = sumMin >= 60 ? (Math.floor(sumMin / 60) + 'g ' + (sumMin % 60) + 'p') : (sumMin + ' phút');
+  document.getElementById('tsFuel').textContent = hasFuel ? ('~' + estLiters.toFixed(1) + ' L') : 'Ít hao';
+  const scEl = document.getElementById('tsScore');
+  scEl.textContent = score + ' / 100';
+  scEl.style.color = score >= 88 ? 'var(--go)' : 'var(--warn)';
 }
 
 function refreshMap() {
@@ -1545,7 +1957,12 @@ function refreshMap() {
   }
   if (mapMarker) mapInstance.removeLayer(mapMarker);
   if (mapCircle) mapInstance.removeLayer(mapCircle);
+  if (mapDestMarker) { mapInstance.removeLayer(mapDestMarker); mapDestMarker = null; }
   mapMarker = L.circleMarker([pos.lat, pos.lon], { radius: 9, color: '#ffffff', weight: 2, fillColor: '#1c69d4', fillOpacity: 1 }).addTo(mapInstance);
+  const dst = vehicleData && vehicleData.destination;
+  if (dst && dst.lat != null && dst.lon != null) {
+    mapDestMarker = L.circleMarker([dst.lat, dst.lon], { radius: 8, color: '#ffffff', weight: 2, fillColor: '#2fd27a', fillOpacity: 0.95 }).addTo(mapInstance);
+  }
   const valet = (vehicleData && vehicleData.valet) || {};
   if (valet.enabled && valet.radiusM) {
     mapCircle = L.circle([pos.lat, pos.lon], { radius: valet.radiusM, color: '#ffb020', weight: 1.5, fillOpacity: 0.12 }).addTo(mapInstance);
@@ -1801,6 +2218,12 @@ window.injectPairCodeFromNative = async function (raw) {
 /* ---------------- Boot ---------------- */
 (function init() {
   initSwatches();
+  const advDet = document.getElementById('adv1crDetails');
+  if (advDet) {
+    advDet.addEventListener('toggle', () => {
+      if (advDet.open && identity && !lastSchema) requestSchema();
+    });
+  }
   const heroEl = document.getElementById('heroCarImg');
   if (heroEl) {
     heroEl.onerror = () => {
@@ -1829,7 +2252,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.5.3').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.0').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.5.3">
+<link rel="stylesheet" href="styles.css?v=0.6.0">
 <title>MyBMW</title>
 </head>
 <body>
@@ -93,6 +93,7 @@
       <img id="heroCarImg" class="car-hero-img" src="car-studio.jpg" alt="My BMW">
       <div class="lock-banner" id="securityBanner">ĐÃ KHOÁ AN TOÀN</div>
     </div>
+    <div id="securityPills" class="security-pills"></div>
 
     <!-- Fuel & Range Card -->
     <div class="range-card">
@@ -192,6 +193,48 @@
       </div>
     </div>
 
+    <!-- 4-Wheel TPMS Tire Pressure Card -->
+    <div class="glass-card" id="tpmsCard">
+      <div class="card-head">
+        <span>🛞 Áp suất 4 lốp TPMS</span>
+        <button type="button" class="mini-refresh" id="btnTireUnit" onclick="toggleTireUnit()">Đơn vị: bar</button>
+      </div>
+      <div class="tpms-stage">
+        <div class="tpms-wheel" id="tpmsBoxFl">
+          <div class="tpms-pos">Trước Trái</div>
+          <div class="tpms-val" id="tpmsFl">--</div>
+          <div class="tpms-sub" id="tpmsTgtFl">Chuẩn: --</div>
+        </div>
+        <div class="tpms-car-center">
+          <svg width="54" height="104" viewBox="0 0 54 104" fill="none">
+            <rect x="9" y="6" width="36" height="92" rx="14" stroke="#38bdf8" stroke-opacity="0.48" stroke-width="1.8" fill="rgba(28,105,212,0.12)"/>
+            <path d="M14 31C18 27 36 27 40 31L38 48H16L14 31Z" fill="rgba(56,189,248,0.22)" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="1.2"/>
+            <path d="M16 68H38L40 81C35 84 19 84 14 81L16 68Z" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-opacity="0.35" stroke-width="1.2"/>
+            <rect x="4" y="18" width="5" height="18" rx="2.5" fill="#38bdf8" fill-opacity="0.65"/>
+            <rect x="45" y="18" width="5" height="18" rx="2.5" fill="#38bdf8" fill-opacity="0.65"/>
+            <rect x="4" y="68" width="5" height="18" rx="2.5" fill="#38bdf8" fill-opacity="0.65"/>
+            <rect x="45" y="68" width="5" height="18" rx="2.5" fill="#38bdf8" fill-opacity="0.65"/>
+          </svg>
+        </div>
+        <div class="tpms-wheel right" id="tpmsBoxFr">
+          <div class="tpms-pos">Trước Phải</div>
+          <div class="tpms-val" id="tpmsFr">--</div>
+          <div class="tpms-sub" id="tpmsTgtFr">Chuẩn: --</div>
+        </div>
+        <div class="tpms-wheel" id="tpmsBoxRl">
+          <div class="tpms-pos">Sau Trái</div>
+          <div class="tpms-val" id="tpmsRl">--</div>
+          <div class="tpms-sub" id="tpmsTgtRl">Chuẩn: --</div>
+        </div>
+        <div class="tpms-wheel right" id="tpmsBoxRr">
+          <div class="tpms-pos">Sau Phải</div>
+          <div class="tpms-val" id="tpmsRr">--</div>
+          <div class="tpms-sub" id="tpmsTgtRr">Chuẩn: --</div>
+        </div>
+      </div>
+      <div class="tpms-note" id="tpmsNote">Đọc trực tiếp từ bộ thu RDC / LSCDataSink của xe.</div>
+    </div>
+
     <!-- Latest Parked Snapshot Card -->
     <div class="glass-card" id="latestSnapCard">
       <div class="card-head">
@@ -238,6 +281,28 @@
       </div>
     </div>
 
+    <!-- Send Destination to Car (My BMW ConnectedDrive style) -->
+    <div class="glass-card">
+      <div class="card-head">
+        <span>🚀 Gửi điểm đến lên xe (Send to Car)</span>
+      </div>
+      <div id="sentDestBox" class="dest-active-box hidden">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:12.5px;font-weight:700;color:#e0f2fe" id="sentDestTitle">--</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px" id="sentDestSub">--</div>
+        </div>
+        <button type="button" class="mini-refresh" onclick="clearCarDestination()">✕ Xoá</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:8px;line-height:1.4">
+        Nhập tên địa điểm / địa chỉ hoặc dán toạ độ Google Maps để ghim trực tiếp lên màn hình iDrive 7 của xe:
+      </div>
+      <div class="btn-row" style="margin-top:0">
+        <input type="text" id="inpDestQuery" style="flex:2;min-width:170px" placeholder="VD: Landmark 81, Sân bay, hoặc 10.77,106.70" onkeydown="if(event.key==='Enter')searchDestination()">
+        <button type="button" class="btn blue" style="flex:0.8;min-width:92px" onclick="searchDestination()">🔍 Tìm</button>
+      </div>
+      <div id="destResults" style="margin-top:8px;font-size:13px"></div>
+    </div>
+
     <div class="glass-card">
       <div class="card-head"><span>🛡️ Cài đặt giám sát Valet</span></div>
       <div class="metrics-grid">
@@ -258,39 +323,118 @@
     </div>
 
     <div class="glass-card">
-      <div class="card-head"><span>🏁 Lịch sử hành trình gần đây</span></div>
+      <div class="card-head">
+        <span>📊 Thống kê &amp; Lịch sử hành trình</span>
+        <span id="tripCountBadge" style="color:var(--dim);text-transform:none;font-weight:600">0 chuyến</span>
+      </div>
+      <div id="tripSummaryGrid" class="metrics-grid hidden" style="margin-bottom:12px">
+        <div class="metric-box"><div class="k">Tổng quãng đường</div><div class="v" id="tsDist">0 km</div></div>
+        <div class="metric-box"><div class="k">Tổng thời gian lái</div><div class="v" id="tsTime">0 phút</div></div>
+        <div class="metric-box"><div class="k">Xăng tiêu thụ</div><div class="v" id="tsFuel">--</div></div>
+        <div class="metric-box"><div class="k">Điểm vận hành êm</div><div class="v" id="tsScore" style="color:var(--go)">--</div></div>
+      </div>
       <div id="tripList" style="font-size:13px;color:var(--dim)">Chưa có chuyến đi nào.</div>
     </div>
   </section>
 
-  <!-- VIEW 3: 1CR INSPECTOR -->
+  <!-- VIEW 3: VEHICLE HEALTH, SERVICE & 1CR DIAGNOSTICS -->
   <section id="view-1cr" class="hidden">
     <div class="glass-card">
-      <div class="card-head"><span>🛠️ Dò &amp; Ghim lệnh 1CR từ xa</span></div>
-      <div style="font-size:13px;color:var(--dim);line-height:1.45;margin-bottom:10px">
-        Đọc trực tiếp danh sách giao diện <code>Climate / 1CR</code> của đầu MGU qua mạng (không cần chung Wi-Fi). Lưu ý chuẩn BMW: để hộp BDC đề nổ động cơ từ xa, xe phải <b>đóng kín cửa &amp; khoá xe từ bên ngoài</b> (nếu ngồi trong xe chưa khoá, lệnh sẽ bật quạt làm mát cabin).
+      <div class="card-head">
+        <span>🩺 Sức khoẻ Hệ thống &amp; 8 Hộp ECU</span>
+        <span id="healthTimeBadge" style="color:var(--dim);text-transform:none;font-weight:600">Chỉ đọc UDS</span>
       </div>
-      <div class="btn-row">
-        <button class="btn blue" onclick="requestSchema()">🔍 Tải danh sách hàm Climate từ xe</button>
-        <button class="btn" onclick="exportSchemaJson()">📋 Copy / Xuất Log</button>
+      <div id="healthBanner" class="health-banner">
+        Chưa quét phiên này · Bấm nút bên dưới để đọc trạng thái 8 hộp điều khiển chính (DME, Hộp số ZF, BDC, DSC, Điều hoà, Đồng hồ, MGU, Cam 360°).
       </div>
-      <div id="schemaCards" style="margin-top:12px"></div>
-
-      <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Interface SOME/IP:</div>
-      <input type="text" id="inpIface" placeholder="de.bmw.infotainment.climate.Climate">
-      <div class="btn-row">
-        <input type="text" id="inpKind" value="setter" style="flex:1" placeholder="setter | method">
-        <input type="text" id="inpMember" style="flex:2" placeholder="Tên trường / hàm">
+      <div class="btn-row" style="margin-top:0">
+        <button type="button" class="btn blue" onclick="triggerHealthScan()">🩺 Quét sức khoẻ 8 hộp ECU ngay</button>
       </div>
-      <div style="font-size:12px;color:var(--dim);margin:8px 0 4px">Payload JSON:</div>
-      <textarea id="inpPayload" rows="2">1</textarea>
-      <div class="btn-row">
-        <button class="btn warn" onclick="sendRaw1cr(false)">⚡ Chạy thử</button>
-        <button class="btn go" onclick="sendRaw1cr(true, 'start')">📌 Ghim Nổ 1CR</button>
-        <button class="btn" onclick="sendRaw1cr(true, 'stop')">📌 Ghim Tắt 1CR</button>
+      <div id="ecuHealthGrid" class="ecu-grid"></div>
+      <div id="dtcFaultList" style="margin-top:8px"></div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:9px;line-height:1.4">
+        Chẩn đoán an toàn chuẩn ISO 14229 (<code>0x19 02</code> — 100% chỉ đọc, tuyệt đối không xoá/ghi bất kỳ hộp nào). Khi tắt máy ngủ điện, hộp Động cơ (DME) &amp; Hộp số (EGS) sẽ nghỉ cho tới lúc bật khoá điện/nổ máy.
       </div>
-      <pre id="diagOutput" class="code-box">Chưa có dữ liệu chẩn đoán.</pre>
     </div>
+
+    <div class="glass-card">
+      <div class="card-head">
+        <span>🔧 Nhắc lịch Bảo dưỡng theo ODO thực tế</span>
+        <span id="svcOdoBadge" style="color:var(--dim);text-transform:none;font-weight:600">ODO: -- km</span>
+      </div>
+
+      <div class="svc-block">
+        <div class="svc-row">
+          <span style="font-size:13.5px;font-weight:700">🛢️ Dầu động cơ &amp; Lọc dầu</span>
+          <span id="svcOilRemain" style="font-size:12.5px;font-weight:700;color:var(--go)">Chưa đặt mốc</span>
+        </div>
+        <div class="svc-track"><div id="svcOilFill" class="svc-fill" style="width:100%"></div></div>
+        <div id="svcOilSub" style="font-size:11.5px;color:var(--dim);margin-bottom:8px">Đặt chu kỳ thay dầu để tự động trừ lùi theo ODO thực của xe.</div>
+        <div class="btn-row" style="margin-top:0">
+          <select id="selOilInterval" style="flex:1;min-width:125px" onchange="saveOilInterval()">
+            <option value="7000">Chu kỳ 7.000 km</option>
+            <option value="8000" selected>Chu kỳ 8.000 km</option>
+            <option value="10000">Chu kỳ 10.000 km</option>
+          </select>
+          <button type="button" class="btn go" style="flex:1.2;font-size:13px;padding:9px 10px" onclick="resetServiceItem('oil')">✓ Vừa thay dầu xong</button>
+        </div>
+      </div>
+
+      <div class="svc-block">
+        <div class="svc-row">
+          <span style="font-size:13.5px;font-weight:700">🔍 Kiểm tra xe định kỳ (Vehicle Check)</span>
+          <span id="svcCheckRemain" style="font-size:12.5px;font-weight:700;color:var(--go)">Chưa đặt mốc</span>
+        </div>
+        <div class="svc-track"><div id="svcCheckFill" class="svc-fill" style="width:100%"></div></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span id="svcCheckSub" style="font-size:11.5px;color:var(--dim)">Theo dõi lọc gió, má phanh, gầm &amp; nước làm mát.</span>
+          <button type="button" class="mini-refresh" style="padding:5px 10px;white-space:nowrap" onclick="resetServiceItem('check')">Đặt mốc +15.000 km</button>
+        </div>
+      </div>
+
+      <div class="svc-block">
+        <div class="svc-row">
+          <span style="font-size:13.5px;font-weight:700">🛑 Hạn thay dầu phanh (2 năm/lần)</span>
+          <span id="svcBrakeBadge" style="font-size:12px;color:var(--dim)">MM/YYYY</span>
+        </div>
+        <div class="btn-row" style="margin-top:4px">
+          <input type="text" id="inpBrakeFluidDue" style="flex:1.3" placeholder="VD: 11/2028">
+          <button type="button" class="btn" style="flex:0.8;font-size:13px;padding:9px 10px" onclick="saveBrakeFluidDate()">Lưu hạn</button>
+        </div>
+      </div>
+    </div>
+
+    <details class="glass-card adv-details" id="adv1crDetails">
+      <summary>
+        <span>🛠️ Chẩn đoán nâng cao 1CR &amp; Xuất Log</span>
+        <span style="font-size:11px;color:var(--dim);text-transform:none">Mở rộng ▾</span>
+      </summary>
+      <div style="margin-top:12px">
+        <div style="font-size:13px;color:var(--dim);line-height:1.45;margin-bottom:10px">
+          Đọc trực tiếp danh sách giao diện <code>Climate / 1CR</code> của đầu MGU qua mạng (không cần chung Wi-Fi). Để hộp BDC đề nổ động cơ từ xa, xe cần <b>đóng kín cửa &amp; khoá xe từ bên ngoài</b>.
+        </div>
+        <div class="btn-row">
+          <button class="btn blue" onclick="requestSchema()">🔍 Tải danh sách hàm Climate từ xe</button>
+          <button class="btn" onclick="exportSchemaJson()">📋 Copy / Xuất Log</button>
+        </div>
+        <div id="schemaCards" style="margin-top:12px"></div>
+
+        <div style="font-size:12px;color:var(--dim);margin:10px 0 4px">Interface SOME/IP:</div>
+        <input type="text" id="inpIface" placeholder="de.bmw.infotainment.climate.Climate">
+        <div class="btn-row">
+          <input type="text" id="inpKind" value="setter" style="flex:1" placeholder="setter | method">
+          <input type="text" id="inpMember" style="flex:2" placeholder="Tên trường / hàm">
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin:8px 0 4px">Payload JSON:</div>
+        <textarea id="inpPayload" rows="2">1</textarea>
+        <div class="btn-row">
+          <button class="btn warn" onclick="sendRaw1cr(false)">⚡ Chạy thử</button>
+          <button class="btn go" onclick="sendRaw1cr(true, 'start')">📌 Ghim Nổ 1CR</button>
+          <button class="btn" onclick="sendRaw1cr(true, 'stop')">📌 Ghim Tắt 1CR</button>
+        </div>
+        <pre id="diagOutput" class="code-box">Chưa có dữ liệu chẩn đoán.</pre>
+      </div>
+    </details>
   </section>
 
   <!-- VIEW 4: PAIRING & SETTINGS -->
@@ -346,8 +490,8 @@
     <span>Bản đồ</span>
   </button>
   <button class="nav-tab" onclick="switchView('1cr', this)">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    <span>Dò 1CR</span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    <span>Sức khoẻ</span>
   </button>
   <button class="nav-tab" onclick="switchView('settings', this)">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
@@ -380,6 +524,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.5.3"></script>
+<script src="app.js?v=0.6.0"></script>
 </body>
 </html>

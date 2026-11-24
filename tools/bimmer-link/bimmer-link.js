@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.5.3';
+const VERSION = '0.6.0';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -93,6 +93,13 @@ function defaultConfig() {
             radiusM: 500,
             anchorPos: null,
         },
+        servicePlan: {
+            oilDueKm: 0,
+            oilIntervalKm: 8000,
+            checkDueKm: 0,
+            brakeFluidDue: '',
+        },
+        destination: null,
     };
 }
 
@@ -101,6 +108,8 @@ function normalizeConfig(raw) {
     const r = raw && typeof raw === 'object' ? raw : {};
     const v = r.valet && typeof r.valet === 'object' ? r.valet : {};
     const ap = r.appearance && typeof r.appearance === 'object' ? r.appearance : {};
+    const sp = r.servicePlan && typeof r.servicePlan === 'object' ? r.servicePlan : {};
+    const dst = r.destination && typeof r.destination === 'object' ? r.destination : null;
     return {
         botToken: typeof r.botToken === 'string' ? r.botToken.trim() : '',
         chatId: r.chatId !== undefined && r.chatId !== null ? String(r.chatId).trim() : '',
@@ -121,6 +130,19 @@ function normalizeConfig(raw) {
             radiusM: Math.max(100, Math.min(10000, Number(v.radiusM) || d.valet.radiusM)),
             anchorPos: (v.anchorPos && typeof v.anchorPos.lat === 'number' && typeof v.anchorPos.lon === 'number') ? v.anchorPos : null,
         },
+        servicePlan: {
+            oilDueKm: Math.max(0, Math.round(Number(sp.oilDueKm) || 0)),
+            oilIntervalKm: Math.max(3000, Math.min(25000, Math.round(Number(sp.oilIntervalKm) || d.servicePlan.oilIntervalKm))),
+            checkDueKm: Math.max(0, Math.round(Number(sp.checkDueKm) || 0)),
+            brakeFluidDue: typeof sp.brakeFluidDue === 'string' ? sp.brakeFluidDue.trim().slice(0, 20) : '',
+        },
+        destination: (dst && CarLink.validCoords(Number(dst.lat), Number(dst.lon))) ? {
+            name: String(dst.name || 'Điểm đến từ MyBMW').slice(0, 80),
+            address: String(dst.address || '').slice(0, 140),
+            lat: Number(dst.lat),
+            lon: Number(dst.lon),
+            sentAt: Number(dst.sentAt) || Date.now(),
+        } : null,
     };
 }
 
@@ -479,6 +501,8 @@ function createService(customCfg) {
 
             if (c === 'snap_now') {
                 await ack(true, '📸 Xe đang chụp ảnh 360° & đọc thông số — chờ ~3 giây…');
+            } else if (c === 'scan_health') {
+                await ack(true, '🩺 Xe đang quét 8 hộp ECU (DME, Hộp số, BDC, Phanh, Điều hoà…) — chờ ~2 giây…');
             }
             const out = await executeAction(c, a, cmdObj.device || 'MyBMW App');
             syncCloudState(true);
@@ -496,8 +520,10 @@ function createService(customCfg) {
             hasFactoryHero: !!heroData.png,
             telemetry: S.telemetry,
             lastTrip: S.lastTrip,
-            trips: trips.slice(0, 8),
+            trips: trips.slice(0, 12),
             valet: config.valet,
+            servicePlan: config.servicePlan,
+            destination: config.destination,
             autoSyncTimer: config.autoSyncTimer,
             dailyTimer: config.dailyTimer,
             message: S.message,
@@ -579,6 +605,9 @@ function createService(customCfg) {
         } else if (msg.ev === 'parked') {
             if (msg.state) S.telemetry = msg.state;
             onCarParked(msg.trip || null);
+        } else if (msg.ev === 'dwa_alarm') {
+            if (msg.state) S.telemetry = msg.state;
+            onDwaAlarmTriggered(msg.reason || 'DWA');
         } else if (msg.ev === 'reply' && msg.reqId && S.pendingReqs[msg.reqId]) {
             const cb = S.pendingReqs[msg.reqId];
             delete S.pendingReqs[msg.reqId];
@@ -684,6 +713,24 @@ function createService(customCfg) {
             }
         } else {
             syncCloudState(true, { event: 'parked' });
+        }
+        writeStatus();
+    }
+
+    async function onDwaAlarmTriggered(reason) {
+        const now = Date.now();
+        if (S.valetAlerts.dwa && now - S.valetAlerts.dwa < 90000) return;
+        S.valetAlerts.dwa = now;
+        const alertReason = 'Báo động chống trộm DWA kích hoạt (' + reason + ')!';
+        tell('🚨 CẢNH BÁO DWA: ' + alertReason, 'crit');
+        const camGrab = await tryGrab360(4500);
+        const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
+        const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'BAO DONG CHONG TROM DWA!', modelTitle: heroData.meta.modelTitle, alert: true, valet: config.valet, at: now }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+        syncCloudState(true, { alert: { kind: 'dwa_alarm', reason: alertReason, at: now } });
+        cloud.publishSnapshot(snap.png, { title: '🚨 ' + alertReason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
+        if (config.botToken && config.chatId) {
+            const cap = Tg.formatStatusCaption('🚨 ' + alertReason, S.telemetry, { valet: config.valet });
+            tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled).catch((e) => log('dwa alert err: ' + e.message));
         }
         writeStatus();
     }
@@ -972,6 +1019,66 @@ function createService(customCfg) {
             return { ok: true, message: msg };
         }
 
+        if (action === 'scan_health') {
+            const rep = await callWorker('scan_health', {}, 15000);
+            if (!rep || !rep.ok || !rep.result) {
+                const err = (rep && rep.error) || 'Không thể kết nối cổng chẩn đoán UDS InternalTasu';
+                tell('Sức khoẻ xe: ' + err, 'warn');
+                return { ok: false, error: err };
+            }
+            const h = rep.result;
+            const summary = (h.activeFaultCount === 0 && h.storedFaultCount === 0)
+                ? ('Tất cả hệ thống hoạt động hoàn hảo (' + h.ecusAnswered + '/' + h.ecusScanned + ' hộp ECU 0 lỗi, 12V ' + (S.telemetry.battery12v || '--') + 'V)!')
+                : ('Đã quét ' + h.ecusAnswered + ' hộp ECU: ' + h.activeFaultCount + ' lỗi đang hiện hữu, ' + h.storedFaultCount + ' mã lưu bộ nhớ.');
+            tell(summary, h.activeFaultCount > 0 ? 'warn' : 'go');
+            if (source === 'Telegram' && config.botToken && config.chatId) {
+                const faultLines = (h.faults || []).slice(0, 8).map((f) => '  • ' + f.ecuName + ': 0x' + f.code + ' (' + f.statusLabel + ')');
+                tg.sendMessage('🩺 KIỂM TRA SỨC KHOẺ XE:\n' + summary + (faultLines.length ? ('\n' + faultLines.join('\n')) : ''), S.telemetry, config.valet.enabled).catch(() => {});
+            }
+            return { ok: true, message: summary, detail: h };
+        }
+
+        if (action === 'send_destination') {
+            const lat = Number(arg.lat), lon = Number(arg.lon);
+            if (!CarLink.validCoords(lat, lon)) {
+                return { ok: false, error: 'Toạ độ điểm đến không hợp lệ.' };
+            }
+            const name = String(arg.name || 'Điểm đến từ MyBMW').trim().slice(0, 80);
+            const address = String(arg.address || '').trim().slice(0, 140);
+            config.destination = { name, address, lat, lon, sentAt: Date.now() };
+            saveConfig();
+            let distNote = '';
+            if (S.telemetry && S.telemetry.pos) {
+                const dKm = CarLink.haversineKm(S.telemetry.pos.lat, S.telemetry.pos.lon, lat, lon);
+                distNote = ' (cách xe ' + dKm.toFixed(1) + ' km)';
+            }
+            const msg = '📍 Đã nhận điểm đến trên xe: ' + name + distNote;
+            tell(msg, 'go');
+            return { ok: true, message: msg, detail: config.destination };
+        }
+
+        if (action === 'clear_destination') {
+            config.destination = null;
+            saveConfig();
+            tell('Đã xoá điểm đến đã gửi.', 'dim');
+            return { ok: true, message: 'Đã xoá điểm đến trên màn hình xe.' };
+        }
+
+        if (action === 'service_prefs') {
+            const curOdo = Math.round(Number(S.telemetry && S.telemetry.odometerKm) || 0);
+            const nextSp = Object.assign({}, config.servicePlan);
+            if (arg.oilIntervalKm !== undefined) nextSp.oilIntervalKm = Math.max(3000, Math.min(25000, Math.round(Number(arg.oilIntervalKm) || 8000)));
+            if (arg.resetOilNow) nextSp.oilDueKm = curOdo + nextSp.oilIntervalKm;
+            else if (arg.oilDueKm !== undefined) nextSp.oilDueKm = Math.max(0, Math.round(Number(arg.oilDueKm) || 0));
+            if (arg.resetCheckNow) nextSp.checkDueKm = curOdo + 15000;
+            else if (arg.checkDueKm !== undefined) nextSp.checkDueKm = Math.max(0, Math.round(Number(arg.checkDueKm) || 0));
+            if (arg.brakeFluidDue !== undefined) nextSp.brakeFluidDue = String(arg.brakeFluidDue || '').trim().slice(0, 20);
+            config.servicePlan = normalizeConfig({ servicePlan: nextSp }).servicePlan;
+            saveConfig();
+            tell('Đã cập nhật lịch nhắc bảo dưỡng theo ODO thực tế.', 'go');
+            return { ok: true, message: 'Đã lưu lịch nhắc bảo dưỡng xe!', detail: config.servicePlan };
+        }
+
         if (action === 'next_ip') {
             S.ipIndex++;
             writeStatus();
@@ -1009,6 +1116,8 @@ function createService(customCfg) {
             autoSyncTimer: config.autoSyncTimer,
             dailyTimer: config.dailyTimer,
             valet: config.valet,
+            servicePlan: config.servicePlan,
+            destination: config.destination,
             workerUp: S.workerUp,
             telemetry: S.telemetry,
             activeTrip: S.activeTrip,

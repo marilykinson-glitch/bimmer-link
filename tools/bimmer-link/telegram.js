@@ -67,10 +67,15 @@ function formatStatusCaption(header, telemetry, extra) {
 
     const openWarnings = [];
     if (t.doorsOpen && t.doorsOpen.length) openWarnings.push('Cửa mở (' + t.doorsOpen.length + ')');
+    if (t.windowsOpen && t.windowsOpen.length) openWarnings.push(t.windowsOpen.join(', ') + ' mở');
     if (t.trunkOpen) openWarnings.push('Cốp sau mở');
     if (t.hoodOpen) openWarnings.push('Capo mở');
     if (t.locked === false) openWarnings.push('Xe chưa khoá');
-    lines.push('• An ninh: ' + (openWarnings.length ? ('⚠️ ' + openWarnings.join(', ')) : '🔒 Cửa & cốp đóng kín'));
+    lines.push('• An ninh: ' + (openWarnings.length ? ('⚠️ ' + openWarnings.join(', ')) : ('🔒 Cửa & 4 kính đóng kín' + (t.dwaArmed ? ' (Báo động DWA bật)' : ''))));
+    if (t.tires && (t.tires.fl != null || t.tires.targetFl != null)) {
+        const tf = (v, tg) => (v != null ? (v + ' bar') : (tg != null ? ('Mục tiêu ' + tg + ' bar') : '--'));
+        lines.push('• Áp suất lốp: TT ' + tf(t.tires.fl, t.tires.targetFl) + ' | TP ' + tf(t.tires.fr, t.tires.targetFr) + ' | ST ' + tf(t.tires.rl, t.tires.targetRl) + ' | SP ' + tf(t.tires.rr, t.tires.targetRr));
+    }
 
     lines.push('• Đề nổ 1CR: ' + (c1.active ? '🟢 Đang chạy làm mát' : (c1.timerText && c1.timerText !== 'Tắt' ? ('⏰ Đã hẹn BDC ' + c1.timerText) : 'Sẵn sàng')));
 
@@ -254,6 +259,8 @@ class TelegramController {
         } else if (/^\/valet(?:\s+(on|off))?\b/.test(low)) {
             const m = /^\/valet(?:\s+(on|off))?\b/.exec(low);
             await this.onAction('valet_set', { mode: m && m[1] ? m[1] : 'toggle' });
+        } else if (/^\/(health|ecu|check)\b/.test(low)) {
+            await this.onAction('scan_health', {});
         } else if (/^\/trips?\b/.test(low)) {
             await this.onAction('trips', {});
         }

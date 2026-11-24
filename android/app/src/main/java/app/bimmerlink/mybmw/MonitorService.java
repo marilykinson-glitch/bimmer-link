@@ -134,7 +134,9 @@ public class MonitorService extends Service {
                     long alertAt = alertObj.optLong("at", 0L);
                     if (alertAt > prevAlertAt) {
                         prefs.edit().putLong("last_alert_at", alertAt).apply();
-                        fireNotification(201, "🚨 CẢNH BÁO VALET BMW", alertObj.optString("reason", "Phát hiện vi phạm ngưỡng Valet!"));
+                        String kind = alertObj.optString("kind", "");
+                        String title = "dwa_alarm".equals(kind) ? "🚨 BÁO ĐỘNG CHỐNG TRỘM DWA!" : "🚨 CẢNH BÁO VALET BMW";
+                        fireNotification(201, title, alertObj.optString("reason", "Phát hiện cảnh báo an ninh từ xe!"));
                     }
                 } else if ("parked".equals(pkt.optString("event"))) {
                     long pktAt = pkt.optLong("at", 0L);

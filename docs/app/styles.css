@@ -624,3 +624,230 @@ pre.code-box {
   max-height: 220px;
   user-select: text;
 }
+
+/* v0.6.0: 360° Check Control Security Pills */
+.security-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: -4px 0 12px;
+}
+.sec-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+.sec-pill.ok {
+  border-color: rgba(47, 210, 122, 0.36);
+  background: rgba(16, 48, 36, 0.55);
+  color: #86efac;
+}
+.sec-pill.warn {
+  border-color: rgba(255, 176, 32, 0.48);
+  background: rgba(69, 42, 10, 0.65);
+  color: #fde68a;
+}
+.sec-pill.crit {
+  border-color: rgba(239, 68, 68, 0.65);
+  background: rgba(76, 17, 24, 0.78);
+  color: #fecaca;
+}
+
+/* v0.6.0: 4-Wheel TPMS Chassis Stage */
+.tpms-stage {
+  display: grid;
+  grid-template-columns: 1fr 78px 1fr;
+  grid-template-rows: auto auto;
+  gap: 10px 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+.tpms-car-center {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.82;
+}
+.tpms-wheel {
+  background: rgba(8, 12, 22, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 13px;
+  padding: 10px 11px;
+  transition: border-color 0.25s ease;
+}
+.tpms-wheel.right {
+  text-align: right;
+}
+.tpms-wheel.ok {
+  border-color: rgba(47, 210, 122, 0.35);
+}
+.tpms-wheel.warn {
+  border-color: rgba(255, 176, 32, 0.6);
+  background: rgba(58, 36, 9, 0.45);
+}
+.tpms-pos {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.tpms-val {
+  font-size: 19px;
+  font-weight: 800;
+  margin: 2px 0;
+  color: var(--text);
+}
+.tpms-sub {
+  font-size: 11px;
+  color: var(--dim);
+}
+.tpms-note {
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--dim);
+  text-align: center;
+  line-height: 1.4;
+}
+
+/* v0.6.0: Multi-ECU Health & CBS Service Bars */
+.health-banner {
+  padding: 11px 13px;
+  border-radius: 13px;
+  background: rgba(8, 13, 25, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  line-height: 1.45;
+}
+.health-banner.ok {
+  border-color: rgba(47, 210, 122, 0.45);
+  background: rgba(12, 42, 31, 0.65);
+  color: #86efac;
+}
+.health-banner.warn {
+  border-color: rgba(255, 176, 32, 0.52);
+  background: rgba(66, 38, 9, 0.65);
+  color: #fde68a;
+}
+.ecu-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 10px;
+}
+.ecu-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 11px;
+  background: rgba(8, 12, 22, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  font-size: 11.5px;
+}
+.ecu-pill .nm {
+  font-weight: 600;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ecu-pill .st {
+  font-weight: 700;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.ecu-pill.ok { border-color: rgba(47, 210, 122, 0.32); }
+.ecu-pill.ok .st { color: var(--go); }
+.ecu-pill.warn { border-color: rgba(255, 176, 32, 0.5); }
+.ecu-pill.warn .st { color: var(--warn); }
+.ecu-pill.crit { border-color: rgba(239, 68, 68, 0.6); }
+.ecu-pill.crit .st { color: var(--crit); }
+.ecu-pill.dim .st { color: var(--dim); }
+
+.dtc-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  margin-top: 6px;
+  border-radius: 10px;
+  background: rgba(45, 14, 20, 0.55);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  font-size: 12px;
+}
+
+.svc-block {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.svc-block:last-child { border-bottom: none; padding-bottom: 0; }
+.svc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.svc-track {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.svc-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #059669, #2fd27a);
+  transition: width 0.4s ease;
+}
+.svc-fill.warn { background: linear-gradient(90deg, #d97706, #fbbf24); }
+.svc-fill.crit { background: linear-gradient(90deg, #dc2626, #f87171); }
+
+/* v0.6.0: Send Destination to Car & Trip Summary */
+.dest-active-box {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(28, 105, 212, 0.18);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.dest-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.dest-item:last-child { border-bottom: none; }
+
+details.adv-details > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+details.adv-details > summary::-webkit-details-marker { display: none; }
