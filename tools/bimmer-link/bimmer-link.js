@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 

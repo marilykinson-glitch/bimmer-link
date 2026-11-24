@@ -55,6 +55,8 @@ const BMW_SWATCHES = [
 ];
 
 let baseStudioImg = null;
+let baseStudioLoading = false;
+let heroPendingOverride = false;
 let shadedCacheKey = '';
 let shadedCacheUrl = '';
 
@@ -91,14 +93,63 @@ function switchView(name, btn) {
 /* ---------------- Photorealistic Studio Bodywork Carpaint Shader (Fallback & Instant Preview) ---------------- */
 
 function ensureBaseStudioImage() {
-  if (baseStudioImg) return;
+  if (baseStudioImg || baseStudioLoading) return;
+  baseStudioLoading = true;
   const im = new Image();
   im.onload = () => {
-    baseStudioImg = im;
-    shadedCacheKey = '';
-    renderAll();
+    const finish = () => {
+      if (im.naturalWidth >= 200 && im.naturalHeight >= 100) {
+        baseStudioImg = im;
+        shadedCacheKey = '';
+        shadedCacheUrl = '';
+      }
+      baseStudioLoading = false;
+      renderAll();
+    };
+    if (typeof im.decode === 'function') {
+      im.decode().then(finish, finish);
+    } else {
+      finish();
+    }
+  };
+  im.onerror = () => {
+    baseStudioLoading = false;
   };
   im.src = 'car-studio.jpg';
+}
+
+function validateHeroDataUrl(dataUrl, cb) {
+  if (!dataUrl || typeof dataUrl !== 'string' || dataUrl.indexOf('data:image/') !== 0) {
+    return cb(false);
+  }
+  const im = new Image();
+  im.onload = () => {
+    const checkPixels = () => {
+      if (im.naturalWidth < 80 || im.naturalHeight < 30) return cb(false);
+      try {
+        const cw = 64, ch = 32;
+        const cv = document.createElement('canvas');
+        cv.width = cw; cv.height = ch;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(im, 0, 0, cw, ch);
+        const d = ctx.getImageData(0, 0, cw, ch).data;
+        let vis = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i + 3] > 35 && (d[i] + d[i + 1] + d[i + 2]) > 36) vis++;
+        }
+        cb(vis >= 18);
+      } catch (e) {
+        cb(true);
+      }
+    };
+    if (typeof im.decode === 'function') {
+      im.decode().then(checkPixels, checkPixels);
+    } else {
+      checkPixels();
+    }
+  };
+  im.onerror = () => cb(false);
+  im.src = dataUrl;
 }
 
 function findSwatchByColourOrLabel(colourCode, paintLabel) {
@@ -128,12 +179,29 @@ function shadeFallbackStudioCar(rgb) {
   if (key === shadedCacheKey && shadedCacheUrl) return shadedCacheUrl;
 
   const w = baseStudioImg.naturalWidth, h = baseStudioImg.naturalHeight;
-  const cv = document.createElement('canvas');
-  cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d');
-  ctx.drawImage(baseStudioImg, 0, 0);
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
+  let cv, ctx, img, d;
+  try {
+    cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    ctx = cv.getContext('2d');
+    ctx.drawImage(baseStudioImg, 0, 0);
+    img = ctx.getImageData(0, 0, w, h);
+    d = img.data;
+  } catch (e) {
+    return 'car-studio.jpg';
+  }
+
+  // Guard against iOS Safari WebKit async-decode empty/black canvas frames so a black JPEG is NEVER cached!
+  let srcBright = 0;
+  for (let s = 0; s < d.length; s += 64) {
+    if (d[s] + d[s + 1] + d[s + 2] > 90) srcBright++;
+  }
+  if (srcBright < 80) {
+    baseStudioImg = null;
+    baseStudioLoading = false;
+    setTimeout(ensureBaseStudioImage, 250);
+    return 'car-studio.jpg';
+  }
 
   const tr = rgb[0] / 255, tg = rgb[1] / 255, tb = rgb[2] / 255;
   const tLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
@@ -258,8 +326,7 @@ function applyAppearanceToCar(resetDefault) {
     document.getElementById('selChassis').value = '';
     document.getElementById('selTrim').value = '';
     saveLocal('mybmw_appearance', localAppearance);
-    factoryHero = null;
-    localStorage.removeItem('mybmw_hero');
+    heroPendingOverride = true;
     highlightSelectedSwatch();
     renderAll();
     sendCmd('set_appearance', { reset: true }, true);
@@ -268,9 +335,8 @@ function applyAppearanceToCar(resetDefault) {
   localAppearance.chassis = document.getElementById('selChassis').value || localAppearance.chassis || '';
   localAppearance.trimLine = document.getElementById('selTrim').value || localAppearance.trimLine || '';
   saveLocal('mybmw_appearance', localAppearance);
-  // Clear old mismatched factoryHero while MGU renders the newly chosen model/paint
-  factoryHero = null;
-  localStorage.removeItem('mybmw_hero');
+  // Show instant shaded studio preview while MGU renders & uploads the new factory PNG
+  heroPendingOverride = true;
   renderAll();
   sendCmd('set_appearance', {
     chassis: localAppearance.chassis,
@@ -544,7 +610,7 @@ function closeSnapModal() {
   document.getElementById('snapModal').classList.add('hidden');
 }
 
-function onHeroPacket(pkt) {
+function onHeroPacket(pkt, ts, isLive) {
   if (!pkt || pkt.t !== 'photo_chunk') return;
   const hid = pkt.id || 'hero';
   let b = heroBuckets[hid];
@@ -557,9 +623,16 @@ function onHeroPacket(pkt) {
     let fullB64 = '';
     for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
     delete heroBuckets[hid];
-    if (!factoryHero || b.at >= (factoryHero.at || 0)) {
-      factoryHero = { dataUrl: 'data:image/png;base64,' + fullB64, at: b.at, title: b.title, paint: b.paint };
-      saveLocal('mybmw_hero', factoryHero);
+    if (!factoryHero || b.at >= (factoryHero.at || 0) || isLive) {
+      const candidateUrl = 'data:image/png;base64,' + fullB64;
+      const snapMeta = { dataUrl: candidateUrl, at: b.at, title: b.title, paint: b.paint };
+      validateHeroDataUrl(candidateUrl, (ok) => {
+        if (!ok) return;
+        factoryHero = snapMeta;
+        if (isLive) heroPendingOverride = false;
+        saveLocal('mybmw_hero', factoryHero);
+        renderAll();
+      });
     }
   }
 }
@@ -826,7 +899,7 @@ function renderAll() {
     : ((prof.paintRgb && prof.paintRgb.length === 3) ? prof.paintRgb : (chosenSwatch ? chosenSwatch.rgb : null));
 
   if (heroEl) {
-    if (useFactory && factoryHero && factoryHero.dataUrl) {
+    if (useFactory && !heroPendingOverride && factoryHero && factoryHero.dataUrl) {
       if (heroEl.src !== factoryHero.dataUrl) heroEl.src = factoryHero.dataUrl;
       heroEl.classList.add('factory-png');
     } else {
@@ -1160,8 +1233,30 @@ window.injectPairCodeFromNative = async function (raw) {
 /* ---------------- Boot ---------------- */
 (function init() {
   initSwatches();
+  const heroEl = document.getElementById('heroCarImg');
+  if (heroEl) {
+    heroEl.onerror = () => {
+      if (factoryHero) {
+        factoryHero = null;
+        localStorage.removeItem('mybmw_hero');
+      }
+      heroEl.classList.remove('factory-png');
+      if (heroEl.getAttribute('src') !== 'car-studio.jpg') {
+        heroEl.src = 'car-studio.jpg';
+      }
+    };
+  }
+  if (factoryHero && factoryHero.dataUrl) {
+    validateHeroDataUrl(factoryHero.dataUrl, (ok) => {
+      if (!ok) {
+        factoryHero = null;
+        localStorage.removeItem('mybmw_hero');
+        renderAll();
+      }
+    });
+  }
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('./sw.js?v=0.4.2').catch(() => {});
+    navigator.serviceWorker.register('./sw.js?v=0.4.3').catch(() => {});
   }
   renderAll();
   const initialCode = extractPairCode(location.hash) || extractPairCode(location.search) || localStorage.getItem('mybmw_pair') || '';

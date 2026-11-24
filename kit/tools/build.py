@@ -299,9 +299,29 @@ def build_ui(spec, language='en'):
     return '\n'.join(xml) + '\n', ui, strings, state_ids
 
 
+SOMEIP_CATALOG = os.environ.get('OAP_SOMEIP_CATALOG', '/etc/oap/someip/someip-interfaces.json')
+
+
+def load_unit_interfaces():
+    if not os.path.isfile(SOMEIP_CATALOG):
+        return None
+    try:
+        db = json.load(open(SOMEIP_CATALOG, encoding='utf-8'))
+        if isinstance(db, dict) and isinstance(db.get('interfaces'), dict):
+            return db['interfaces']
+    except Exception:
+        pass
+    return None
+
+
 def manifest_for(spec):
     proxies = dict(PLATFORM_PROXIES)
+    unit_ifaces = load_unit_interfaces()
     for iface, fields in spec.get('signals', {}).items():
+        is_opt = isinstance(fields, dict) and bool(fields.get('_optional'))
+        if unit_ifaces is not None and iface not in unit_ifaces:
+            if is_opt:
+                continue
         inst = fields.pop('_instances', '1') if isinstance(fields, dict) else '1'
         entry = {'instances': inst}
         if isinstance(fields, dict):
@@ -317,6 +337,13 @@ def manifest_for(spec):
         else:
             entry = '*'
         proxies[iface] = entry
+    if spec.get('autoClimateSignals') and unit_ifaces is not None:
+        pat = re.compile(r'(climate|klimat|aircond|precond|standheiz|standklima|auxiliary)', re.I)
+        for name, meta in sorted(unit_ifaces.items()):
+            if name in proxies or '.oap.' in name:
+                continue
+            if pat.search(name) and isinstance(meta, dict) and meta.get('instances'):
+                proxies[name] = '*'
     return {'proxies': proxies, 'services': PLATFORM_SERVICES}
 
 

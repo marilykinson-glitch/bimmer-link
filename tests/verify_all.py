@@ -486,9 +486,41 @@ def check_car_link_logic_in_jxa():
     print('[OK] Live JS unit tests (1CR discovery, timer synthesis, underground GPS, Park/Trip state machine) passed')
 
 
+def check_pwa_and_manifest_filtering():
+    import tempfile
+    for rel in ('docs/app/app.js', 'docs/app/sw.js'):
+        src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+        code = f"new Function({json.dumps(src)}); 'PWA_SYNTAX_OK';"
+        assert run_jxa(code) == 'PWA_SYNTAX_OK'
+    app_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
+    assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js
+
+    with tempfile.TemporaryDirectory(prefix='bl-cat-') as td:
+        cat = os.path.join(td, 'someip-interfaces.json')
+        json.dump({'interfaces': {
+            'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy': {'instances': {'1': {}}},
+            'de.bmw.infotainment.climate.ClimateMaster': {'instances': {'1': {}}},
+            'de.bmw.infotainment.climate.CustomStandklima': {'instances': {'1': {}}},
+        }}, open(cat, 'w', encoding='utf-8'))
+        env = dict(os.environ, OAP_SOMEIP_CATALOG=cat)
+        spec_path = os.path.join(ROOT, 'apps/bimmer_link/app.json')
+        out = subprocess.run([
+            sys.executable, '-c',
+            f"import json, sys; sys.path.insert(0, {json.dumps(os.path.join(ROOT, 'kit/tools'))}); "
+            f"import build; m = build.manifest_for(json.load(open({json.dumps(spec_path)}))); print(json.dumps(m['proxies']))"
+        ], env=env, capture_output=True, text=True, check=True).stdout
+        proxies = json.loads(out)
+        assert 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy' in proxies
+        assert 'de.bmw.infotainment.climate.ClimateMaster' in proxies
+        assert 'de.bmw.infotainment.climate.CustomStandklima' in proxies
+        assert 'de.bmw.infotainment.climate.SteeringWheelClimate' not in proxies
+    print('[OK] PWA client syntax, black-canvas guard, and OAP SOME/IP catalog filtering verified')
+
+
 if __name__ == '__main__':
     ver = check_manifests()
     check_js_syntax_and_node8()
+    check_pwa_and_manifest_filtering()
     check_full_mgu_build_and_real_kit_render(ver)
     check_car_link_logic_in_jxa()
     print('=== ALL VERIFICATION CHECKS PASSED ===')

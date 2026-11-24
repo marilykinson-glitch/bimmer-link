@@ -409,11 +409,29 @@ function scanFactoryVehicle(opts) {
                     pick = pics[0];
                 }
                 const maskEntry = findMaskForPic(pick.key, masks, scene);
-                const shaded = CARPAINT.shadeCarpaint(
-                    parsed.rgba(pick.key),
-                    maskEntry ? parsed.rgba(maskEntry.key) : Buffer.alloc(pick.w * pick.h * 4),
-                    paint
-                );
+                const rawPic = parsed.rgba(pick.key);
+                const rawMask = maskEntry ? parsed.rgba(maskEntry.key) : Buffer.alloc(pick.w * pick.h * 4);
+                let shaded = CARPAINT.shadeCarpaint(rawPic, rawMask, paint);
+
+                // Ensure ultra-dark paints (e.g. Black2 / Sapphire Black) still show crisp studio highlights against #050811
+                let opaquePx = 0, brightPx = 0;
+                for (let p = 0; p < shaded.length; p += 16) {
+                    if (shaded[p + 3] > 40) {
+                        opaquePx++;
+                        if (shaded[p] + shaded[p + 1] + shaded[p + 2] > 42) brightPx++;
+                    }
+                }
+                if (opaquePx < 60) continue; // Skip empty/corrupted bitmap entry and try next bundle
+                if (brightPx < opaquePx * 0.14 && paint && paint.base && paint.spec && paint.refl) {
+                    const liftedPaint = {
+                        name: paint.name,
+                        base: [Math.max(0.06, paint.base[0] * 1.35), Math.max(0.065, paint.base[1] * 1.35), Math.max(0.075, paint.base[2] * 1.35), Math.min(3.8, paint.base[3])],
+                        spec: [Math.max(0.68, paint.spec[0] * 1.25), Math.max(0.70, paint.spec[1] * 1.25), Math.max(0.75, paint.spec[2] * 1.25), paint.spec[3]],
+                        refl: [Math.max(0.95, paint.refl[0] * 1.15), Math.max(0.97, paint.refl[1] * 1.15), Math.max(1.02, paint.refl[2] * 1.15), paint.refl[3]],
+                    };
+                    shaded = CARPAINT.shadeCarpaint(rawPic, rawMask, liftedPaint);
+                }
+
                 const topDown = W.flipRows(shaded, pick.w, pick.h);
                 const cropped = cropAlphaBounds(topDown, pick.w, pick.h);
                 const targetW = Math.min(600, cropped.w);

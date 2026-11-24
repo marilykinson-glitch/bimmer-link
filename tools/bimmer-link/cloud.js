@@ -153,6 +153,7 @@ class CloudBridge {
         this.bootSynced = false;
         this.polling = false;
         this.uploadingHero = false;
+        this.heroUploadSeq = 0;
         this.stopped = false;
     }
 
@@ -256,18 +257,26 @@ class CloudBridge {
         return true;
     }
 
-    /** Publish the genuine factory-shaded 2D vehicle hero PNG extracted from the head unit. */
+    /** Publish the genuine factory-shaded 2D vehicle hero PNG extracted from the head unit (latest-wins preemption). */
     async publishHero(pngBuf, meta) {
-        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf) || this.uploadingHero) return false;
+        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
+        const mySeq = ++this.heroUploadSeq;
+        while (this.uploadingHero && !this.stopped) {
+            await sleep(80);
+            if (this.heroUploadSeq !== mySeq) return false;
+        }
+        if (this.stopped || this.heroUploadSeq !== mySeq) return false;
         this.uploadingHero = true;
         try {
-            const heroId = 'h_' + Date.now().toString(36);
+            const heroId = 'h_' + Date.now().toString(36) + '_' + (mySeq % 1000);
             const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, Object.assign({}, meta || {}, { id: heroId }));
             for (let i = 0; i < chunks.length; i++) {
+                if (this.stopped || this.heroUploadSeq !== mySeq) return false;
                 if (i > 0) await sleep(140);
+                if (this.stopped || this.heroUploadSeq !== mySeq) return false;
                 await this._postTopic(this.identity.topics.hero, chunks[i], 15000);
             }
-            return true;
+            return this.heroUploadSeq === mySeq;
         } finally {
             this.uploadingHero = false;
         }
