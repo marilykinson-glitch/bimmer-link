@@ -20,6 +20,7 @@ JS_FILES = [
     'tools/bimmer-link/carpaint.js',
     'tools/bimmer-link/wbm.js',
     'tools/bimmer-link/cloud.js',
+    'tools/bimmer-link/mqtt-lite.js',
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
     'tools/bimmer-link/uplink.js',
@@ -493,7 +494,63 @@ def check_pwa_and_manifest_filtering():
         code = f"new Function({json.dumps(src)}); 'PWA_SYNTAX_OK';"
         assert run_jxa(code) == 'PWA_SYNTAX_OK'
     app_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
-    assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js
+    assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js and 'mqttBuildPublish' in app_js
+
+    # Test mqtt-lite.js frame encoding/decoding with fragmented 65KB retained payload in JXA
+    mqtt_src = open(os.path.join(ROOT, 'tools/bimmer-link/mqtt-lite.js'), encoding='utf-8').read()
+    mqtt_test = f"""
+    var Buffer = {{
+      from: function(x) {{
+        if (typeof x === 'string') {{
+          var s = unescape(encodeURIComponent(x)), u = new Uint8Array(s.length);
+          for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+          return enhance(u);
+        }}
+        return enhance(new Uint8Array(x));
+      }},
+      isBuffer: function(b) {{ return b && b._isBuf; }},
+      alloc: function(n) {{ return enhance(new Uint8Array(n)); }},
+      allocUnsafe: function(n) {{ return enhance(new Uint8Array(n)); }},
+      concat: function(list) {{
+        var tot = 0; for (var i = 0; i < list.length; i++) tot += list[i].length;
+        var out = new Uint8Array(tot), off = 0;
+        for (var j = 0; j < list.length; j++) {{ out.set(list[j], off); off += list[j].length; }}
+        return enhance(out);
+      }}
+    }};
+    function enhance(u) {{
+      u._isBuf = true;
+      u.writeUInt16BE = function(v, o) {{ u[o] = (v >> 8) & 255; u[o+1] = v & 255; }};
+      u.readUInt16BE = function(o) {{ return (u[o] << 8) | u[o+1]; }};
+      u.slice = function(a, b) {{ return enhance(Uint8Array.prototype.slice.call(u, a, b)); }};
+      u.toString = function() {{
+        var s = ''; for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+        return decodeURIComponent(escape(s));
+      }};
+      return u;
+    }}
+    var mod = {{ exports: {{}} }};
+    var fn = new Function('require', 'module', 'exports', '__filename', 'process', 'Buffer', {json.dumps(mqtt_src)});
+    fn(function(){{ return {{}}; }}, mod, mod.exports, 'mqtt-lite.js', {{ argv: [], on: function(){{}} }}, Buffer);
+    var M = mod.exports;
+    var big = 'BL2:' + new Array(65001).join('Q');
+    var pkt1 = M.encodePublish('bl2/testtopic/ph', big, true);
+    var pkt2 = Buffer.from([0xd0, 0x00]); // PINGRESP
+    var combined = Buffer.concat([pkt1, pkt2]);
+    // Feed in 2 split fragments to verify streaming reassembly
+    var half1 = combined.slice(0, 10000);
+    var half2 = combined.slice(10000);
+    var r1 = M.parseFrames(half1);
+    if (r1.frames.length !== 0) throw new Error('expected 0 complete frames on half1');
+    var r2 = M.parseFrames(Buffer.concat([r1.rest, half2]));
+    if (r2.frames.length !== 2) throw new Error('expected 2 frames, got ' + r2.frames.length);
+    if (r2.frames[0].topic !== 'bl2/testtopic/ph' || !r2.frames[0].retain || r2.frames[0].payload !== big) {{
+      throw new Error('bad decoded 65KB publish frame');
+    }}
+    if (r2.frames[1].type !== 'pingresp') throw new Error('expected pingresp');
+    'MQTT_CODEC_OK';
+    """
+    assert run_jxa(mqtt_test) == 'MQTT_CODEC_OK'
 
     with tempfile.TemporaryDirectory(prefix='bl-cat-') as td:
         cat = os.path.join(td, 'someip-interfaces.json')

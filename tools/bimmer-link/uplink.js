@@ -319,6 +319,7 @@ module.exports = {
     mainappRanges,
     takenIds,
     dnsServers,
+    customLookup,
     request,
     buildMultipart,
 };

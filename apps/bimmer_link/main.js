@@ -186,7 +186,7 @@ mgu.run({
         /* ---- Official OAP ACL bridge for ICAM2 360 camera wakeup & ClimateMaster 1CR calls ---- */
         const signals = ctx.signals;
         const oapProxies = {};
-        let camCookie = null, camBusy = false, lastOapSeq = 0;
+        let camCookie = null, camDetachTimer = null, lastOapSeq = 0;
 
         function writeAppFile(name, obj) {
             const txt = JSON.stringify(obj);
@@ -220,48 +220,76 @@ mgu.run({
             return list;
         }
 
-        async function syncCamBridge(wantOn) {
-            if (!signals || !signals.hasNative || !signals.hasNative() || camBusy) return;
-            if (!wantOn && camCookie === null) return;
-            if (wantOn && camCookie !== null) return;
-            camBusy = true;
-            try {
-                const icamList = await getOapInstances('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy');
-                const camList = icamList.length ? icamList : await getOapInstances('de.bmw.infotainment.video.cameraproxy.CameraProxy');
-                const icam = icamList[0] && icamList[0].px;
-                const baseCam = (camList[0] && camList[0].px) || icam;
-                if (!wantOn) {
-                    const c = camCookie;
-                    camCookie = null;
-                    if (baseCam && c !== null) {
-                        await signals.call(baseCam, 'clientDetach', { cookie: c }, 3000).catch(() => {});
-                    }
-                } else if (icam && baseCam) {
-                    const xvList = await getOapInstances('de.bmw.dass.XView3D');
-                    const xv = xvList[0] && xvList[0].px;
-                    const xvSt = xv ? await Promise.resolve().then(() => xv.getValue('CurrentState', 1500)).catch(() => null) : null;
-                    const icSt = await Promise.resolve().then(() => icam.getValue('currentState', 1500)).catch(() => null);
-                    const raw = JSON.stringify({ xv: xvSt, ic: icSt });
-                    if (!(/PDC|PARK|RVC|TOP_VIEW/i.test(raw) || (/DR_ACTIVE|"application":51\b/i.test(raw) && /"perspective":7\b/.test(raw)))) {
-                        const att = await signals.call(baseCam, 'clientAttach', { type: 'CLIENT_INDIRECT' }, 3500)
-                            .catch(() => signals.call(baseCam, 'clientAttach', { type: 1 }, 3500));
-                        const ck = (att && typeof att === 'object' && att.cookie !== undefined) ? att.cookie : att;
-                        await signals.call(icam, 'changeState', { cookie: ck, desiredState: { application: 'DR_ACTIVE', mode: 'MODE_MOSAIK', perspective: 7 } }, 3500)
-                            .catch(() => signals.call(icam, 'changeState', { cookie: ck, desiredState: { application: 51, mode: 50, perspective: 7 } }, 3500));
-                        camCookie = ck;
-                        log.info('360 cam attached via OAP cookie=' + ck);
-                    }
-                }
-            } catch (e) {
-                log.warn('cam bridge: ' + (e && e.message || e));
+        // Pre-warm camera & primary climate proxies right at startup so zero discovery delay happens on snap/1CR
+        [
+            'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy',
+            'de.bmw.infotainment.video.cameraproxy.CameraProxy',
+            'de.bmw.dass.XView3D',
+            'de.bmw.infotainment.climate.ClimateMaster',
+        ].forEach((ifn) => { getOapInstances(ifn).catch(() => {}); });
+
+        async function attachOrDetachCam(wantOn) {
+            if (!signals || !signals.hasNative || !signals.hasNative()) {
+                return { ok: false, error: 'no native signals' };
             }
-            camBusy = false;
+            const icamList = await getOapInstances('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy');
+            const camList = await getOapInstances('de.bmw.infotainment.video.cameraproxy.CameraProxy');
+            const icam = icamList[0] && icamList[0].px;
+            const cam = camList[0] && camList[0].px;
+            if (!icam && !cam) return { ok: false, error: 'no ICAM2Proxy/CameraProxy' };
+
+            const callBase = (method, arg) => {
+                const first = icam || cam;
+                return signals.call(first, method, arg, 6000).catch((e) => {
+                    if (cam && first !== cam) return signals.call(cam, method, arg, 6000);
+                    throw e;
+                });
+            };
+
+            if (!wantOn) {
+                if (camDetachTimer) { clearTimeout(camDetachTimer); camDetachTimer = null; }
+                if (camCookie === null) return { ok: true, released: false };
+                const c = camCookie;
+                camCookie = null;
+                await callBase('clientDetach', { cookie: c }).catch(() => {});
+                return { ok: true, released: true };
+            }
+
+            if (icam) {
+                const xvList = await getOapInstances('de.bmw.dass.XView3D');
+                const xv = xvList[0] && xvList[0].px;
+                const xvSt = xv ? await Promise.resolve().then(() => xv.getValue('CurrentState', 1800)).catch(() => null) : null;
+                const icSt = await Promise.resolve().then(() => icam.getValue('currentState', 1800)).catch(() => null);
+                const raw = JSON.stringify({ xv: xvSt, ic: icSt });
+                if (/PDC|PARK|RVC|TOP_VIEW|PANORAMA/i.test(raw) || (/DR_ACTIVE|"application":51\b/i.test(raw) && /"perspective":7\b/.test(raw))) {
+                    return { ok: true, alreadyOn: true };
+                }
+            }
+
+            if (camCookie === null) {
+                const att = await callBase('clientAttach', { type: 'CLIENT_INDIRECT' })
+                    .catch(() => callBase('clientAttach', { type: 1 }));
+                camCookie = (att && typeof att === 'object' && att.cookie !== undefined) ? att.cookie : att;
+            }
+            if (icam) {
+                await signals.call(icam, 'changeState', { cookie: camCookie, desiredState: { application: 'DR_ACTIVE', mode: 'MODE_MOSAIK', perspective: 7 } }, 6000)
+                    .catch(() => signals.call(icam, 'changeState', { cookie: camCookie, desiredState: { application: 51, mode: 50, perspective: 7 } }, 6000));
+            }
+            if (camDetachTimer) clearTimeout(camDetachTimer);
+            camDetachTimer = setTimeout(() => { attachOrDetachCam(false).catch(() => {}); }, 12000);
+            log.info('360 cam attached via OAP cookie=' + camCookie);
+            return { ok: true, cookie: camCookie };
         }
 
         async function handleOapReq(req) {
             if (!req || !req.seq || req.seq === lastOapSeq) return;
             lastOapSeq = req.seq;
             try {
+                if (req.kind === 'cam_attach' || req.kind === 'cam_detach') {
+                    const camRes = await attachOrDetachCam(req.kind === 'cam_attach');
+                    writeAppFile('oap-reply.json', Object.assign({ seq: req.seq }, camRes));
+                    return;
+                }
                 const list = await getOapInstances(req.iface);
                 if (!list.length) {
                     writeAppFile('oap-reply.json', { seq: req.seq, ok: false, error: 'no OAP config for ' + req.iface });
@@ -297,13 +325,14 @@ mgu.run({
 
         setInterval(() => {
             const now = Date.now();
-            readStatus(now);
-            const wantCam = !!(status && typeof status.wantCamUntil === 'number' && status.wantCamUntil > now);
-            syncCamBridge(wantCam);
-            if (status && status.oapReq && status.oapReq.seq && Math.abs(now - (status.oapReq.at || now)) < 10000) {
+            if (now - readAt >= 180) {
+                readAt = 0;
+                readStatus(now);
+            }
+            if (status && status.oapReq && status.oapReq.seq && Math.abs(now - (status.oapReq.at || now)) < 12000) {
                 handleOapReq(status.oapReq);
             }
-        }, 350);
+        }, 180);
 
         await render();
         log.info('bimmer_link ready');

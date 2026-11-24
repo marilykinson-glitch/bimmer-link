@@ -27,13 +27,14 @@ public class MonitorService extends Service {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
     private long lastPollSec = 0;
+    private long cooldownUntilMs = 0;
 
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
             if (!running) return;
             pool.execute(() -> pollOnce());
-            handler.postDelayed(this, 35000);
+            handler.postDelayed(this, 90000);
         }
     };
 
@@ -87,6 +88,7 @@ public class MonitorService extends Service {
         CryptoHelper.Identity id = CryptoHelper.derive(pairCode);
         if (id == null) return;
 
+        if (System.currentTimeMillis() < cooldownUntilMs) return;
         String since = lastPollSec > 0 ? String.valueOf(lastPollSec) : "all";
         HttpURLConnection conn = null;
         try {
@@ -94,7 +96,12 @@ public class MonitorService extends Service {
             conn = (HttpURLConnection) u.openConnection();
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(12000);
-            if (conn.getResponseCode() != 200) return;
+            int code = conn.getResponseCode();
+            if (code == 429) {
+                cooldownUntilMs = System.currentTimeMillis() + 180000L;
+                return;
+            }
+            if (code != 200) return;
 
             BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
             String line;

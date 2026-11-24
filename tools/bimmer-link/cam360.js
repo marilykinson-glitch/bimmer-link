@@ -269,7 +269,18 @@ function capture360Frame(opts) {
                     else if (!settled) cleanupAndFinish({ ok: false, reason: 'sidecam exited (' + code + ')' });
                 });
                 if (child.stdin) child.stdin.on('error', () => {});
-                if (child.stdout) child.stdout.on('data', () => {});
+                if (child.stdout) {
+                    let sbuf = '';
+                    child.stdout.on('data', (d) => {
+                        sbuf += String(d || '');
+                        let nl;
+                        while ((nl = sbuf.indexOf('\n')) >= 0) {
+                            const ln = sbuf.slice(0, nl).trim();
+                            sbuf = sbuf.slice(nl + 1);
+                            if (ln && ln.indexOf('"fps":0') < 0) log('sidecam: ' + ln.slice(0, 140));
+                        }
+                    });
+                }
 
                 const cfgMsg = JSON.stringify({
                     op: 'config',

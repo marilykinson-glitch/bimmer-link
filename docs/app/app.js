@@ -6,10 +6,23 @@
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
  */
 const RELAY_HOST = 'ntfy.sh';
-let identity = null;        // { pairCode, cryptoKey, topicId, topics }
+const MQTT_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt',
+];
+let identity = null;        // { pairCode, cryptoKey, topicId, mqttTopics, topics }
+let mqttWs = null;
+let mqttReady = false;
+let mqttBrokerIdx = 0;
+let mqttPrimaryFails = 0;
+let mqttLastPrimaryTry = 0;
+let lastMqttRxAt = 0;
+let mqttPingTimer = null;
+let mqttReconnTimer = null;
+let mqttWaiters = [];
+let pendingAckTimers = {};
 let stateWs = null;
-let photoWs = null;
-let heroWs = null;
 let diagWs = null;
 let vehicleData = loadLocal('mybmw_state') || null;
 let latestSnap = loadLocal('mybmw_snap') || null;   // { dataUrl, at, title }
@@ -392,10 +405,18 @@ async function buildIdentity(pairCode) {
   const topicHash = new Uint8Array(await crypto.subtle.digest('SHA-256', concatBytes(enc.encode('BL-TOPIC:'), seed)));
   const topicId = bytesToHex(topicHash).slice(0, 20);
   const cryptoKey = await crypto.subtle.importKey('raw', keyHash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  const mqttBase = 'bl2/' + topicId;
   return {
     pairCode: clean,
     cryptoKey,
     topicId,
+    mqttTopics: {
+      state: mqttBase + '/st',
+      photo: mqttBase + '/ph',
+      hero: mqttBase + '/hr',
+      cmd: mqttBase + '/cm',
+      diag: mqttBase + '/dg',
+    },
     topics: {
       state: 'bl_st_' + topicId,
       photo: 'bl_ph_' + topicId,
@@ -438,7 +459,234 @@ function extractPairCode(input) {
   return '';
 }
 
-/* ---------------- Sync & Real-time Subscriptions ---------------- */
+/* ---------------- MQTT 3.1.1 over WebSocket Codec & Real-time Subscriptions ---------------- */
+
+function mqttVarLen(x) {
+  const out = [];
+  let n = x >>> 0;
+  do {
+    let b = n & 0x7f;
+    n = Math.floor(n / 128);
+    if (n > 0) b |= 0x80;
+    out.push(b);
+  } while (n > 0);
+  return new Uint8Array(out);
+}
+
+function mqttDecVarLen(u8, off) {
+  let mul = 1, val = 0, pos = off;
+  for (let i = 0; i < 4; i++) {
+    if (pos >= u8.length) return null;
+    const b = u8[pos++];
+    val += (b & 0x7f) * mul;
+    if ((b & 0x80) === 0) return { value: val, next: pos };
+    mul *= 128;
+  }
+  return { error: true, next: pos };
+}
+
+function mqttStr(s) {
+  const b = new TextEncoder().encode(String(s));
+  const out = new Uint8Array(2 + b.length);
+  out[0] = (b.length >> 8) & 0xff;
+  out[1] = b.length & 0xff;
+  out.set(b, 2);
+  return out;
+}
+
+function mqttJoin(list) {
+  let total = 0;
+  for (let i = 0; i < list.length; i++) total += list[i].length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (let i = 0; i < list.length; i++) { out.set(list[i], off); off += list[i].length; }
+  return out;
+}
+
+function mqttBuildConnect(cid) {
+  const vh = new Uint8Array([0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 45]);
+  const pl = mqttStr(cid);
+  return mqttJoin([new Uint8Array([0x10]), mqttVarLen(vh.length + pl.length), vh, pl]);
+}
+
+function mqttBuildSubscribeMulti(pktId, topics) {
+  const parts = [new Uint8Array([(pktId >> 8) & 0xff, pktId & 0xff])];
+  for (let i = 0; i < topics.length; i++) {
+    parts.push(mqttStr(topics[i]));
+    parts.push(new Uint8Array([0x00]));
+  }
+  const body = mqttJoin(parts);
+  return mqttJoin([new Uint8Array([0x82]), mqttVarLen(body.length), body]);
+}
+
+function mqttBuildPublish(topic, payloadStr, retain) {
+  const t = mqttStr(topic);
+  const p = new TextEncoder().encode(String(payloadStr));
+  const hdr = new Uint8Array([0x30 | (retain ? 0x01 : 0x00)]);
+  return mqttJoin([hdr, mqttVarLen(t.length + p.length), t, p]);
+}
+
+function mqttParse(rx) {
+  const frames = [];
+  let off = 0;
+  const dec = new TextDecoder();
+  while (off < rx.length) {
+    const hdr = rx[off];
+    const dl = mqttDecVarLen(rx, off + 1);
+    if (!dl) break;
+    if (dl.error) { off = rx.length; break; }
+    const end = dl.next + dl.value;
+    if (end > rx.length) break;
+    const body = rx.slice(dl.next, end);
+    off = end;
+    const type = hdr >> 4;
+    if (type === 2) {
+      frames.push({ type: 'connack', rc: body.length >= 2 ? body[1] : 255 });
+    } else if (type === 13) {
+      frames.push({ type: 'pingresp' });
+    } else if (type === 3 && body.length >= 2) {
+      const tLen = (body[0] << 8) | body[1];
+      const qos = (hdr >> 1) & 0x03;
+      const pOff = 2 + tLen + (qos > 0 ? 2 : 0);
+      if (pOff <= body.length) {
+        frames.push({
+          type: 'publish',
+          retain: !!(hdr & 0x01),
+          topic: dec.decode(body.slice(2, 2 + tLen)),
+          payload: dec.decode(body.slice(pOff)),
+        });
+      }
+    }
+  }
+  return { frames, rest: off > 0 ? rx.slice(off) : rx };
+}
+
+function notifyMqttWaiters(ok) {
+  const list = mqttWaiters.splice(0, mqttWaiters.length);
+  for (let i = 0; i < list.length; i++) list[i](ok);
+}
+
+function waitForMqttReady(timeoutMs) {
+  if (mqttReady && mqttWs && mqttWs.readyState === 1) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let done = false;
+    const fn = (ok) => { if (!done) { done = true; clearTimeout(t); resolve(!!ok); } };
+    const t = setTimeout(() => fn(false), timeoutMs || 1800);
+    mqttWaiters.push(fn);
+  });
+}
+
+function bumpMqttBrokerOnFail() {
+  if (mqttBrokerIdx === 0) {
+    mqttPrimaryFails++;
+    if (mqttPrimaryFails >= 3) {
+      mqttBrokerIdx = 1;
+      mqttPrimaryFails = 0;
+    }
+  } else {
+    mqttBrokerIdx = (mqttBrokerIdx + 1) % MQTT_BROKERS.length;
+  }
+}
+
+function openMqttSocket() {
+  if (!identity) return;
+  if (mqttWs && (mqttWs.readyState === 0 || mqttWs.readyState === 1)) return;
+  if (mqttReconnTimer) { clearTimeout(mqttReconnTimer); mqttReconnTimer = null; }
+  if (mqttPingTimer) { clearInterval(mqttPingTimer); mqttPingTimer = null; }
+  mqttReady = false;
+
+  if (mqttBrokerIdx !== 0 && Date.now() - mqttLastPrimaryTry > 120000) {
+    mqttBrokerIdx = 0;
+    mqttLastPrimaryTry = Date.now();
+  }
+  const url = MQTT_BROKERS[mqttBrokerIdx % MQTT_BROKERS.length];
+  let ws;
+  try {
+    ws = new WebSocket(url, 'mqtt');
+  } catch (e) {
+    bumpMqttBrokerOnFail();
+    mqttReconnTimer = setTimeout(openMqttSocket, 2000);
+    return;
+  }
+  ws.binaryType = 'arraybuffer';
+  mqttWs = ws;
+  let rx = new Uint8Array(0);
+
+  const connTimer = setTimeout(() => {
+    if (mqttWs === ws && !mqttReady) {
+      bumpMqttBrokerOnFail();
+      try { ws.close(); } catch (e) {}
+    }
+  }, 6000);
+
+  ws.onopen = () => {
+    if (mqttWs !== ws) return;
+    lastMqttRxAt = Date.now();
+    const cid = 'blapp_' + Math.random().toString(36).slice(2, 10);
+    try { ws.send(mqttBuildConnect(cid)); } catch (e) {}
+  };
+
+  ws.onmessage = async (ev) => {
+    if (mqttWs !== ws || !(ev.data instanceof ArrayBuffer)) return;
+    lastMqttRxAt = Date.now();
+    const chunk = new Uint8Array(ev.data);
+    rx = rx.length ? concatBytes(rx, chunk) : chunk;
+    const parsed = mqttParse(rx);
+    rx = parsed.rest;
+    for (let i = 0; i < parsed.frames.length; i++) {
+      const f = parsed.frames[i];
+      if (f.type === 'connack') {
+        clearTimeout(connTimer);
+        if (f.rc === 0 && identity) {
+          mqttReady = true;
+          mqttPrimaryFails = 0;
+          mqttLastPrimaryTry = Date.now();
+          const mt = identity.mqttTopics;
+          try { ws.send(mqttBuildSubscribeMulti(1, [mt.state, mt.photo, mt.hero, mt.diag])); } catch (e) {}
+          notifyMqttWaiters(true);
+          if (mqttPingTimer) clearInterval(mqttPingTimer);
+          mqttPingTimer = setInterval(() => {
+            if (mqttWs === ws && ws.readyState === 1) {
+              if (Date.now() - lastMqttRxAt > 48000) {
+                try { ws.close(); } catch (e) {}
+                return;
+              }
+              try { ws.send(new Uint8Array([0xc0, 0x00])); } catch (e) {}
+            }
+          }, 20000);
+          renderAll();
+        } else {
+          bumpMqttBrokerOnFail();
+          try { ws.close(); } catch (e) {}
+        }
+      } else if (f.type === 'publish' && identity) {
+        const decObj = await decryptJson(f.payload);
+        if (!decObj) continue;
+        const mt = identity.mqttTopics;
+        const isLive = !f.retain;
+        if (f.topic === mt.state) onStatePacket(decObj, Date.now(), isLive);
+        else if (f.topic === mt.photo) onPhotoPacket(decObj, Date.now(), isLive);
+        else if (f.topic === mt.hero) onHeroPacket(decObj, Date.now(), isLive);
+        else if (f.topic === mt.diag) onDiagPacket(decObj);
+        renderAll();
+      }
+    }
+  };
+
+  const onDead = () => {
+    clearTimeout(connTimer);
+    if (mqttWs !== ws) return;
+    mqttWs = null;
+    mqttReady = false;
+    if (mqttPingTimer) { clearInterval(mqttPingTimer); mqttPingTimer = null; }
+    bumpMqttBrokerOnFail();
+    if (identity && !mqttReconnTimer) {
+      mqttReconnTimer = setTimeout(openMqttSocket, 2200);
+    }
+  };
+  ws.onerror = onDead;
+  ws.onclose = onDead;
+}
 
 async function connectCar(code) {
   const id = await buildIdentity(code);
@@ -462,19 +710,31 @@ async function connectCar(code) {
 
   closeSockets();
   setConnBadge('sleep', 'Đang đồng bộ…');
-  await Promise.all([
-    fetchCachedTopic(id.topics.state, onStatePacket),
-    fetchCachedTopic(id.topics.photo, onPhotoPacket),
-    fetchCachedTopic(id.topics.hero, onHeroPacket),
-  ]);
-  openLiveSockets();
+  openMqttSocket();
   renderAll();
+
+  // Only fall back to 12h ntfy sleep cache if MQTT hasn't delivered retained state within 2.5s
+  setTimeout(async () => {
+    if (identity !== id) return;
+    if (!mqttReady || !vehicleData) {
+      await fetchCachedTopic(id.topics.state, onStatePacket);
+      if (!latestSnap) await fetchCachedTopic(id.topics.photo, onPhotoPacket);
+      if (!factoryHero) await fetchCachedTopic(id.topics.hero, onHeroPacket);
+      if (!mqttReady) openFallbackNtfySockets();
+      renderAll();
+    }
+  }, 2500);
   return true;
 }
 
 function closeSockets() {
-  [stateWs, photoWs, heroWs, diagWs].forEach((ws) => { if (ws) { try { ws.close(); } catch (e) {} } });
-  stateWs = photoWs = heroWs = diagWs = null;
+  if (mqttReconnTimer) { clearTimeout(mqttReconnTimer); mqttReconnTimer = null; }
+  if (mqttPingTimer) { clearInterval(mqttPingTimer); mqttPingTimer = null; }
+  if (mqttWs) { try { mqttWs.close(); } catch (e) {} mqttWs = null; }
+  mqttReady = false;
+  notifyMqttWaiters(false);
+  [stateWs, diagWs].forEach((ws) => { if (ws) { try { ws.close(); } catch (e) {} } });
+  stateWs = diagWs = null;
 }
 
 async function resolveEventWire(ev) {
@@ -493,6 +753,7 @@ async function resolveEventWire(ev) {
 async function fetchCachedTopic(topic, handler) {
   try {
     const r = await fetch('https://' + RELAY_HOST + '/' + topic + '/json?poll=1&since=all');
+    if (!r.ok) return;
     const txt = await r.text();
     const lines = txt.split('\n').filter(Boolean);
     for (let i = 0; i < lines.length; i++) {
@@ -501,14 +762,14 @@ async function fetchCachedTopic(topic, handler) {
       const wire = await resolveEventWire(ev);
       if (wire) {
         const dec = await decryptJson(wire);
-        if (dec) handler(dec, ev.time ? ev.time * 1000 : Date.now());
+        if (dec) handler(dec, ev.time ? ev.time * 1000 : Date.now(), false);
       }
     }
   } catch (e) {}
 }
 
-function openLiveSockets() {
-  if (!identity) return;
+function openFallbackNtfySockets() {
+  if (!identity || stateWs) return;
   const sub = (topic, handler) => {
     const ws = new WebSocket('wss://' + RELAY_HOST + '/' + topic + '/ws');
     ws.onmessage = async (e) => {
@@ -526,16 +787,25 @@ function openLiveSockets() {
     return ws;
   };
   stateWs = sub(identity.topics.state, onStatePacket);
-  photoWs = sub(identity.topics.photo, onPhotoPacket);
-  heroWs = sub(identity.topics.hero, onHeroPacket);
   diagWs = sub(identity.topics.diag, onDiagPacket);
 }
 
-function onStatePacket(pkt, ts) {
+function normalizeCarTime(rawMs, fallbackMs, isLive) {
+  const now = Date.now();
+  if (isLive) return now;
+  const n = Number(rawMs) || 0;
+  if (!n || Math.abs(now - n) > 14 * 86400000) return fallbackMs || now;
+  return n;
+}
+
+function onStatePacket(pkt, ts, isLive) {
   if (!pkt || pkt.t !== 'state') return;
-  if (vehicleData && vehicleData.at && pkt.at && pkt.at < vehicleData.at) return;
+  if (!isLive && vehicleData && vehicleData.at && pkt.at && pkt.at < vehicleData.at && Math.abs(Date.now() - vehicleData.at) < 3600000) {
+    return;
+  }
   vehicleData = pkt;
-  if (!vehicleData.at) vehicleData.at = ts;
+  vehicleData.rxAt = normalizeCarTime(pkt.at, ts, isLive);
+  if (!vehicleData.at) vehicleData.at = vehicleData.rxAt;
   saveLocal('mybmw_state', vehicleData);
 
   if (pkt.appearanceOverride && (pkt.appearanceOverride.chassis || pkt.appearanceOverride.colour || pkt.appearanceOverride.trimLine)) {
@@ -567,8 +837,33 @@ function onStatePacket(pkt, ts) {
   }
 }
 
+function commitReceivedPhoto(fullB64, at, title, id, isLive) {
+  if (!fullB64) return;
+  const mime = fullB64.indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
+  const isNewId = !latestSnap || !id || latestSnap.id !== id;
+  const dispAt = normalizeCarTime(at, Date.now(), isLive);
+  if (!latestSnap || dispAt >= (latestSnap.rxAt || latestSnap.at || 0) || isLive) {
+    latestSnap = { id: id || String(dispAt), dataUrl: 'data:' + mime + ';base64,' + fullB64, at: at || dispAt, rxAt: dispAt, title: title || '' };
+    saveLocal('mybmw_snap', latestSnap);
+    if (isLive && isNewId) {
+      showToast('📸 Đã nhận ảnh chụp từ xe: ' + (title || 'Chạm vào ảnh để phóng to'), '#2fd27a', 6500);
+      setTimeout(() => {
+        const card = document.getElementById('latestSnapCard');
+        if (card && !document.getElementById('view-home').classList.contains('hidden')) {
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 120);
+    }
+  }
+}
+
 function onPhotoPacket(pkt, ts, isLive) {
-  if (!pkt || pkt.t !== 'photo_chunk' || !pkt.id) return;
+  if (!pkt) return;
+  if (pkt.t === 'photo_full' && pkt.b64) {
+    commitReceivedPhoto(pkt.b64, pkt.at || ts, pkt.title || '', pkt.id || '', isLive);
+    return;
+  }
+  if (pkt.t !== 'photo_chunk' || !pkt.id) return;
   let b = photoBuckets[pkt.id];
   if (!b) b = photoBuckets[pkt.id] = { total: pkt.total || 1, parts: {}, got: 0, at: pkt.at || Date.now(), title: pkt.title || '' };
   if (b.parts[pkt.idx] === undefined) {
@@ -583,20 +878,7 @@ function onPhotoPacket(pkt, ts, isLive) {
     let fullB64 = '';
     for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
     delete photoBuckets[pkt.id];
-    const mime = fullB64.indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
-    if (!latestSnap || b.at >= (latestSnap.at || 0)) {
-      latestSnap = { dataUrl: 'data:' + mime + ';base64,' + fullB64, at: b.at, title: b.title };
-      saveLocal('mybmw_snap', latestSnap);
-      if (isLive) {
-        showToast('📸 Đã nhận ảnh chụp từ xe: ' + (b.title || 'Chạm vào ảnh để phóng to'), '#2fd27a', 6500);
-        setTimeout(() => {
-          const card = document.getElementById('latestSnapCard');
-          if (card && !document.getElementById('view-home').classList.contains('hidden')) {
-            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-        }, 120);
-      }
-    }
+    commitReceivedPhoto(fullB64, b.at, b.title, pkt.id, isLive);
   }
 }
 
@@ -610,8 +892,28 @@ function closeSnapModal() {
   document.getElementById('snapModal').classList.add('hidden');
 }
 
+function commitHeroBase64(fullB64, at, title, paint, isLive) {
+  if (!fullB64) return;
+  if (!factoryHero || (at || 0) >= (factoryHero.at || 0) || isLive) {
+    const candidateUrl = 'data:image/png;base64,' + fullB64;
+    const snapMeta = { dataUrl: candidateUrl, at: at || Date.now(), title: title || '', paint: paint || '' };
+    validateHeroDataUrl(candidateUrl, (ok) => {
+      if (!ok) return;
+      factoryHero = snapMeta;
+      if (isLive) heroPendingOverride = false;
+      saveLocal('mybmw_hero', factoryHero);
+      renderAll();
+    });
+  }
+}
+
 function onHeroPacket(pkt, ts, isLive) {
-  if (!pkt || pkt.t !== 'photo_chunk') return;
+  if (!pkt) return;
+  if (pkt.t === 'photo_full' && pkt.b64) {
+    commitHeroBase64(pkt.b64, pkt.at || ts, pkt.title || '', pkt.paint || '', isLive);
+    return;
+  }
+  if (pkt.t !== 'photo_chunk') return;
   const hid = pkt.id || 'hero';
   let b = heroBuckets[hid];
   if (!b) b = heroBuckets[hid] = { total: pkt.total || 1, parts: {}, got: 0, at: pkt.at || Date.now(), title: pkt.title || '', paint: pkt.paint || '' };
@@ -623,17 +925,7 @@ function onHeroPacket(pkt, ts, isLive) {
     let fullB64 = '';
     for (let i = 0; i < b.total; i++) fullB64 += (b.parts[i] || '');
     delete heroBuckets[hid];
-    if (!factoryHero || b.at >= (factoryHero.at || 0) || isLive) {
-      const candidateUrl = 'data:image/png;base64,' + fullB64;
-      const snapMeta = { dataUrl: candidateUrl, at: b.at, title: b.title, paint: b.paint };
-      validateHeroDataUrl(candidateUrl, (ok) => {
-        if (!ok) return;
-        factoryHero = snapMeta;
-        if (isLive) heroPendingOverride = false;
-        saveLocal('mybmw_hero', factoryHero);
-        renderAll();
-      });
-    }
+    commitHeroBase64(fullB64, b.at, b.title, b.paint, isLive);
   }
 }
 
@@ -667,6 +959,10 @@ function onDiagPacket(pkt) {
     return;
   }
   if (pkt.t === 'cmd_ack') {
+    if (pkt.id && pendingAckTimers[pkt.id]) {
+      clearTimeout(pendingAckTimers[pkt.id]);
+      delete pendingAckTimers[pkt.id];
+    }
     const prefix = pkt.ok ? '✅ ' : '⚠️ ';
     showToast(prefix + (pkt.message || 'Xe đã xử lý lệnh.'), pkt.ok ? '#2fd27a' : '#ffb020', 8500);
     if (pkt.detail) {
@@ -675,6 +971,10 @@ function onDiagPacket(pkt) {
     return;
   }
   if (pkt.t === 'schema') {
+    if (pkt.reqId && pendingAckTimers[pkt.reqId]) {
+      clearTimeout(pendingAckTimers[pkt.reqId]);
+      delete pendingAckTimers[pkt.reqId];
+    }
     lastSchema = pkt;
     renderSchemaCards(pkt.schema);
     document.getElementById('diagOutput').textContent = JSON.stringify({
@@ -685,6 +985,10 @@ function onDiagPacket(pkt) {
     }, null, 2);
     showToast('✅ Đã nhận danh sách ' + (((pkt.schema && pkt.schema.interfaces) || []).length) + ' giao diện Climate/1CR từ xe!', '#2fd27a');
   } else if (pkt.t === 'raw_result') {
+    if (pkt.reqId && pendingAckTimers[pkt.reqId]) {
+      clearTimeout(pendingAckTimers[pkt.reqId]);
+      delete pendingAckTimers[pkt.reqId];
+    }
     document.getElementById('diagOutput').textContent = JSON.stringify(pkt.result, null, 2);
     const ok = pkt.result && pkt.result.ok;
     showToast(ok ? '✅ Thực thi lệnh 1CR thành công!' : ('⚠️ Chưa thành công: ' + ((pkt.result && pkt.result.error) || '')), ok ? '#2fd27a' : '#ffb020');
@@ -700,8 +1004,9 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
     return;
   }
   const device = window.AndroidBridge ? 'Android App' : (/iPhone|iPad|iPod/.test(navigator.userAgent) ? 'iPhone' : 'MyBMW Web');
+  const cmdId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const pkt = await encryptJson({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    id: cmdId,
     cmd,
     arg: arg || {},
     at: Date.now(),
@@ -709,6 +1014,30 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
     device,
   });
   showToast('Đang gửi lệnh tới xe…', '#38bdf8', 5000);
+
+  if (!mqttReady) {
+    openMqttSocket();
+    await waitForMqttReady(1800);
+  }
+  if (mqttReady && mqttWs && mqttWs.readyState === 1) {
+    try {
+      mqttWs.send(mqttBuildPublish(identity.mqttTopics.cmd, pkt, false));
+      // Automatic fallback to ntfy if car hasn't ACKed within 4.2s (e.g. asleep or on secondary relay)
+      pendingAckTimers[cmdId] = setTimeout(() => {
+        delete pendingAckTimers[cmdId];
+        if (!identity) return;
+        openFallbackNtfySockets();
+        fetch('https://' + RELAY_HOST + '/' + identity.topics.cmd, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: pkt,
+        }).catch(() => {});
+      }, 4200);
+      showToast('Đã gửi tức thì tới xe — đang chờ phản hồi…', '#38bdf8', 8000);
+      return;
+    } catch (e) {}
+  }
+
   try {
     const r = await fetch('https://' + RELAY_HOST + '/' + identity.topics.cmd, {
       method: 'POST',
@@ -931,15 +1260,16 @@ function renderAll() {
     return;
   }
 
-  const ageMs = Date.now() - (vehicleData.at || 0);
-  const awake = ageMs < 90000;
+  const effectiveStateAt = vehicleData.rxAt || vehicleData.at || 0;
+  const ageMs = Date.now() - effectiveStateAt;
+  const awake = ageMs >= -300000 && ageMs < 95000;
   const tel = vehicleData.telemetry || {};
   const c1 = tel.climate1cr || {};
   const valet = vehicleData.valet || {};
   const isLegacy03 = !vehicleData.version || vehicleData.version < '0.4.0';
 
   setConnBadge(awake ? 'live' : 'sleep', awake ? 'Trực tuyến' : 'Đang ngủ (Lưu đệm)');
-  document.getElementById('updatedLabel').textContent = relTime(vehicleData.at);
+  document.getElementById('updatedLabel').textContent = relTime(effectiveStateAt);
 
   const hasDoorWarn = (tel.doorsOpen && tel.doorsOpen.length) || tel.trunkOpen || tel.hoodOpen || tel.locked === false;
   glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (c1.active ? ' climate-on' : ''));
@@ -1001,7 +1331,7 @@ function renderAll() {
     const img = document.getElementById('latestSnapImg');
     img.src = latestSnap.dataUrl;
     img.classList.remove('hidden');
-    document.getElementById('snapTime').textContent = relTime(latestSnap.at);
+    document.getElementById('snapTime').textContent = relTime(latestSnap.rxAt || latestSnap.at);
   }
 
   if (document.activeElement.tagName !== 'INPUT') {
@@ -1256,8 +1586,25 @@ window.injectPairCodeFromNative = async function (raw) {
     });
   }
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('./sw.js?v=0.4.3').catch(() => {});
+    if (location.hostname === 'mybmw.local') {
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        regs.forEach((r) => { r.unregister().catch(() => {}); });
+      }).catch(() => {});
+    } else {
+      navigator.serviceWorker.register('./sw.js?v=0.5.0').catch(() => {});
+    }
   }
+  const healConnection = () => {
+    if (!identity) return;
+    if (!mqttWs || mqttWs.readyState > 1 || (Date.now() - lastMqttRxAt > 25000)) {
+      if (mqttWs) { try { mqttWs.close(); } catch (e) {} mqttWs = null; mqttReady = false; }
+      openMqttSocket();
+    }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') healConnection();
+  });
+  window.addEventListener('online', healConnection);
   renderAll();
   const initialCode = extractPairCode(location.hash) || extractPairCode(location.search) || localStorage.getItem('mybmw_pair') || '';
   if (initialCode) connectCar(initialCode);

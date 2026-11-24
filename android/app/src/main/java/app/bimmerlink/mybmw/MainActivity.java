@@ -69,7 +69,9 @@ public class MainActivity extends Activity {
                     String assetPath = path.startsWith("/") ? path.substring(1) : path;
                     try {
                         InputStream is = getAssets().open(assetPath);
-                        return new WebResourceResponse(mimeFor(assetPath), "UTF-8", is);
+                        String mime = mimeFor(assetPath);
+                        String enc = mime.startsWith("image/") ? null : "UTF-8";
+                        return new WebResourceResponse(mime, enc, is);
                     } catch (Exception ignored) {
                     }
                 }

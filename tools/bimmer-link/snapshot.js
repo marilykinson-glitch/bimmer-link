@@ -255,7 +255,8 @@ function tryCapture4Cam(opts) {
     }
     try {
         const st = fs.statSync(rawFile);
-        if (Date.now() - st.mtimeMs < 15000 && st.size === 960 * 440 * 4) {
+        const mtime = st.mtime ? st.mtime.getTime() : st.mtimeMs;
+        if (Math.abs(Date.now() - mtime) < 25000 && st.size === 960 * 440 * 4) {
             return { w: 960, h: 440, rgba: fs.readFileSync(rawFile) };
         }
     } catch (e) { /* absent */ }

@@ -1153,14 +1153,22 @@ async function runWorker() {
             }
 
             // Enable 1CR Remote Engine Start consent flag first when starting
+            const consentCandidates = [];
             if (wantOn) {
                 for (let i = 0; i < climateCatalog.interfaces.length; i++) {
                     const d = climateCatalog.interfaces[i];
-                    if (!climateProxies[d.iface]) continue;
                     for (let k = 0; k < d.fields.length; k++) {
                         const f = d.fields[k];
                         if (f.setter && f.roles.indexOf('consent_write') >= 0) {
                             const sample = climateLive[d.iface + '.' + f.name];
+                            consentCandidates.push({
+                                iface: d.iface,
+                                kind: 'setter',
+                                name: f.name,
+                                payload: buildDirectPayload(f, true, sample, false),
+                                altPayload: buildDirectPayload(f, true, sample, true),
+                            });
+                            if (!climateProxies[d.iface]) continue;
                             try { trace.push(await callSmart(d.iface, 'setter', f, (num) => buildDirectPayload(f, true, sample, num))); } catch (e) {
                                 trace.push({ ok: false, iface: d.iface, name: f.name, error: e.message });
                             }
@@ -1239,15 +1247,17 @@ async function runWorker() {
                 ? 'Không tìm thấy giao diện Climate trong catalog xe'
                 : ('Đã mở ' + openNames.length + '/' + climateCatalog.interfaces.length + ' cổng (' + openNames.slice(0, 5).join(', ') + ') — mở tab Dò 1CR để bấm thử 1 chạm');
             pushPatch({});
-            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers, candidates: attemptedCalls };
+            return { ok: false, error: tracker.state.climate1cr.lastResult, trace, openInterfaces: openNames, discoveredMembers, consentCandidates, candidates: attemptedCalls };
         }
 
         if (action === 'schedule1cr') {
             const h = Number(params.hour) | 0, m = Number(params.minute) | 0, en = params.enabled !== false;
             const hhmm = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+            const timerCandidates = [];
             if (savedProfile && savedProfile.timer) {
                 const p = savedProfile.timer;
                 const payload = buildTimerPayload({ typeDef: null }, h, m, en, p.payload, false);
+                timerCandidates.push({ iface: p.iface, kind: p.kind, name: p.name, payload });
                 try {
                     const r = await callOne(p.iface, p.kind, p.name, payload);
                     tracker.state.climate1cr.timerText = en ? hhmm : 'Tắt';
@@ -1261,11 +1271,18 @@ async function runWorker() {
             let succeeded = null;
             for (let i = 0; i < climateCatalog.interfaces.length; i++) {
                 const d = climateCatalog.interfaces[i];
-                if (!climateProxies[d.iface]) continue;
                 for (let k = 0; k < d.fields.length; k++) {
                     const f = d.fields[k];
                     if (!f.setter || f.roles.indexOf('timer_write') < 0) continue;
                     const sample = climateLive[d.iface + '.' + f.name];
+                    timerCandidates.push({
+                        iface: d.iface,
+                        kind: 'setter',
+                        name: f.name,
+                        payload: buildTimerPayload(f, h, m, en, sample, false),
+                        altPayload: buildTimerPayload(f, h, m, en, sample, true),
+                    });
+                    if (!climateProxies[d.iface]) continue;
                     try {
                         const r = await callSmart(d.iface, 'setter', f, (num) => buildTimerPayload(f, h, m, en, sample, num));
                         trace.push(r);
@@ -1275,14 +1292,23 @@ async function runWorker() {
                 for (let k = 0; k < d.methods.length; k++) {
                     const mt = d.methods[k];
                     if (mt.roles.indexOf('timer_write') < 0) continue;
-                    try {
-                        const r = await callSmart(d.iface, 'method', mt, (num) => {
-                            const argObj = {};
-                            mt.inArgs.forEach((a) => {
-                                if (a && a.name) argObj[a.name] = buildTimerPayload(a, h, m, en, undefined, num);
-                            });
-                            return argObj;
+                    const mkArgs = (num) => {
+                        const argObj = {};
+                        mt.inArgs.forEach((a) => {
+                            if (a && a.name) argObj[a.name] = buildTimerPayload(a, h, m, en, undefined, num);
                         });
+                        return argObj;
+                    };
+                    timerCandidates.push({
+                        iface: d.iface,
+                        kind: 'method',
+                        name: mt.name,
+                        payload: mkArgs(false),
+                        altPayload: mkArgs(true),
+                    });
+                    if (!climateProxies[d.iface]) continue;
+                    try {
+                        const r = await callSmart(d.iface, 'method', mt, mkArgs);
                         trace.push(r);
                         if (!succeeded) succeeded = d.iface.split('.').pop() + '.' + mt.name + '()';
                     } catch (e) { trace.push({ ok: false, iface: d.iface, name: mt.name, error: e.message }); }
@@ -1294,7 +1320,7 @@ async function runWorker() {
             tracker.state.climate1cr.lastAction = (en ? 'Đặt hẹn giờ 1CR ' : 'Huỷ hẹn giờ 1CR ') + hhmm;
             tracker.state.climate1cr.lastResult = succeeded ? ('Đã lưu vào BDC/IHKA qua ' + succeeded) : 'Đã lưu lịch chờ đồng bộ xuống xe';
             pushPatch({});
-            return { ok: !!succeeded, method: succeeded || 'queued', trace };
+            return { ok: !!succeeded, method: succeeded || 'queued', trace, timerCandidates };
         }
 
         return { ok: false, error: 'unknown 1CR action: ' + action };

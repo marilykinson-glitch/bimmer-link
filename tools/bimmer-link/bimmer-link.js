@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.4.3';
+const VERSION = '0.5.0';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -437,8 +437,10 @@ function createService(customCfg) {
     });
 
     function cloudSnapshotPayload(extra) {
+        const lanEndpoints = !C.noServer ? addresses().map((ip) => 'http://' + ip + ':' + S.port) : [];
         return Object.assign({
             version: VERSION,
+            lanEndpoints,
             vehicleProfile: heroData.meta,
             appearanceOverride: config.appearance,
             hasFactoryHero: !!heroData.png,
@@ -567,24 +569,26 @@ function createService(customCfg) {
 
     async function tryGrab360(timeoutMs) {
         if (C.noWorker) return null;
-        S.wantCamUntil = Date.now() + (timeoutMs || 3800) + 700;
-        writeStatus();
+        const dur = timeoutMs || 6200;
+        const rawPath = path.join(C.run, 'cam4.rgba');
+        try { fs.unlinkSync(rawPath); } catch (e) {}
         try {
             return await Cam360.capture360Frame({
                 runDir: C.run,
-                rawOutFile: path.join(C.run, 'cam4.rgba'),
-                timeoutMs: timeoutMs || 3800,
-                wakeCam: () => callWorker('cam_wake', {}, 4000),
-                releaseCam: () => {
-                    S.wantCamUntil = 0;
-                    writeStatus();
-                    return callWorker('cam_release', {}, 3000);
+                rawOutFile: rawPath,
+                timeoutMs: dur,
+                wakeCam: async () => {
+                    const r1 = await callOapBridge('ICAM2', 'cam_attach', 'cam', {}, undefined, 3200);
+                    if (r1 && r1.ok) return r1;
+                    return callWorker('cam_wake', {}, 3500);
+                },
+                releaseCam: async () => {
+                    await callOapBridge('ICAM2', 'cam_detach', 'cam', {}, undefined, 1800).catch(() => {});
+                    return callWorker('cam_release', {}, 2000).catch(() => {});
                 },
                 log,
             });
         } catch (e) {
-            S.wantCamUntil = 0;
-            writeStatus();
             return null;
         }
     }
@@ -713,18 +717,29 @@ function createService(customCfg) {
                 }
                 return { ok: true, message: plain, detail: resObj };
             }
-            // Retry candidate calls via the OAP App ACL bridge (`apps/bimmer_link`) in case UID 0 was denied by vsomeip ACL!
-            const cands = Array.isArray(resObj.candidates) ? resObj.candidates.slice(0, 6) : [];
+            const consentList = wantOn && Array.isArray(resObj.consentCandidates) ? resObj.consentCandidates.slice(0, 3) : [];
+            for (let ci = 0; ci < consentList.length; ci++) {
+                const cc = consentList[ci];
+                await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2500);
+            }
+            const cands = Array.isArray(resObj.candidates) ? resObj.candidates.slice(0, 8) : [];
+            const hitNames = [];
             for (let i = 0; i < cands.length; i++) {
                 const cd = cands[i];
-                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3800);
+                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3200);
                 if (oapRes && oapRes.ok) {
-                    S.telemetry.climate1cr.active = wantOn;
-                    const mName = cd.iface.split('.').pop() + '.' + cd.name + ' (OAP-ACL)';
-                    const plain = (wantOn ? 'Đã kích hoạt đề nổ / làm mát 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + mName;
-                    tell(plain, 'go');
-                    return { ok: true, message: plain, detail: { ok: true, method: mName, oap: oapRes } };
+                    hitNames.push(cd.iface.split('.').pop() + '.' + cd.name);
+                    if (hitNames.length >= 2) break;
                 }
+            }
+            if (hitNames.length) {
+                S.telemetry.climate1cr.active = wantOn;
+                const extraNote = wantOn && S.telemetry.engineRunning
+                    ? ' (Xe đang nổ máy sẵn; để thử đề nổ từ xa hãy tắt máy & khoá xe từ bên ngoài)'
+                    : (wantOn && S.telemetry.locked === false ? ' (Xe chưa khoá nên quạt làm mát cabin chạy)' : '');
+                const plain = (wantOn ? 'Đã kích hoạt 1CR: ' : 'Đã gửi lệnh tắt 1CR: ') + hitNames.join(', ') + extraNote;
+                tell(plain, 'go');
+                return { ok: true, message: plain, detail: { ok: true, methods: hitNames } };
             }
             const errText = (resObj && resObj.error) || (rep && rep.error) || 'Chưa nhận được phản hồi từ hộp điều hoà';
             tell('1CR: ' + errText, 'warn');
@@ -742,9 +757,20 @@ function createService(customCfg) {
             else config.autoSyncTimer = false;
             saveConfig();
             const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en, userInitiated: true }, 6000);
+            let timerMethod = rep && rep.ok && rep.result ? rep.result.method : '';
+            if (!timerMethod && rep && rep.result && Array.isArray(rep.result.timerCandidates)) {
+                const tc = rep.result.timerCandidates.slice(0, 4);
+                for (let ti = 0; ti < tc.length; ti++) {
+                    const tr = await callOapBridge(tc[ti].iface, tc[ti].kind, tc[ti].name, tc[ti].payload, tc[ti].altPayload, 3200);
+                    if (tr && tr.ok) {
+                        timerMethod = tc[ti].iface.split('.').pop() + '.' + tc[ti].name;
+                        break;
+                    }
+                }
+            }
             S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
             const plain = en
-                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (rep && rep.ok ? (' (' + ((rep.result && rep.result.method) || 'BDC/IHKA') + ')') : ' (đã lưu lịch)'))
+                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (timerMethod ? (' (' + timerMethod + ')') : ' (đã lưu lịch)'))
                 : 'Đã tắt hẹn giờ nổ máy 1CR.';
             tell(plain, 'go');
             if (config.botToken && config.chatId) {
@@ -807,7 +833,7 @@ function createService(customCfg) {
             url,
             cloudUrl: cloud.pairingUrl(),
             pairCode: identity.pairCode,
-            cloudOk: cloud.lastOkAt > 0,
+            cloudOk: cloud.isOnline(),
             pin: S.pin,
             ips: addresses(),
             telegramOk: !!(config.botToken && config.chatId),
@@ -1110,7 +1136,7 @@ function createService(customCfg) {
             onWorkerEvent,
             stop: () => {
                 tg.stopped = true;
-                cloud.stopped = true;
+                cloud.stop();
                 clearInterval(tickTimer);
                 clearInterval(fwTimer);
                 if (S.server) { try { S.server.close(); } catch (e) {} }

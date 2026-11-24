@@ -1,29 +1,27 @@
 'use strict';
 /**
- * cloud.js - Zero-config End-to-End Encrypted (AES-256-GCM) Cloud Relay for MyBMW MGU (iPhone PWA + Android APK).
+ * cloud.js - Zero-config End-to-End Encrypted (AES-256-GCM) Dual-Engine Relay for MyBMW MGU.
  *
- * Architecture:
- *   - Generates a persistent 24-byte cryptographic `pairSeed` on the car (`/var/opt/bimmer-link/cloud-identity.json`, mode 0600).
- *   - Deterministic derivation via SHA-256:
- *       aesKey  = SHA256("BL-AES-KEY:" + seedBytes)              (256-bit AES-GCM key)
- *       topicId = SHA256("BL-TOPIC:" + seedBytes).hex[0..19]     (unlisted channel ID)
- *   - Channels on `ntfy.sh` (or custom relay host):
- *       bl_st_<topicId>  Car -> Phones encrypted vehicle state, trip log & status (cached 12h while car sleeps 0W!)
- *       bl_ph_<topicId>  Car -> Phones encrypted chunked PNG snapshot (<3.6KB/chunk so all chunks stay cached 12h!)
- *       bl_hr_<topicId>  Car -> Phones encrypted genuine factory BMW 2D studio vehicle PNG
- *       bl_cm_<topicId>  Phones -> Car encrypted remote commands (polled via server event-ID cursor, immune to MGU clock skew!)
- *       bl_dg_<topicId>  Car -> Phones encrypted command ACKs, 1CR SOME/IP schema & raw diagnostic replies
+ * Dual-Engine Zero-429 Architecture:
+ *   1. Real-Time Engine (`mqtt-lite.js` over TLS 8883 <-> Mobile WSS `8084/8884`):
+ *      - Single persistent connection (`broker.emqx.io` -> `broker.hivemq.com` -> `test.mosquitto.org`),
+ *        delivering commands, ACKs, live telemetry, factory hero PNG, and full 360° camera snapshots
+ *        in ~50 ms with `retain=true` and ZERO HTTP 429 rate limits (even on shared Hotspot IPs!).
+ *   2. 12-Hour Deep-Sleep Backup (`ntfy.sh` with Single-PUT `Filename:` attachments & strict 45s pacing):
+ *      - Keeps the last parked state & 360° photo cached for 12h when the car sleeps at 0W, using a single
+ *        `PUT` per image (1 request instead of 45 chunks) and automatic 90s cooldown on HTTP 429.
  *
- * Node 8.16 compatible, zero external dependencies.
+ * Strict Node 8.16 ES2017, zero external dependencies.
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Up = require('./uplink');
+const Mqtt = require('./mqtt-lite');
 
 const DEFAULT_RELAY_HOST = 'ntfy.sh';
 const DEFAULT_APP_BASE = 'https://marilykinson-glitch.github.io/bimmer-link/app/';
-const CHUNK_BYTES = 1500; // Base64 #1 (2000B) + JSON + AES-GCM Base64 #2 (~2880B) -> strictly < ntfy 4096B inline limit!
+const CHUNK_BYTES = 1500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,11 +40,19 @@ function deriveIdentity(seedBuf) {
     const aesKey = crypto.createHash('sha256').update(Buffer.concat([Buffer.from('BL-AES-KEY:', 'utf8'), seedBuf])).digest();
     const topicId = crypto.createHash('sha256').update(Buffer.concat([Buffer.from('BL-TOPIC:', 'utf8'), seedBuf])).digest('hex').slice(0, 20);
     const pairCode = toBase64Url(seedBuf);
+    const mqttBase = 'bl2/' + topicId;
     return {
         pairCode,
         seedBuf,
         aesKey,
         topicId,
+        mqttTopics: {
+            state: mqttBase + '/st',
+            photo: mqttBase + '/ph',
+            hero: mqttBase + '/hr',
+            cmd: mqttBase + '/cm',
+            diag: mqttBase + '/dg',
+        },
         topics: {
             state: 'bl_st_' + topicId,
             photo: 'bl_ph_' + topicId,
@@ -113,7 +119,7 @@ function decryptJson(aesKey, wire) {
     try { return JSON.parse(b.toString('utf8')); } catch (e) { return null; }
 }
 
-/** Split a PNG Buffer into encrypted `< 4KB` text messages so relay servers cache every chunk for 12h. */
+/** Legacy chunk helper preserved for compatibility & unit tests. */
 function encodePhotoChunks(aesKey, pngBuf, meta) {
     const snapId = (meta && meta.id) || Date.now().toString(36);
     const total = Math.max(1, Math.ceil(pngBuf.length / CHUNK_BYTES));
@@ -127,6 +133,7 @@ function encodePhotoChunks(aesKey, pngBuf, meta) {
             total,
             at: (meta && meta.at) || Date.now(),
             title: (meta && meta.title) || '',
+            paint: (meta && meta.paint) || '',
             alert: !!(meta && meta.alert),
             b64: slice.toString('base64'),
         }));
@@ -141,20 +148,51 @@ class CloudBridge {
         this.relayHost = opts.relayHost || DEFAULT_RELAY_HOST;
         this.appBase = opts.appBase || DEFAULT_APP_BASE;
         this.seenFile = opts.seenFile || '';
-        this.onCommand = opts.onCommand;   // async (cmdObj) => resultObj
+        this.onCommand = opts.onCommand;
         this.log = opts.log || (() => {});
         this.enabled = opts.enabled !== false;
+
         this.lastPushHash = '';
-        this.lastPushAt = 0;
+        this.lastMqttPushAt = 0;
+        this.lastNtfyPushAt = 0;
+        this.lastNtfyPollAt = 0;
+        this.ntfyCooldownUntil = 0;
         this.lastOkAt = 0;
         this.lastError = '';
+
         this.seenCmdIds = this._loadSeen();
-        this.lastCmdCursor = '';           // server-side event ID cursor (zero local clock dependency!)
+        this.lastCmdCursor = '';
         this.bootSynced = false;
         this.polling = false;
         this.uploadingHero = false;
         this.heroUploadSeq = 0;
         this.stopped = false;
+
+        this.latestStateWire = '';
+        this.latestSnapWire = '';
+        this.latestHeroWire = '';
+        this.lastDiagObj = null;
+
+        this.mqtt = new Mqtt.MqttBridge({
+            upOpts: this.upOpts,
+            subFilter: this.identity.mqttTopics.cmd,
+            enabled: this.enabled,
+            log: this.log,
+            onMessage: (topic, payload, retain) => {
+                if (retain) return;
+                if (topic === this.identity.mqttTopics.cmd) {
+                    this.lastOkAt = Date.now();
+                    this.handleIncomingCommandWire(payload).catch((e) => this.log('mqtt cmd err: ' + e.message));
+                }
+            },
+        });
+        if (this.enabled) {
+            this.mqtt.start();
+        }
+    }
+
+    isOnline() {
+        return !!(this.mqtt.connected || (this.lastOkAt && Date.now() - this.lastOkAt < 120000));
     }
 
     _loadSeen() {
@@ -170,7 +208,7 @@ class CloudBridge {
         try {
             const keys = Object.keys(this.seenCmdIds);
             const trimmed = {};
-            keys.slice(-120).forEach((k) => { trimmed[k] = 1; });
+            keys.slice(-160).forEach((k) => { trimmed[k] = 1; });
             this.seenCmdIds = trimmed;
             fs.writeFileSync(this.seenFile + '.tmp', JSON.stringify(trimmed));
             fs.renameSync(this.seenFile + '.tmp', this.seenFile);
@@ -181,40 +219,61 @@ class CloudBridge {
         return this.appBase + '#' + this.identity.pairCode;
     }
 
-    async _postTopic(topic, textBody, timeoutMs) {
-        if (!this.enabled) return null;
-        let lastErr = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                const res = await Up.request(this.upOpts, {
-                    host: this.relayHost,
-                    path: '/' + topic,
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-                    body: textBody,
-                    timeoutMs: timeoutMs || 15000,
-                });
-                if (res.status >= 200 && res.status < 300) {
-                    this.lastError = '';
-                    this.lastOkAt = Date.now();
-                    return res;
-                }
-                lastErr = new Error('cloud POST HTTP ' + res.status);
-                if (res.status === 429 || res.status >= 500) {
-                    await sleep(1100 * (attempt + 1));
-                    continue;
-                }
-                break;
-            } catch (e) {
-                lastErr = e;
-                if (attempt < 2) await sleep(600 * (attempt + 1));
-            }
+    /** Decrypt & deduplicate an incoming `BL2:` command packet from MQTT, Hotspot LAN HTTP, or `ntfy.sh`. */
+    async handleIncomingCommandWire(wire, opts) {
+        const cmdObj = decryptJson(this.identity.aesKey, wire);
+        if (!cmdObj || !cmdObj.cmd) return { ok: false, error: 'invalid encrypted command' };
+        const cid = cmdObj.id ? ('c_' + cmdObj.id) : '';
+        if (cid && this.seenCmdIds[cid]) {
+            return { ok: true, duplicate: true };
         }
-        this.lastError = lastErr ? lastErr.message : 'POST failed';
-        throw lastErr || new Error('cloud POST failed');
+        if (cid) {
+            this.seenCmdIds[cid] = 1;
+            this._saveSeen();
+        }
+        if (opts && opts.skipStaleSec && !cmdObj.queueIfAsleep && typeof opts.ageSec === 'number' && opts.ageSec > opts.skipStaleSec) {
+            return { ok: true, skippedStale: true };
+        }
+        this.lastDiagObj = null;
+        if (typeof this.onCommand === 'function') {
+            await this.onCommand(cmdObj);
+        }
+        return { ok: true, diag: this.lastDiagObj };
     }
 
-    /** Publish compact encrypted vehicle state (debounced unless `force` is true, e.g. on park/action/alert). */
+    async _sendNtfy(topic, textBody, asAttachmentName, timeoutMs) {
+        if (!this.enabled || Date.now() < this.ntfyCooldownUntil) return null;
+        const useAttach = !!asAttachmentName || textBody.length > 3800;
+        const headers = useAttach
+            ? { Filename: asAttachmentName || 'blob.txt', 'Content-Type': 'text/plain; charset=utf-8' }
+            : { 'Content-Type': 'text/plain; charset=utf-8' };
+        try {
+            const res = await Up.request(this.upOpts, {
+                host: this.relayHost,
+                path: '/' + topic,
+                method: useAttach ? 'PUT' : 'POST',
+                headers,
+                body: textBody,
+                timeoutMs: timeoutMs || 15000,
+            });
+            if (res.status >= 200 && res.status < 300) {
+                this.lastError = '';
+                this.lastOkAt = Date.now();
+                return res;
+            }
+            if (res.status === 429) {
+                this.ntfyCooldownUntil = Date.now() + 90000;
+                this.lastError = 'ntfy cooldown (429)';
+                return null;
+            }
+            this.lastError = 'ntfy HTTP ' + res.status;
+        } catch (e) {
+            this.lastError = e.message;
+        }
+        return null;
+    }
+
+    /** Publish encrypted vehicle state instantly over MQTT (`retain=true`) and gently (<= 1/45s) to `ntfy.sh`. */
     async publishState(statePayload, force) {
         if (!this.enabled || this.stopped) return false;
         const now = Date.now();
@@ -236,28 +295,49 @@ class CloudBridge {
             statePayload.lastTrip && statePayload.lastTrip.endedAt,
             statePayload.alert,
         ]);
-        if (!force && coreSig === this.lastPushHash && (now - this.lastPushAt < 25000)) return false;
-        if (!force && (now - this.lastPushAt < 3500)) return false;
+
+        const sigChanged = coreSig !== this.lastPushHash;
+        if (!force && !sigChanged && (now - this.lastMqttPushAt < 15000)) return false;
+        if (!force && (now - this.lastMqttPushAt < 2500)) return false;
 
         this.lastPushHash = coreSig;
-        this.lastPushAt = now;
+        this.lastMqttPushAt = now;
         const packet = encryptJson(this.identity.aesKey, Object.assign({ t: 'state', at: now }, statePayload));
-        await this._postTopic(this.identity.topics.state, packet, 12000);
-        return true;
-    }
+        this.latestStateWire = packet;
 
-    /** Publish an encrypted PNG snapshot across 12h-cached chunks with gentle pacing so ntfy never drops chunks. */
-    async publishSnapshot(pngBuf, meta) {
-        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
-        const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, meta);
-        for (let i = 0; i < chunks.length; i++) {
-            if (i > 0) await sleep(130);
-            await this._postTopic(this.identity.topics.photo, chunks[i], 15000);
+        const mqttSent = this.mqtt.publish(this.identity.mqttTopics.state, packet, true);
+        if (mqttSent) this.lastOkAt = now;
+
+        const urgentSleepEvent = !!(statePayload.event === 'parked' || statePayload.alert);
+        if (urgentSleepEvent || (now - this.lastNtfyPushAt >= 45000)) {
+            this.lastNtfyPushAt = now;
+            await this._sendNtfy(this.identity.topics.state, packet, null, 12000);
         }
         return true;
     }
 
-    /** Publish the genuine factory-shaded 2D vehicle hero PNG extracted from the head unit (latest-wins preemption). */
+    /** Publish encrypted PNG snapshot in 1 retained MQTT packet + 1 single `PUT` attachment on `ntfy.sh` (ZERO chunk flood!). */
+    async publishSnapshot(pngBuf, meta) {
+        if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
+        const now = (meta && meta.at) || Date.now();
+        const fullPacket = encryptJson(this.identity.aesKey, {
+            t: 'photo_full',
+            id: (meta && meta.id) || now.toString(36),
+            at: now,
+            title: (meta && meta.title) || '',
+            alert: !!(meta && meta.alert),
+            b64: pngBuf.toString('base64'),
+        });
+        this.latestSnapWire = fullPacket;
+
+        const mqttSent = this.mqtt.publish(this.identity.mqttTopics.photo, fullPacket, true);
+        if (mqttSent) this.lastOkAt = Date.now();
+
+        const ntfyRes = await this._sendNtfy(this.identity.topics.photo, fullPacket, 'snap.txt', 20000);
+        return !!(mqttSent || ntfyRes);
+    }
+
+    /** Publish genuine factory 2D BMW hero PNG in 1 retained MQTT packet + 1 single `PUT` attachment on `ntfy.sh`. */
     async publishHero(pngBuf, meta) {
         if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
         const mySeq = ++this.heroUploadSeq;
@@ -268,52 +348,52 @@ class CloudBridge {
         if (this.stopped || this.heroUploadSeq !== mySeq) return false;
         this.uploadingHero = true;
         try {
-            const heroId = 'h_' + Date.now().toString(36) + '_' + (mySeq % 1000);
-            const chunks = encodePhotoChunks(this.identity.aesKey, pngBuf, Object.assign({}, meta || {}, { id: heroId }));
-            for (let i = 0; i < chunks.length; i++) {
-                if (this.stopped || this.heroUploadSeq !== mySeq) return false;
-                if (i > 0) await sleep(140);
-                if (this.stopped || this.heroUploadSeq !== mySeq) return false;
-                await this._postTopic(this.identity.topics.hero, chunks[i], 15000);
-            }
-            return this.heroUploadSeq === mySeq;
+            const now = (meta && meta.at) || Date.now();
+            const fullPacket = encryptJson(this.identity.aesKey, {
+                t: 'photo_full',
+                id: 'h_' + now.toString(36) + '_' + (mySeq % 1000),
+                at: now,
+                title: (meta && meta.title) || '',
+                paint: (meta && meta.paint) || '',
+                b64: pngBuf.toString('base64'),
+            });
+            this.latestHeroWire = fullPacket;
+
+            const mqttSent = this.mqtt.publish(this.identity.mqttTopics.hero, fullPacket, true);
+            if (mqttSent) this.lastOkAt = Date.now();
+
+            const ntfyRes = await this._sendNtfy(this.identity.topics.hero, fullPacket, 'hero.txt', 20000);
+            return (this.heroUploadSeq === mySeq) && !!(mqttSent || ntfyRes);
         } finally {
             this.uploadingHero = false;
         }
     }
 
-    /** Publish encrypted command ACK, 1CR schema, or diagnostic result to `diag` topic (strictly < 4096B per packet!). */
+    /** Publish encrypted command ACK, 1CR schema, or raw diagnostic result. */
     async publishDiag(payload) {
         if (!this.enabled || this.stopped) return false;
-        const compactBuf = Buffer.from(JSON.stringify(payload), 'utf8');
-        if (compactBuf.length <= 2200) {
-            const single = encryptPacket(this.identity.aesKey, compactBuf);
-            if (single.length <= 3900) {
-                await this._postTopic(this.identity.topics.diag, single, 12000);
-                return true;
-            }
-        }
-        const sliceLen = 1500;
-        const total = Math.max(1, Math.ceil(compactBuf.length / sliceLen));
-        const did = Date.now().toString(36);
-        for (let i = 0; i < total; i++) {
-            if (i > 0) await sleep(120);
-            const b64 = compactBuf.slice(i * sliceLen, (i + 1) * sliceLen).toString('base64');
-            await this._postTopic(this.identity.topics.diag, encryptJson(this.identity.aesKey, {
-                t: 'diag_chunk', id: did, idx: i, total, b64,
-            }), 12000);
+        this.lastDiagObj = payload;
+        const packet = encryptJson(this.identity.aesKey, payload);
+        const mqttSent = this.mqtt.publish(this.identity.mqttTopics.diag, packet, false);
+        if (mqttSent) this.lastOkAt = Date.now();
+
+        // Only send diag over ntfy if MQTT is down or client may be waiting on ntfy
+        if (!mqttSent) {
+            await this._sendNtfy(this.identity.topics.diag, packet, packet.length > 3800 ? 'diag.txt' : null, 12000);
         }
         return true;
     }
 
-    /**
-     * Poll incoming encrypted commands sent from iPhone PWA or Android APK.
-     * Uses server-side `ev.id` cursor (`since=<lastCmdCursor>`) after initial `since=10m` bootstrap,
-     * so MGU head-unit clock skew (+7h timezone or unset RTC) NEVER drops or delays remote commands!
-     */
+    /** Gentle fallback command poll on `ntfy.sh` (every 45s when MQTT is up, 14s when MQTT is down; 90s rest on 429). */
     async pollCommandsOnce() {
         if (!this.enabled || this.polling || this.stopped) return;
+        const now = Date.now();
+        if (now < this.ntfyCooldownUntil) return;
+        const minGap = this.mqtt.connected ? 45000 : 14000;
+        if (this.lastNtfyPollAt && (now - this.lastNtfyPollAt < minGap)) return;
+
         this.polling = true;
+        this.lastNtfyPollAt = now;
         try {
             const sinceParam = this.lastCmdCursor ? encodeURIComponent(this.lastCmdCursor) : '10m';
             const res = await Up.request(this.upOpts, {
@@ -322,6 +402,11 @@ class CloudBridge {
                 method: 'GET',
                 timeoutMs: 9000,
             });
+            if (res.status === 429) {
+                this.ntfyCooldownUntil = Date.now() + 90000;
+                this.polling = false;
+                return;
+            }
             if (res.status === 200) {
                 this.lastOkAt = Date.now();
                 this.lastError = '';
@@ -345,25 +430,21 @@ class CloudBridge {
                     if (ev.id) this.lastCmdCursor = ev.id;
                     if (ev.id && this.seenCmdIds[ev.id]) continue;
                     if (ev.id) { this.seenCmdIds[ev.id] = 1; dirtySeen = true; }
-
-                    const cmdObj = decryptJson(this.identity.aesKey, ev.message);
-                    if (!cmdObj || !cmdObj.cmd) continue;
-                    const cid = cmdObj.id ? ('c_' + cmdObj.id) : '';
-                    if (cid && this.seenCmdIds[cid]) continue;
-                    if (cid) { this.seenCmdIds[cid] = 1; dirtySeen = true; }
-
-                    // On initial daemon bootstrap (`since=10m`), skip non-queued commands older than 45s in SERVER time
-                    if (isBootstrap && !cmdObj.queueIfAsleep && maxServerTime > 0 && typeof ev.time === 'number') {
-                        if (maxServerTime - ev.time > 45) continue;
-                    }
-                    await this.onCommand(cmdObj);
+                    const ageSec = (maxServerTime > 0 && typeof ev.time === 'number') ? (maxServerTime - ev.time) : 0;
+                    await this.handleIncomingCommandWire(ev.message, {
+                        skipStaleSec: isBootstrap ? 45 : 0,
+                        ageSec,
+                    });
                 }
                 if (dirtySeen) this._saveSeen();
             }
-        } catch (e) {
-            // Normal when car has no internet uplink yet
-        }
+        } catch (e) {}
         this.polling = false;
+    }
+
+    stop() {
+        this.stopped = true;
+        if (this.mqtt) this.mqtt.stop();
     }
 }
 
