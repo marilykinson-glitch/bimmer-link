@@ -231,6 +231,35 @@ mgu.run({
             'de.bmw.infotainment.lsc.LSCDataSink',
         ].forEach((ifn) => { getOapInstances(ifn).catch(() => {}); });
 
+        const sleepOap = (ms) => new Promise((r) => setTimeout(r, ms));
+        function oapGet(px, field, timeoutMs) {
+            return new Promise((resolve, reject) => setImmediate(() => {
+                try { Promise.resolve(px.getValue(field, timeoutMs || 1200)).then(resolve, reject); } catch (e) { reject(e); }
+            }));
+        }
+
+        async function readOap1crLive() {
+            const out = {};
+            const probes = [
+                ['de.bmw.infotainment.lsc.LSCDataSink', 'statusAirConditioningParkFunctions'],
+                ['de.bmw.infotainment.lsc.LSCDataSink', 'dWAStatus'],
+                ['de.bmw.infotainment.climate.Climate2', 'statusAirConditionParkFunctions'],
+                ['de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'statusParkingFunctionsOn'],
+                ['de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'parkingFunctionsRES'],
+                ['de.bmw.infotainment.climate.climatemaster.ClimateMaster', 'statusAvailableParkingFunctionsRES'],
+            ];
+            for (let i = 0; i < probes.length; i++) {
+                const ifn = probes[i][0], fn = probes[i][1];
+                try {
+                    const list = await getOapInstances(ifn);
+                    if (!list.length) continue;
+                    const val = await oapGet(list[0].px, fn, 650).catch(() => null);
+                    if (val !== null && val !== undefined) out[ifn + '.' + fn] = val;
+                } catch (e) {}
+            }
+            return out;
+        }
+
         async function attachOrDetachCam(wantOn) {
             if (!signals || !signals.hasNative || !signals.hasNative()) {
                 return { ok: false, error: 'no native signals' };
@@ -261,8 +290,8 @@ mgu.run({
             if (icam) {
                 const xvList = await getOapInstances('de.bmw.dass.XView3D');
                 const xv = xvList[0] && xvList[0].px;
-                const xvSt = xv ? await Promise.resolve().then(() => xv.getValue('CurrentState', 1800)).catch(() => null) : null;
-                const icSt = await Promise.resolve().then(() => icam.getValue('currentState', 1800)).catch(() => null);
+                const xvSt = xv ? await oapGet(xv, 'CurrentState', 1500).catch(() => null) : null;
+                const icSt = await oapGet(icam, 'currentState', 1500).catch(() => null);
                 const raw = JSON.stringify({ xv: xvSt, ic: icSt });
                 if (/PDC|PARK|RVC|TOP_VIEW|PANORAMA/i.test(raw) || (/DR_ACTIVE|"application":51\b/i.test(raw) && /"perspective":7\b/.test(raw))) {
                     return { ok: true, alreadyOn: true };
@@ -284,10 +313,47 @@ mgu.run({
             return { ok: true, cookie: camCookie };
         }
 
+        async function callSmartParkingMethod(px, name, basePayload, altPayload) {
+            const invoke = (pl) => signals.call(px, name, pl, 3000);
+            let res = await invoke(basePayload).catch((e) => {
+                if (altPayload !== undefined) return invoke(altPayload);
+                throw e;
+            });
+            if (name !== 'requestParkingFunctionsOn' || !res || !res.accepted || !/NOT_ACCEPTED/.test(String(res.accepted))) {
+                return res;
+            }
+            const acc = String(res.accepted);
+            if (/LOW_PRIORITY/i.test(acc)) {
+                const gids = [0, 1, 2, 3];
+                for (let i = 0; i < gids.length; i++) {
+                    if (basePayload && basePayload.clientGroupId === gids[i]) continue;
+                    const pTry = Object.assign({}, basePayload, { clientGroupId: gids[i] });
+                    const rTry = await invoke(pTry).catch(() => null);
+                    if (rTry && (!rTry.accepted || !/NOT_ACCEPTED/.test(String(rTry.accepted)))) return rTry;
+                    if (rTry) res = rTry;
+                }
+            }
+            if (res && res.accepted && /MIN_VALUE|MAX_VALUE/i.test(String(res.accepted))) {
+                const times = [15, 30, 5, 1];
+                for (let i = 0; i < times.length; i++) {
+                    const pTry = Object.assign({}, basePayload, { timeParkingFunctionsAutoMode: times[i] });
+                    const rTry = await invoke(pTry).catch(() => null);
+                    if (rTry && (!rTry.accepted || !/NOT_ACCEPTED/.test(String(rTry.accepted)))) return rTry;
+                    if (rTry) res = rTry;
+                }
+            }
+            return res;
+        }
+
         async function handleOapReq(req) {
             if (!req || !req.seq || req.seq === lastOapSeq) return;
             lastOapSeq = req.seq;
             try {
+                if (req.kind === 'read_1cr_live') {
+                    const liveAfter = await readOap1crLive();
+                    writeAppFile('oap-reply.json', { seq: req.seq, ok: true, liveAfter });
+                    return;
+                }
                 if (req.kind === 'cam_attach' || req.kind === 'cam_detach') {
                     const camRes = await attachOrDetachCam(req.kind === 'cam_attach');
                     writeAppFile('oap-reply.json', Object.assign({ seq: req.seq }, camRes));
@@ -302,24 +368,26 @@ mgu.run({
                 for (let i = 0; i < list.length; i++) {
                     const it = list[i];
                     try {
-                        const res = req.kind === 'getter'
-                            ? await it.px.getValue(req.name, 2500)
-                            : (req.kind === 'setter'
-                                ? await signals.set(it.px, req.name, req.payload, 3500)
-                                : await signals.call(it.px, req.name, req.payload, 3500));
-                        writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res === undefined ? null : res });
+                        let res;
+                        if (req.kind === 'getter') {
+                            res = await oapGet(it.px, req.name, 2200);
+                        } else if (req.kind === 'setter') {
+                            res = await signals.set(it.px, req.name, req.payload, 3200).catch((e) => {
+                                if (req.altPayload !== undefined) return signals.set(it.px, req.name, req.altPayload, 3200);
+                                throw e;
+                            });
+                        } else {
+                            res = await callSmartParkingMethod(it.px, req.name, req.payload, req.altPayload);
+                        }
+                        let liveAfter = null;
+                        if (req.kind !== 'getter' && /climate|lsc/i.test(req.iface)) {
+                            await sleepOap(650);
+                            liveAfter = await readOap1crLive();
+                        }
+                        writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res === undefined ? null : res, liveAfter });
                         return;
                     } catch (e) {
                         lastErr = e;
-                        if (req.altPayload !== undefined && req.kind !== 'getter') {
-                            try {
-                                const res2 = req.kind === 'setter'
-                                    ? await signals.set(it.px, req.name, req.altPayload, 3500)
-                                    : await signals.call(it.px, req.name, req.altPayload, 3500);
-                                writeAppFile('oap-reply.json', { seq: req.seq, ok: true, inst: it.inst, response: res2 === undefined ? null : res2 });
-                                return;
-                            } catch (e2) { lastErr = e2; }
-                        }
                     }
                 }
                 writeAppFile('oap-reply.json', { seq: req.seq, ok: false, error: String(lastErr && lastErr.message || lastErr || 'call failed') });

@@ -2,7 +2,7 @@
   "id": "bimmer_link",
   "title": "MyBMW & 1CR",
   "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp 4 camera 360° / thẻ trạng thái kèm vị trí hầm gửi về App MyBMW & Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA.",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "startType": "autostart",
   "autoClimateSignals": true,
   "vendor": "custom",
@@ -15,6 +15,8 @@
     "de.bmw.infotainment.climate.Climate": { "_all": true, "_optional": "Climate base" },
     "de.bmw.infotainment.climate.climatemaster.ClimateMaster": { "_all": true, "_optional": "1CR ClimateMaster" },
     "de.bmw.infotainment.lsc.LSCDataSink": { "_all": true, "_optional": "1CR LSC status" },
+    "de.bmw.infotainment.lsc.LSCDataSource": { "_all": true, "_optional": "1CR LSC control" },
+    "de.bmw.infotainment.lsc.LSC": { "_all": true, "_optional": "1CR LSC service" },
     "de.bmw.body.steeringwheelcomfort.SteeringWheelClimate": { "_all": true, "_optional": "SteeringWheelClimate" }
   },
   "screens": [

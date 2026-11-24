@@ -313,7 +313,7 @@ function renderSnapshotPng(telemetry, extra, opts) {
         const line2 = 'XANG: ' + fmtVal(t.fuelPct, '%') + ' (' + fmtVal(t.rangeKm, ' KM') + ') | 12V: ' + fmtVal(t.battery12v, 'V') +
             ' | NHIET: ' + fmtVal(t.ambientC, '*C') + '/' + fmtVal(t.coolantC, '*C') + ' | ' + secTag;
         s.text(line2, 16, 784, 2, doorsWarn ? '#ffb020' : '#cbd5e1', 77);
-        const jpgBuf = Jpeg.encodeJpegAdaptive(s.w, s.h, s.buf, 64000);
+        const jpgBuf = Jpeg.encodeJpegAdaptive(s.w, s.h, s.buf, 68000);
         return {
             png: jpgBuf,
             mime: 'image/jpeg',

@@ -7,9 +7,10 @@
  *   1. Asks `car-link.js` (`cam_wake`) to attach to `ICAM2Proxy` as `CLIENT_INDIRECT` in
  *      `DR_ACTIVE` / `MODE_MOSAIK` perspective 7 (unless another app or Parking View already has it on).
  *   2. Hosts a temporary Unix socket speaking the `cluster-render` v1 protocol (`/run/bimmer-link/cam.sock`)
- *      and spawns `mgu-sidecam --socket <sock>` requesting `view: "all"` (`pair: 1`, `960x440`).
- *   3. Converts the decoded 4:2:0 YUV atlas into `960x440` RGBA (`cam4.rgba`), shuts down `mgu-sidecam`,
- *      and immediately releases `ICAM2Proxy` (`cam_release`).
+ *      and spawns `mgu-sidecam --socket <sock>` requesting `view: "all"` (`pair: 1`, `960x720` @ `30 fps`).
+ *   3. Waits until `mgu-sidecam`'s `PairTagger` locks onto `"sei@..."` plus 2 post-lock frames so both halves
+ *      (`09` Front/Rear + `0a` Left/Right) are guaranteed aligned and non-duplicated, converts the full-range
+ *      4:2:0 YUV atlas into `960x720` RGBA (`cam4.rgba`), shuts down `mgu-sidecam`, and releases `ICAM2Proxy`.
  *
  * Strict Node 8.16 ES2017, zero external dependencies.
  */
@@ -123,8 +124,8 @@ function capture360Frame(opts) {
     opts = opts || {};
     const W = (opts.width || 960) & ~3;
     const H = (opts.height || 720) & ~1;
-    const minFrames = opts.minFrames || 5;
-    const timeoutMs = opts.timeoutMs || 4500;
+    const minFrames = opts.minFrames || 9;
+    const timeoutMs = opts.timeoutMs || 4800;
     const runDir = opts.runDir || '/run/bimmer-link';
     const sockPath = opts.sockPath || path.join(runDir, 'cam360-' + process.pid + '.sock');
     const rawOutFile = opts.rawOutFile || path.join(runDir, 'cam4.rgba');
@@ -136,7 +137,6 @@ function capture360Frame(opts) {
         return Promise.resolve({ ok: false, reason: 'mgu-sidecam absent' });
     }
 
-    const expectedBytes = (W * H * 3) / 2;
     let settled = false;
     let server = null;
     let activeConn = null;
@@ -146,6 +146,9 @@ function capture360Frame(opts) {
     let settleTimer = null;
     let bestAtlas = null;
     let validCount = 0;
+    let pairMode = '';
+    let seiLocked = false;
+    let postSeiFrames = 0;
 
     try { fs.unlinkSync(sockPath); } catch (e) {}
 
@@ -192,8 +195,8 @@ function capture360Frame(opts) {
                             fs.renameSync(rawOutFile + '.tmp', rawOutFile);
                         } catch (e) {}
                     }
-                    log('cam360 captured ' + fw + 'x' + fh + ' -> ' + W + 'x' + H + ' (' + validCount + ' frames)');
-                    cleanupAndFinish({ ok: true, width: W, height: H, srcWidth: fw, srcHeight: fh, rgba, frames: validCount });
+                    log('cam360 captured ' + fw + 'x' + fh + ' -> ' + W + 'x' + H + ' (' + validCount + ' frames, pair=' + (pairMode || 'auto') + ')');
+                    cleanupAndFinish({ ok: true, width: W, height: H, srcWidth: fw, srcHeight: fh, rgba, frames: validCount, pairMode: pairMode || 'auto' });
                 } catch (e) {
                     cleanupAndFinish({ ok: false, reason: e.message });
                 }
@@ -260,15 +263,21 @@ function capture360Frame(opts) {
                             if (!hasLiveLuma(f.pixels, lay.vw, lay.vh)) continue;
                             bestAtlas = { pixels: Buffer.from(f.pixels), vw: lay.vw, vh: lay.vh };
                             validCount++;
-                            if (validCount >= minFrames) {
+                            if (seiLocked) postSeiFrames++;
+                            if (child && child.stdin) {
+                                try { child.stdin.write('{"op":"status"}\n'); } catch (e) {}
+                            }
+                            const readyByExplicit = typeof opts.minFrames === 'number' && validCount >= opts.minFrames;
+                            const readyBySingle = pairMode === 'off' && validCount >= 3;
+                            const readyBySei = seiLocked && postSeiFrames >= 2;
+                            if (readyByExplicit || readyBySingle || readyBySei || validCount >= minFrames) {
                                 finalizeFromAtlas(bestAtlas);
                                 return;
                             }
-                            if (!settleTimer) {
-                                settleTimer = setTimeout(() => {
-                                    if (bestAtlas) finalizeFromAtlas(bestAtlas);
-                                }, 650);
-                            }
+                            if (settleTimer) clearTimeout(settleTimer);
+                            settleTimer = setTimeout(() => {
+                                if (bestAtlas) finalizeFromAtlas(bestAtlas);
+                            }, 900);
                         }
                     }
                 });
@@ -308,7 +317,18 @@ function capture360Frame(opts) {
                         while ((nl = sbuf.indexOf('\n')) >= 0) {
                             const ln = sbuf.slice(0, nl).trim();
                             sbuf = sbuf.slice(nl + 1);
-                            if (ln && ln.indexOf('"fps":0') < 0) log('sidecam: ' + ln.slice(0, 380));
+                            if (!ln) continue;
+                            try {
+                                const st = JSON.parse(ln);
+                                if (st && typeof st.pair === 'string' && st.pair) {
+                                    pairMode = st.pair;
+                                    if (/^sei@\d+$/.test(st.pair) && !seiLocked) {
+                                        seiLocked = true;
+                                        postSeiFrames = 0;
+                                    }
+                                }
+                            } catch (e) {}
+                            if (ln.indexOf('"fps":0') < 0) log('sidecam: ' + ln.slice(0, 380));
                         }
                     });
                 }
@@ -321,7 +341,7 @@ function capture360Frame(opts) {
                     h: H,
                     x: 0,
                     y: 0,
-                    fps: 15,
+                    fps: 30,
                     exclusive: 0,
                     contend: 1,
                     persist: 1,

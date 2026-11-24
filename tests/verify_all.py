@@ -650,8 +650,12 @@ def check_car_link_logic_in_jxa():
       }}
     }};
     var built = C.build1crOrderedCandidates(rcCat, liveIdle, true);
-    if (built.candidates[0].stage !== 'auto_1cr' || built.candidates[0].payload.operationParkFunctionAutoMode !== 'AUTO_MINUS_MODUS_EIN' || built.candidates[0].payload.operationParkAirConditioning !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR') {{
-      throw new Error('Stage 1 must be pure AUTO_MINUS_MODUS_EIN: ' + JSON.stringify(built.candidates[0]));
+    if (built.candidates[0].stage !== 'auto_1cr' ||
+        built.candidates[0].payload.operationParkFunctionAutoMode !== 'AUTO_MINUS_MODUS_EIN' ||
+        built.candidates[0].payload.operationParkAirConditioning !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR' ||
+        built.candidates[0].payload.operationParkHeat !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR' ||
+        built.candidates[0].payload.operationExtraHeater !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR') {{
+      throw new Error('Stage 1 must be pure AUTO_MINUS_MODUS_EIN with all heaters KEINE_AKTION: ' + JSON.stringify(built.candidates[0]));
     }}
     if (built.candidates[1].stage !== 'auto_res_phev' || built.candidates[1].payload.operationRemoteStart !== 'REMOTE_ENGINE_START_EIN') {{
       throw new Error('Stage 2 must be auto_res_phev: ' + JSON.stringify(built.candidates[1]));
@@ -683,6 +687,88 @@ def check_car_link_logic_in_jxa():
     }}, {{}});
     if (vdRejected.active !== false || C.explain1crError(vdRejected, {{}}).indexOf('KHOÁ XE') < 0) {{
       throw new Error('Expected clear lock precondition message');
+    }}
+    // v0.5.3 Check A: Write-only setter hygiene (`airConditionParkFunctions` must have getter=false, notifier=false after enrich)
+    var c2Desc = rcCat.interfaces.filter(function(x){{ return x.iface === 'de.bmw.infotainment.climate.Climate2'; }})[0];
+    C.enrichDescWithGeneratedCfg(realCarDb, realCarDb.interfaces['de.bmw.infotainment.climate.Climate2'], c2Desc, {{
+      fields: {{
+        airConditionParkFunctions: {{ setter: {{ id: 32 }}, schema: {{ t: 'Struct', e: [] }} }},
+        statusAirConditionParkFunctions: {{ getter: {{ id: 33 }}, event: {{ id: 32801 }} }}
+      }}
+    }});
+    var acPfField = c2Desc.fields.filter(function(x){{ return x.name === 'airConditionParkFunctions'; }})[0];
+    if (acPfField.getter !== false || acPfField.notifier !== false || acPfField.setter !== true) {{
+      throw new Error('Write-only field must have getter=false & notifier=false: ' + JSON.stringify(acPfField));
+    }}
+    // v0.5.3 Check B: Smart stop1cr payload turns off ONLY the active mode without unchecking REMOTE_ENGINE_START_EIN
+    var liveAutoOn = {{
+      'de.bmw.infotainment.climate.Climate2.statusAirConditionParkFunctions': {{
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+        statusParkHeater: 'STANDHEIZUNG_AUS',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_EIN',
+        statusSetupRemoteStart: 'REMOTE_ENGINE_START_EIN'
+      }}
+    }};
+    var stopBuilt = C.build1crOrderedCandidates(rcCat, liveAutoOn, false);
+    var stopC2 = stopBuilt.candidates.filter(function(x){{ return x.name === 'airConditionParkFunctions'; }})[0];
+    if (stopC2.payload.operationParkFunctionAutoMode !== 'AUTO_MINUS_MODUS_AUS' ||
+        stopC2.payload.operationParkAirConditioning !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR' ||
+        stopC2.payload.operationRemoteStart !== 'KEINE_AKTION_NICHT_VERFUEGBAR') {{
+      throw new Error('Smart stop1cr payload mismatch: ' + JSON.stringify(stopC2.payload));
+    }}
+    // v0.5.3 Check C: LSCDataSource / timer interface discovery
+    var lscCat = C.discoverClimateCatalog({{
+      interfaces: {{
+        'de.bmw.infotainment.lsc.LSCDataSource': {{
+          serviceId: 46393,
+          fields: {{ switchOnTime1: {{ setter: true }} }},
+          methods: {{}}
+        }}
+      }}
+    }});
+    if (lscCat.interfaces.length !== 1 || lscCat.interfaces[0].fields[0].roles.indexOf('timer_write') < 0) {{
+      throw new Error('LSCDataSource timer_write not discovered: ' + JSON.stringify(lscCat));
+    }}
+    // v0.5.3 Check D: Exact C++ PairTagger + postSeiFrames>=2 simulation when G30 stream starts on SEI 0a!
+    function simPairCapture(seq) {{
+      var hist = [], count = 0, known = false, pos = -1, lo = '', hi = '', last = 0, bySei = false;
+      var pairHave = [false, false], rows = ['', ''], seiLocked = false, postSei = 0, valid = 0;
+      for (var i = 0; i < seq.length; i++) {{
+        var sei = seq[i];
+        count++;
+        hist.push(sei);
+        if (hist.length > 6) hist.shift();
+        if (hist.length === 6) {{
+          var ok = true;
+          for (var k = 1; k < 6; k++) {{
+            if (hist[k] === hist[k - 1]) ok = false;
+            if (k >= 2 && hist[k] !== hist[k - 2]) ok = false;
+          }}
+          if (ok) {{
+            pos = 0;
+            var a = hist[5], b = hist[4];
+            lo = a < b ? a : b; hi = a < b ? b : a;
+            known = true;
+          }}
+        }}
+        var cls;
+        if (known && (sei === lo || sei === hi)) {{ bySei = true; last = (sei === hi ? 1 : 0); cls = last; }}
+        else {{ bySei = false; last = (count === 1 ? 0 : (last ^ 1)); cls = last; }}
+        rows[cls] = sei;
+        pairHave[cls] = true;
+        if (!pairHave[0] || !pairHave[1]) continue;
+        valid++;
+        if (seiLocked) postSei++;
+        if (bySei && !seiLocked) {{ seiLocked = true; postSei = 0; }}
+        if (seiLocked && postSei >= 2) return {{ top: rows[0], bottom: rows[1], valid: valid, pic: count }};
+      }}
+      return null;
+    }}
+    var r0a = simPairCapture(['0a', '09', '0a', '09', '0a', '09', '0a', '09', '0a']);
+    var r09 = simPairCapture(['09', '0a', '09', '0a', '09', '0a', '09', '0a', '09']);
+    if (!r0a || r0a.top !== '09' || r0a.bottom !== '0a' || !r09 || r09.top !== '09' || r09.bottom !== '0a') {{
+      throw new Error('PairTagger postSeiFrames>=2 alignment failed: ' + JSON.stringify([r0a, r09]));
     }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
@@ -911,6 +997,53 @@ def check_pwa_and_manifest_filtering():
         assert 'de.bmw.infotainment.climate.Climate2' in proxies
         assert 'de.bmw.infotainment.climate.CustomStandklima' in proxies
         assert 'de.bmw.infotainment.climate.climatemaster.ClimateMaster' not in proxies
+
+        # Verify VietMap-slot `/proc/<pid>/cwd`-only UID discovery in bimmer-link.js!
+        bl_src = open(os.path.join(ROOT, 'tools/bimmer-link/bimmer-link.js'), encoding='utf-8').read()
+        proc_check = run_jxa(f"""
+        var dirs = {{
+          '/oap': ['oap_5002'],
+          '/proc': ['1', '42424'],
+          '/run': [],
+          '/run/app': []
+        }};
+        var files = {{
+          '/oap/oap_5002/source/javascript/kit/app-spec.json': '{{"id":"bimmer_link2"}}',
+          '/proc/1/cmdline': 'systemd\\0',
+          '/proc/42424/cmdline': 'node\\0../source/javascript/app.js\\0',
+          '/proc/42424/status': 'Name:\\tnode\\nUid:\\t5099\\t5099\\t5099\\t5099\\nGid:\\t5099\\t5099\\t5099\\t5099\\n'
+        }};
+        var links = {{
+          '/proc/42424/cwd': '/oap/oap_5002/data'
+        }};
+        var fs = {{
+          existsSync: function(p) {{ return !!(dirs[p] || files[p] !== undefined || p === '/proc/42424'); }},
+          readdirSync: function(p) {{ if (!dirs[p]) throw new Error('enoent ' + p); return dirs[p]; }},
+          readFileSync: function(p) {{ if (files[p] === undefined) throw new Error('enoent ' + p); return files[p]; }},
+          readlinkSync: function(p) {{ if (!links[p]) throw new Error('einval ' + p); return links[p]; }},
+          mkdirSync: function(p) {{ dirs[p] = dirs[p] || []; }},
+          lstatSync: function() {{ return {{ isDirectory: function() {{ return true; }} }}; }},
+          statSync: function() {{ return {{ uid: 1001, gid: 1001 }}; }}
+        }};
+        var path = {{
+          join: function() {{ return Array.prototype.slice.call(arguments).join('/').replace(/[/]+/g, '/'); }},
+          dirname: function(p) {{ return p.split('/').slice(0, -1).join('/') || '/'; }}
+        }};
+        var stub = function() {{ return {{ TelemetryTracker: function(){{ this.state={{}}; }}, options: function(){{ return {{}}; }}, TelegramController: function(){{}}, loadOrCreateIdentity: function(){{ return {{}}; }}, CloudBridge: function(){{}} }}; }};
+        var req = function(n) {{
+          if (n === 'fs') return fs;
+          if (n === 'path') return path;
+          if (n === 'crypto') return {{ randomBytes: function(){{ return {{ readUInt16BE: function(){{ return 1234; }} }}; }} }};
+          return stub();
+        }};
+        var mod = {{ exports: {{}} }};
+        var fn = new Function('require', 'module', 'exports', '__dirname', 'process', {json.dumps(bl_src)});
+        fn(req, mod, mod.exports, '/tmp', {{ env: {{}}, pid: 1, getuid: function(){{ return 501; }}, argv: ['node', 'x', 'lib'], stdout: {{ write: function(){{}} }} }});
+        var res = mod.exports.ensureAppRamDir('/run', '/oap', '/proc');
+        JSON.stringify(res);
+        """)
+        parsed_proc = json.loads(proc_check)
+        assert parsed_proc['id'] == 'bimmer_link2' and parsed_proc['uid'] == 5099 and parsed_proc['fromProc'] is True, f"VietMap cwd UID failed: {parsed_proc}"
     print('[OK] PWA client syntax, black-canvas guard, and OAP SOME/IP catalog filtering verified')
 
 

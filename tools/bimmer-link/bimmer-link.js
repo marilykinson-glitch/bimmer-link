@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.5.2';
+const VERSION = '0.5.3';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -196,7 +196,17 @@ async function fwEnsure(port, iface, nft) {
 
 /* ---------------- App discovery & zero-flash RAM IPC folder ---------------- */
 
+let appFindCache = { oapRoot: '', at: 0, app: null };
+let appProcCache = { root: '', procDir: '', at: 0, who: null };
+
 function findInstalledApp(oapRoot) {
+    const now = Date.now();
+    if (appFindCache.oapRoot === oapRoot && appFindCache.app && fs.existsSync(appFindCache.app.spec)) {
+        return appFindCache.app;
+    }
+    if (appFindCache.oapRoot === oapRoot && !appFindCache.app && now - appFindCache.at < 4000) {
+        return null;
+    }
     let dirs = [];
     try { dirs = fs.readdirSync(oapRoot).filter((d) => /^oap_\d+$/.test(d)); } catch (e) { return null; }
     for (let i = 0; i < dirs.length; i++) {
@@ -205,11 +215,48 @@ function findInstalledApp(oapRoot) {
             const specPath = path.join(oapRoot, dirs[i], rels[k]);
             const s = readJson(specPath);
             if (s && typeof s.id === 'string' && APP_RE.test(s.id)) {
-                return { id: s.id, root: path.join(oapRoot, dirs[i]) };
+                const found = { id: s.id, root: path.join(oapRoot, dirs[i]), spec: specPath };
+                appFindCache = { oapRoot, at: now, app: found };
+                return found;
             }
         }
     }
+    appFindCache = { oapRoot, at: now, app: null };
     return null;
+}
+
+function findAppProcessUid(app, procDir) {
+    if (!app || !procDir) return null;
+    const now = Date.now();
+    if (
+        appProcCache.root === app.root &&
+        appProcCache.procDir === procDir &&
+        now - appProcCache.at < 15000 &&
+        (!appProcCache.who || fs.existsSync(path.join(procDir, String(appProcCache.who.pid))))
+    ) {
+        return appProcCache.who;
+    }
+    let who = null;
+    let pids = [];
+    try { pids = fs.readdirSync(procDir).filter((d) => /^\d+$/.test(d) && Number(d) !== process.pid); } catch (e) { pids = []; }
+    const inApp = (s) => !!s && (s === app.root || s.indexOf(app.root + '/') >= 0 || s.indexOf(app.root + '\0') >= 0);
+    for (let i = 0; i < pids.length; i++) {
+        const base = path.join(procDir, pids[i]);
+        let cmd = null, cwd = null;
+        try { cmd = fs.readFileSync(path.join(base, 'cmdline'), 'latin1'); } catch (e) {}
+        try { cwd = fs.readlinkSync(path.join(base, 'cwd')); } catch (e) {}
+        if (!inApp(cmd) && !inApp(cwd)) continue;
+        try {
+            const st = fs.readFileSync(path.join(base, 'status'), 'utf8');
+            const u = /^Uid:\s+(\d+)/m.exec(st), g = /^Gid:\s+(\d+)/m.exec(st);
+            if (u && g && Number(u[1]) > 0) {
+                who = { uid: Number(u[1]), gid: Number(g[1]), pid: Number(pids[i]) };
+                break;
+            }
+        } catch (e) {}
+    }
+    appProcCache = { root: app.root, procDir, at: now, who };
+    return who;
 }
 
 function ensureAppRamDir(runDir, oapRoot, procDir) {
@@ -217,28 +264,28 @@ function ensureAppRamDir(runDir, oapRoot, procDir) {
     if (!app) return null;
     const appRun = path.join(runDir, 'app');
     mkdirp(appRun);
+    let uid = null, gid = null, fromProc = false;
     try {
-        let uid = null, gid = null;
-        const pids = fs.readdirSync(procDir).filter((d) => /^\d+$/.test(d));
-        for (let i = 0; i < pids.length; i++) {
-            try {
-                const cmd = fs.readFileSync(path.join(procDir, pids[i], 'cmdline'), 'latin1');
-                if (cmd.indexOf(app.root) < 0) continue;
-                const st = fs.readFileSync(path.join(procDir, pids[i], 'status'), 'utf8');
-                const u = /^Uid:\s+(\d+)/m.exec(st), g = /^Gid:\s+(\d+)/m.exec(st);
-                if (u && g && Number(u[1]) > 0) { uid = Number(u[1]); gid = Number(g[1]); break; }
-            } catch (e) {}
+        if (!fs.lstatSync(appRun).isDirectory()) {
+            fs.unlinkSync(appRun);
+            fs.mkdirSync(appRun, 0o770);
         }
-        if (uid === null) {
+        const who = findAppProcessUid(app, procDir);
+        if (who) {
+            uid = who.uid;
+            gid = who.gid;
+            fromProc = true;
+        } else {
             const st = fs.statSync(path.join(app.root, 'data'));
-            uid = st.uid; gid = st.gid;
+            uid = st.uid;
+            gid = st.gid;
         }
         if (uid > 0 && typeof process.getuid === 'function' && process.getuid() === 0) {
             fs.chownSync(appRun, uid, gid);
             fs.chmodSync(appRun, 0o770);
         }
     } catch (e) {}
-    return app;
+    return { id: app.id, root: app.root, uid, gid, fromProc };
 }
 
 /* ---------------- Main Service State & Orchestration ---------------- */
@@ -382,7 +429,8 @@ function createService(customCfg) {
                 return;
             }
             if (c === 'schema') {
-                const rep = await callWorker('schema', {}, 5000);
+                const oapLiveRep = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 2200);
+                const rep = await callWorker('schema', { oapLive: (oapLiveRep && oapLiveRep.liveAfter) || null }, 5000);
                 await cloud.publishDiag({
                     t: 'schema',
                     reqId: cmdObj.id,
@@ -393,9 +441,9 @@ function createService(customCfg) {
             }
             if (c === 'invoke_raw') {
                 let res = null;
-                const oapRes = await callOapBridge(a.iface, a.kind, a.name, a.payload, undefined, 3200);
+                const oapRes = await callOapBridge(a.iface, a.kind, a.name, a.payload, undefined, 3600);
                 if (oapRes && oapRes.ok) {
-                    const vRep = await callWorker('verify_1cr', { waitMs: 700 }, 3500);
+                    const vRep = await callWorker('verify_1cr', { waitMs: oapRes.liveAfter ? 250 : 700, oapLive: oapRes.liveAfter || null }, 3500);
                     const vd = (vRep && vRep.result && vRep.result.verdict) || null;
                     res = { ok: true, via: 'OAP-ACL', verified: !!(vd && vd.active), verdict: vd, trace: [oapRes], saved: !!a.saveAsDefault };
                     if (a.saveAsDefault) {
@@ -721,7 +769,8 @@ function createService(customCfg) {
 
         if (action === 'start1cr' || action === 'stop1cr') {
             const wantOn = action === 'start1cr';
-            const prepRep = await callWorker('prepare_1cr', { wantOn }, 4500);
+            const preOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1800);
+            const prepRep = await callWorker('prepare_1cr', { wantOn, oapLive: (preOap && preOap.liveAfter) || null }, 4500);
             if (!prepRep || !prepRep.ok || !prepRep.result) {
                 const fallbackErr = (prepRep && prepRep.error) || 'Trợ thủ tín hiệu xe chưa sẵn sàng';
                 tell('1CR: ' + fallbackErr, 'warn');
@@ -734,7 +783,7 @@ function createService(customCfg) {
             if (wantOn && verdict.consentEnabled === false && Array.isArray(prep.consentCandidates)) {
                 for (let ci = 0; ci < prep.consentCandidates.length; ci++) {
                     const cc = prep.consentCandidates[ci];
-                    const oc = await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2000);
+                    const oc = await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2500);
                     if (!oc || !oc.ok) await callWorker('invoke_one', cc, 2000);
                 }
             }
@@ -742,13 +791,14 @@ function createService(customCfg) {
             const cands = Array.isArray(prep.candidates) ? prep.candidates : [];
             let hitLabel = '';
             let lastVerifyRes = null;
+            let lastOapLive = null;
 
             for (let i = 0; i < cands.length; i++) {
                 const cd = cands[i];
                 const shortName = cd.iface.split('.').pop() + '.' + cd.name + (cd.stage ? ('[' + cd.stage + ']') : '');
-                const oapTmo = cd.hasLiveProvider === false ? 1200 : 2500;
-                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, oapTmo);
+                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 3500);
                 let sentAny = !!(oapRes && oapRes.ok);
+                if (oapRes && oapRes.liveAfter) lastOapLive = oapRes.liveAfter;
                 if (oapRes && oapRes.ok) {
                     const respNote = oapRes.response ? (' resp=' + JSON.stringify(oapRes.response)) : '';
                     log('1CR OAP ' + shortName + ': ok' + respNote);
@@ -756,8 +806,8 @@ function createService(customCfg) {
                     if (oapRes.response && oapRes.response.accepted && /NOT_ACCEPTED/.test(String(oapRes.response.accepted))) {
                         continue;
                     }
-                } else if (cd.hasLiveProvider !== false) {
-                    const wkRes = await callWorker('invoke_one', cd, 2200);
+                } else {
+                    const wkRes = await callWorker('invoke_one', cd, cd.hasLiveProvider === false ? 1500 : 2400);
                     if (wkRes && wkRes.ok && wkRes.result && wkRes.result.ok) {
                         sentAny = true;
                         log('1CR Worker ' + shortName + ': ok');
@@ -773,14 +823,21 @@ function createService(customCfg) {
                     continue;
                 }
 
-                let vRep = await callWorker('verify_1cr', { waitMs: 800 }, 3500);
+                let vRep = await callWorker('verify_1cr', {
+                    waitMs: (oapRes && oapRes.liveAfter) ? 250 : 800,
+                    oapLive: (oapRes && oapRes.liveAfter) || null,
+                }, 3500);
                 lastVerifyRes = vRep && vRep.result;
                 if (lastVerifyRes && lastVerifyRes.verdict) verdict = lastVerifyRes.verdict;
 
                 if (!verdict.active && oapRes && oapRes.ok && cd.hasLiveProvider !== false) {
                     const wkTry = await callWorker('invoke_one', cd, 2000);
                     if (wkTry && wkTry.ok && wkTry.result && wkTry.result.ok) {
-                        vRep = await callWorker('verify_1cr', { waitMs: 650 }, 3200);
+                        const liveChk = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1600);
+                        vRep = await callWorker('verify_1cr', {
+                            waitMs: 550,
+                            oapLive: (liveChk && liveChk.liveAfter) || null,
+                        }, 3200);
                         lastVerifyRes = vRep && vRep.result;
                         if (lastVerifyRes && lastVerifyRes.verdict) verdict = lastVerifyRes.verdict;
                     }
@@ -789,7 +846,11 @@ function createService(customCfg) {
                 if (verdict.active) {
                     hitLabel = shortName;
                     if (verdict.mode === 'auto_precond' && !verdict.engineRemoteActive) {
-                        const crankCheck = await callWorker('verify_1cr', { waitMs: 1300 }, 3500);
+                        const crankLive = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1800);
+                        const crankCheck = await callWorker('verify_1cr', {
+                            waitMs: 1100,
+                            oapLive: (crankLive && crankLive.liveAfter) || null,
+                        }, 3500);
                         if (crankCheck && crankCheck.result && crankCheck.result.verdict) {
                             verdict = crankCheck.result.verdict;
                         }
@@ -799,8 +860,10 @@ function createService(customCfg) {
             }
 
             if (!wantOn) {
+                const postOffOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1600);
                 const offRep = await callWorker('verify_1cr', {
-                    waitMs: 700,
+                    waitMs: 450,
+                    oapLive: (postOffOap && postOffOap.liveAfter) || lastOapLive || null,
                     lastAction: 'Tắt làm mát 1CR',
                     lastResult: 'Đã tắt 1CR',
                 }, 3500);
@@ -1269,6 +1332,9 @@ module.exports = {
     defaultConfig,
     normalizeConfig,
     addresses,
+    findInstalledApp,
+    findAppProcessUid,
+    ensureAppRamDir,
     fwEnsure,
     fwClose,
     createService,

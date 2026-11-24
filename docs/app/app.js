@@ -923,13 +923,14 @@ function ensureSnapCrops() {
       const is2x2 = !!(
         (cm && cm.grid === '2x2') ||
         (nw === 960 && nh === 816) ||
+        (nw === 960 && nh === 600) ||
         (nw === 640 && nh === 416)
       );
       const crops = { all: latestSnap.dataUrl };
       let ratioPct = 88.235;
       if (is2x2 && nw >= 320 && nh >= 240) {
         const cw = (cm && cm.camW) ? Math.min(nw, cm.camW) : nw;
-        const ch = (cm && cm.camH) ? Math.min(nh, cm.camH) : (nh === 816 ? 720 : (nh === 416 ? 288 : Math.round(nw * 0.75)));
+        const ch = (cm && cm.camH) ? Math.min(nh, cm.camH) : (nh === 816 ? 720 : (nh === 600 ? 440 : (nh === 416 ? 288 : Math.round(nw * 0.75))));
         ratioPct = +((ch / nh) * 100).toFixed(3);
         const qw = cw >> 1;
         const qh = ch >> 1;
@@ -1612,7 +1613,7 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
       if (!f || !f.name) return;
       const fb = f.name.replace(/^(operation|control|request|set|status)/i, '');
       const cur = (stSample && typeof stSample === 'object') ? (stSample[f.name] !== undefined ? stSample[f.name] : stSample['status' + (fb ? fb[0].toUpperCase() + fb.slice(1) : '')]) : undefined;
-      if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
+      if (/parkHeat|heater|standheiz|zuheiz|extraHeat|blower|geblaese/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
       else if (/remoteStart|motorstart|res$/i.test(f.name)) out[f.name] = wantOn ? pickCardEnum(f.typeDef, true, cur, false) : pickCardEnum(f.typeDef, true, cur, true);
       else if (/autoMode|automatik/i.test(f.name)) out[f.name] = pickCardEnum(f.typeDef, wantOn, cur, false);
       else if (/parkAirCond|standklima/i.test(f.name) && hasAutoMode && wantOn) out[f.name] = pickCardEnum(f.typeDef, false, cur, true);
@@ -1628,7 +1629,7 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
     const hasAutoMode = keys.some((k) => /autoMode|automatik/i.test(k));
     keys.forEach((k) => {
       const ok = /^status[A-Z]/.test(k) ? ('operation' + k.slice(6)) : k;
-      if (/heater|standheiz|zuheiz|extraHeater|blower/i.test(k)) out[ok] = pickCardEnum(null, false, stSample[k], true);
+      if (/parkHeat|heater|standheiz|zuheiz|extraHeat|blower|geblaese/i.test(k)) out[ok] = pickCardEnum(null, false, stSample[k], true);
       else if (/remoteStart|motorstart|res$/i.test(k)) out[ok] = pickCardEnum(null, true, stSample[k], !wantOn);
       else if (/autoMode|automatik/i.test(k)) out[ok] = pickCardEnum(null, wantOn, stSample[k], false);
       else if (/parkAirCond|standklima/i.test(k) && hasAutoMode && wantOn) out[ok] = pickCardEnum(null, false, stSample[k], true);
@@ -1828,7 +1829,9 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.5.2').catch(() => {});
+      navigator.serviceWorker.register('./sw.js?v=0.5.3').then((reg) => {
+        try { reg.update(); } catch (e) {}
+      }).catch(() => {});
     }
   }
   const healConnection = () => {
