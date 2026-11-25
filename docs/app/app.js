@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.2).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.3).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -28,7 +28,8 @@ let vehicleData = loadLocal('mybmw_state') || null;
 let latestSnap = loadLocal('mybmw_snap') || null;   // { id, dataUrl, at, rxAt, title, camMeta }
 let factoryHero = loadLocal('mybmw_hero') || null;  // { dataUrl, at, title, paint }
 let activeCamView = 'all';
-let snapCropCache = { id: '', loading: false, has2x2: false, camRatioPct: 88.235, crops: {} };
+let snapCropCache = { id: '', loadingId: '', has2x2: false, camRatioPct: 88.235, crops: {} };
+let snapDecodeSeq = 0;
 const CAM_VIEW_LABELS = {
   all: '4 Camera 360°',
   front: 'Cam Trước',
@@ -94,7 +95,23 @@ function loadLocal(k) {
   try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; }
 }
 function saveLocal(k, v) {
-  try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {}
+  const txt = JSON.stringify(v);
+  try {
+    localStorage.setItem(k, txt);
+  } catch (e) {
+    if (k === 'mybmw_snap') {
+      try {
+        localStorage.removeItem('mybmw_snap');
+        localStorage.setItem(k, txt);
+      } catch (e2) {}
+    }
+  }
+}
+
+function isCam360Snap(dataOrB64, camMeta) {
+  if (camMeta && camMeta.grid === '2x2') return true;
+  const s = String(dataOrB64 || '');
+  return s.indexOf('/9j/') === 0 || s.indexOf('data:image/jpeg') === 0;
 }
 
 function showToast(msg, color, durationMs) {
@@ -729,26 +746,94 @@ async function connectCar(code) {
   openMqttSocket();
   renderAll();
 
-  // Fetch 12h ntfy sleep cache for any channel not yet populated by MQTT retained state within 2.5s
-  setTimeout(async () => {
-    if (identity !== id) return;
-    let touched = false;
-    if (!mqttReady || !vehicleData) {
-      await fetchCachedTopic(id.topics.state, onStatePacket);
-      touched = true;
-    }
-    if (!latestSnap) {
-      await fetchCachedTopic(id.topics.photo, onPhotoPacket);
-      touched = true;
-    }
-    if (!factoryHero && (!vehicleData || vehicleData.hasFactoryHero !== false)) {
-      await fetchCachedTopic(id.topics.hero, onHeroPacket);
-      touched = true;
-    }
-    if (!mqttReady) openFallbackNtfySockets();
-    if (touched) renderAll();
-  }, 2500);
+  // Cross-check 12h ntfy sleep cache & standby MQTT broker so iPhone/Web always recovers the newest real 360° camera photo!
+  setTimeout(() => {
+    if (identity === id) syncCloudMediaCaches(id);
+  }, 900);
   return true;
+}
+
+async function syncCloudMediaCaches(id) {
+  if (!id || identity !== id) return;
+  let touched = false;
+  if (!mqttReady || !vehicleData) {
+    await fetchCachedTopic(id.topics.state, onStatePacket, false);
+    touched = true;
+  }
+  const hasReal360 = !!(latestSnap && isCam360Snap(latestSnap.dataUrl, latestSnap.camMeta));
+  if (!hasReal360 || (Date.now() - (latestSnap.rxAt || latestSnap.at || 0) > 120000)) {
+    await fetchCachedTopic(id.topics.photo, onPhotoPacket, true);
+    touched = true;
+  }
+  if (!factoryHero && (!vehicleData || vehicleData.hasFactoryHero !== false)) {
+    await fetchCachedTopic(id.topics.hero, onHeroPacket, true);
+    touched = true;
+  }
+  if (!(latestSnap && isCam360Snap(latestSnap.dataUrl, latestSnap.camMeta))) {
+    await probeStandbyMqttRetained(id);
+    touched = true;
+  }
+  if (!mqttReady) openFallbackNtfySockets();
+  if (touched) renderAll();
+}
+
+function probeStandbyMqttRetained(id) {
+  return new Promise((resolve) => {
+    if (!id || identity !== id || MQTT_BROKERS.length < 2 || typeof WebSocket === 'undefined') return resolve(false);
+    const altIdx = (mqttBrokerIdx % MQTT_BROKERS.length) === 0 ? 1 : 0;
+    const altUrl = MQTT_BROKERS[altIdx];
+    let pws = null, done = false, prx = new Uint8Array(0);
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (pws) { try { pws.close(); } catch (e) {} pws = null; }
+      resolve(!!ok);
+    };
+    const timer = setTimeout(() => finish(false), 2800);
+    try {
+      pws = new WebSocket(altUrl, 'mqtt');
+      pws.binaryType = 'arraybuffer';
+    } catch (e) {
+      return finish(false);
+    }
+    pws.onopen = () => {
+      if (done) return;
+      const cid = 'blprb_' + Math.random().toString(36).slice(2, 9);
+      try { pws.send(mqttBuildConnect(cid)); } catch (e) { finish(false); }
+    };
+    pws.onmessage = async (ev) => {
+      if (done || !(ev.data instanceof ArrayBuffer)) return;
+      prx = prx.length ? concatBytes(prx, new Uint8Array(ev.data)) : new Uint8Array(ev.data);
+      const parsed = mqttParse(prx);
+      prx = parsed.rest;
+      for (let i = 0; i < parsed.frames.length; i++) {
+        const f = parsed.frames[i];
+        if (f.type === 'connack' && f.rc === 0) {
+          const mt = id.mqttTopics;
+          try { pws.send(mqttBuildSubscribeMulti(2, [mt.photo, mt.hero, mt.state])); } catch (e) {}
+        } else if (f.type === 'publish' && identity === id) {
+          const decObj = await decryptJson(f.payload);
+          if (!decObj) continue;
+          const mt = id.mqttTopics;
+          if (f.topic === mt.photo) {
+            onPhotoPacket(decObj, Date.now(), false);
+            if (latestSnap && isCam360Snap(latestSnap.dataUrl, latestSnap.camMeta)) {
+              renderAll();
+              finish(true);
+              return;
+            }
+          } else if (f.topic === mt.hero) {
+            onHeroPacket(decObj, Date.now(), false);
+          } else if (f.topic === mt.state && !vehicleData) {
+            onStatePacket(decObj, Date.now(), false);
+          }
+        }
+      }
+    };
+    pws.onerror = () => finish(false);
+    pws.onclose = () => finish(false);
+  });
 }
 
 function closeSockets() {
@@ -774,12 +859,38 @@ async function resolveEventWire(ev) {
   return '';
 }
 
-async function fetchCachedTopic(topic, handler) {
+async function fetchCachedTopic(topic, handler, newestFirstMedia) {
   try {
     const r = await fetch('https://' + RELAY_HOST + '/' + topic + '/json?poll=1&since=all');
     if (!r.ok) return;
     const txt = await r.text();
     const lines = txt.split('\n').filter(Boolean);
+    if (newestFirstMedia) {
+      let fallbackNewest = null;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let ev = null;
+        try { ev = JSON.parse(lines[i]); } catch (e) { continue; }
+        const wire = await resolveEventWire(ev);
+        if (!wire) continue;
+        const dec = await decryptJson(wire);
+        if (!dec) continue;
+        const tsMs = ev.time ? ev.time * 1000 : Date.now();
+        if (handler === onPhotoPacket) {
+          if (dec.b64 && isCam360Snap(dec.b64, dec.camMeta)) {
+            handler(dec, tsMs, false);
+            return;
+          }
+          if (!fallbackNewest) fallbackNewest = { dec, tsMs };
+        } else {
+          handler(dec, tsMs, false);
+          return;
+        }
+      }
+      if (fallbackNewest && !latestSnap) {
+        handler(fallbackNewest.dec, fallbackNewest.tsMs, false);
+      }
+      return;
+    }
     for (let i = 0; i < lines.length; i++) {
       let ev = null;
       try { ev = JSON.parse(lines[i]); } catch (e) { continue; }
@@ -874,10 +985,14 @@ function onStatePacket(pkt, ts, isLive) {
 
 function commitReceivedPhoto(fullB64, at, title, id, isLive, camMeta) {
   if (!fullB64) return;
+  const incomingIsCam = isCam360Snap(fullB64, camMeta);
+  const existingIsCam = !!(latestSnap && isCam360Snap(latestSnap.dataUrl, latestSnap.camMeta));
+  // Never allow a non-camera fallback PNG card to erase an existing real 4-camera 360° JPEG!
+  if (!incomingIsCam && existingIsCam) return;
   const mime = fullB64.indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
   const isNewId = !latestSnap || !id || latestSnap.id !== id;
   const dispAt = normalizeCarTime(at, Date.now(), isLive);
-  if (!latestSnap || dispAt >= (latestSnap.rxAt || latestSnap.at || 0) || isLive) {
+  if (!latestSnap || (incomingIsCam && !existingIsCam) || dispAt >= (latestSnap.rxAt || latestSnap.at || 0) || isLive) {
     latestSnap = {
       id: id || String(dispAt),
       dataUrl: 'data:' + mime + ';base64,' + fullB64,
@@ -886,7 +1001,7 @@ function commitReceivedPhoto(fullB64, at, title, id, isLive, camMeta) {
       title: title || '',
       camMeta: camMeta || null,
     };
-    snapCropCache = { id: '', loading: false, has2x2: false, camRatioPct: 88.235, crops: {} };
+    snapCropCache = { id: '', loadingId: '', has2x2: false, camRatioPct: 88.235, crops: {} };
     saveLocal('mybmw_snap', latestSnap);
     ensureSnapCrops();
     if (isLive && isNewId) {
@@ -928,23 +1043,26 @@ function onPhotoPacket(pkt, ts, isLive) {
 
 function ensureSnapCrops() {
   if (!latestSnap || !latestSnap.dataUrl) return;
-  const sid = latestSnap.id || latestSnap.dataUrl.slice(-32);
-  if (snapCropCache.id === sid || snapCropCache.loading) return;
-  snapCropCache.loading = true;
+  const targetSnap = latestSnap;
+  const sid = targetSnap.id || targetSnap.dataUrl.slice(-32);
+  if (snapCropCache.id === sid || snapCropCache.loadingId === sid) return;
+  const mySeq = ++snapDecodeSeq;
+  snapCropCache.loadingId = sid;
   const im = new Image();
   im.onload = () => {
     const build = () => {
-      snapCropCache.loading = false;
+      if (mySeq !== snapDecodeSeq) return;
+      snapCropCache.loadingId = '';
       const nw = im.naturalWidth || 0;
       const nh = im.naturalHeight || 0;
-      const cm = latestSnap.camMeta;
+      const cm = targetSnap.camMeta;
       const is2x2 = !!(
         (cm && cm.grid === '2x2') ||
         (nw === 960 && nh === 816) ||
         (nw === 960 && nh === 600) ||
         (nw === 640 && nh === 416)
       );
-      const crops = { all: latestSnap.dataUrl };
+      const crops = { all: targetSnap.dataUrl };
       let ratioPct = 88.235;
       if (is2x2 && nw >= 320 && nh >= 240) {
         const cw = (cm && cm.camW) ? Math.min(nw, cm.camW) : nw;
@@ -971,15 +1089,15 @@ function ensureSnapCrops() {
           }
         } catch (e) {}
       }
-      snapCropCache = { id: sid, loading: false, has2x2: is2x2 && !!crops.front, camRatioPct: ratioPct, crops };
+      snapCropCache = { id: sid, loadingId: '', has2x2: is2x2 && !!crops.front, camRatioPct: ratioPct, crops };
       if (!snapCropCache.has2x2) activeCamView = 'all';
       updateSnapDisplay();
     };
     if (typeof im.decode === 'function') im.decode().then(build, build);
     else build();
   };
-  im.onerror = () => { snapCropCache.loading = false; };
-  im.src = latestSnap.dataUrl;
+  im.onerror = () => { if (mySeq === snapDecodeSeq) snapCropCache.loadingId = ''; };
+  im.src = targetSnap.dataUrl;
 }
 
 function selectCamView(view) {
@@ -2468,7 +2586,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.2').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.3').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }
@@ -2478,6 +2596,9 @@ window.injectPairCodeFromNative = async function (raw) {
     if (!mqttWs || mqttWs.readyState > 1 || (Date.now() - lastMqttRxAt > 25000)) {
       if (mqttWs) { try { mqttWs.close(); } catch (e) {} mqttWs = null; mqttReady = false; }
       openMqttSocket();
+    }
+    if (!(latestSnap && isCam360Snap(latestSnap.dataUrl, latestSnap.camMeta))) {
+      syncCloudMediaCaches(identity);
     }
   };
   document.addEventListener('visibilitychange', () => {

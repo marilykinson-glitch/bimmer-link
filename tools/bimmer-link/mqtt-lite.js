@@ -131,12 +131,70 @@ function runChildBridge(leaseFile, routeFile, subFilter) {
     let lastRxAt = 0;
     const pendingByTopic = {};
     const pendingOrder = [];
+    const retainedByTopic = {};
 
     const emit = (obj) => {
         try { process.stdout.write(JSON.stringify(obj) + '\n'); } catch (e) {}
     };
 
+    function replicateRetainedToStandby(topic, payload) {
+        if (!topic || !payload || DEFAULT_BROKERS.length < 2) return;
+        const altIdx = (brokerIdx % DEFAULT_BROKERS.length) === 0 ? 1 : 0;
+        const alt = DEFAULT_BROKERS[altIdx];
+        let done = false;
+        let rs = null;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(hardTimer);
+            if (rs) { try { rs.destroy(); } catch (e) {} rs = null; }
+        };
+        const hardTimer = setTimeout(finish, 8500);
+        try {
+            const lookup = Up.customLookup(leaseFile, routeFile);
+            rs = tls.connect({
+                host: alt.host,
+                port: alt.port,
+                servername: alt.host,
+                lookup,
+                rejectUnauthorized: false,
+            });
+            let rbuf = Buffer.alloc(0);
+            rs.on('secureConnect', () => {
+                if (done) return;
+                const cid = 'blrep_' + crypto.randomBytes(5).toString('hex');
+                try { rs.write(encodeConnect(cid, 30)); } catch (e) { finish(); }
+            });
+            rs.on('data', (chunk) => {
+                if (done) return;
+                rbuf = rbuf.length ? Buffer.concat([rbuf, chunk]) : chunk;
+                const parsed = parseFrames(rbuf);
+                rbuf = parsed.rest;
+                for (let i = 0; i < parsed.frames.length; i++) {
+                    if (parsed.frames[i].type === 'connack' && parsed.frames[i].rc === 0) {
+                        try {
+                            rs.write(encodePublish(topic, payload, true), () => {
+                                setTimeout(finish, 450);
+                            });
+                        } catch (e) { finish(); }
+                        return;
+                    }
+                }
+            });
+            rs.on('error', finish);
+            rs.on('close', finish);
+        } catch (e) {
+            finish();
+        }
+    }
+
     function queueOrSend(topic, payload, retain) {
+        if (retain && payload) {
+            retainedByTopic[topic] = String(payload);
+            if (/\/(ph|hr)$/.test(topic)) {
+                replicateRetainedToStandby(topic, String(payload));
+            }
+        }
         if (ready && sock && !sock.destroyed) {
             try {
                 sock.write(encodePublish(topic, payload, retain));
@@ -155,6 +213,12 @@ function runChildBridge(leaseFile, routeFile, subFilter) {
 
     function flushPending() {
         if (!ready || !sock || sock.destroyed) return;
+        const rKeys = Object.keys(retainedByTopic);
+        for (let i = 0; i < rKeys.length; i++) {
+            const rk = rKeys[i];
+            if (pendingByTopic[rk] !== undefined) continue;
+            try { sock.write(encodePublish(rk, retainedByTopic[rk], true)); } catch (e) {}
+        }
         while (pendingOrder.length) {
             const t = pendingOrder.shift();
             const item = pendingByTopic[t];
@@ -335,6 +399,7 @@ class MqttBridge {
         this.broker = '';
         this.stopped = false;
         this.outQueue = [];
+        this.retainedByTopic = {};
     }
 
     start() {
@@ -397,6 +462,14 @@ class MqttBridge {
 
     _flush() {
         if (!this.child || !this.child.stdin) return;
+        const queuedTopics = {};
+        for (let i = 0; i < this.outQueue.length; i++) queuedTopics[this.outQueue[i].topic] = true;
+        const rKeys = Object.keys(this.retainedByTopic);
+        for (let i = 0; i < rKeys.length; i++) {
+            const rk = rKeys[i];
+            if (queuedTopics[rk]) continue;
+            try { this.child.stdin.write(JSON.stringify({ op: 'pub', topic: rk, payload: this.retainedByTopic[rk], retain: true }) + '\n'); } catch (e) { return; }
+        }
         while (this.outQueue.length) {
             const msg = this.outQueue.shift();
             try { this.child.stdin.write(JSON.stringify(msg) + '\n'); } catch (e) { break; }
@@ -406,7 +479,9 @@ class MqttBridge {
     publish(topic, payload, retain) {
         if (!this.enabled || this.stopped) return false;
         if (!this.child) this.start();
-        const msg = { op: 'pub', topic, payload: String(payload || ''), retain: !!retain };
+        const sPayload = String(payload || '');
+        if (retain && sPayload) this.retainedByTopic[topic] = sPayload;
+        const msg = { op: 'pub', topic, payload: sPayload, retain: !!retain };
         if (this.child && this.child.stdin) {
             try {
                 this.child.stdin.write(JSON.stringify(msg) + '\n');

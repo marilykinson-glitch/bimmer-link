@@ -2,7 +2,7 @@
   "id": "bimmer_link",
   "title": "MyBMW & 1CR",
   "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp 4 camera 360° / thẻ trạng thái kèm vị trí hầm gửi về App MyBMW & Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA.",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "startType": "autostart",
   "autoClimateSignals": true,
   "autoVehicleSignals": true,

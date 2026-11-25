@@ -1091,7 +1091,9 @@ class TelemetryTracker {
         s.engineRunning = (typeof s.rpm === 'number' && s.rpm >= 400) || s.condition === 10;
         s.updatedAt = now;
 
-        const movingOrRunning = s.engineRunning || (typeof s.speed === 'number' && s.speed > 2);
+        // Stationary 1CR Remote Engine Start (`climate1cr.active`, speed < 2, stage === 'P', condition !== 10) must NOT create a fake 0 km trip or fire `parked` when 1CR finishes!
+        const isStationary1cr = !!(s.climate1cr && s.climate1cr.active) && (s.speed || 0) < 2 && (!s.stage || s.stage === 'P') && s.condition !== 10;
+        const movingOrRunning = (!isStationary1cr && s.engineRunning) || (typeof s.speed === 'number' && s.speed > 2);
         if (movingOrRunning) {
             if (!this.activeTrip) {
                 this.activeTrip = {
@@ -1120,11 +1122,13 @@ class TelemetryTracker {
                     this.activeTrip.lastPos = Object.assign({}, s.pos);
                 }
             }
-            if ((s.speed || 0) > 5 || s.engineRunning) this._wasDriving = true;
+            if ((s.speed || 0) > 3 || (s.stage && s.stage !== 'P') || s.condition === 10) this._wasDriving = true;
         }
 
-        const shuttingDown = (prevCond === 10 && s.condition != null && s.condition !== 10 && s.condition !== 8) ||
-            (prevEngine && !s.engineRunning && (s.speed || 0) < 1 && s.stage === 'P');
+        const shuttingDown = !isStationary1cr && !(s.climate1cr && s.climate1cr.active && (s.speed || 0) < 2) && (
+            (prevCond === 10 && s.condition != null && s.condition !== 10 && s.condition !== 8) ||
+            (prevEngine && !s.engineRunning && (s.speed || 0) < 1 && s.stage === 'P')
+        );
 
         if (shuttingDown && this._wasDriving) {
             this._wasDriving = false;

@@ -148,6 +148,9 @@ class CloudBridge {
         this.relayHost = opts.relayHost || DEFAULT_RELAY_HOST;
         this.appBase = opts.appBase || DEFAULT_APP_BASE;
         this.seenFile = opts.seenFile || '';
+        this.cacheDir = opts.cacheDir || (this.seenFile ? path.dirname(this.seenFile) : '');
+        this.snapCacheFile = this.cacheDir ? path.join(this.cacheDir, 'last-cam360.wire') : '';
+        this.heroCacheFile = this.cacheDir ? path.join(this.cacheDir, 'last-hero.wire') : '';
         this.onCommand = opts.onCommand;
         this.log = opts.log || (() => {});
         this.enabled = opts.enabled !== false;
@@ -166,11 +169,16 @@ class CloudBridge {
         this.polling = false;
         this.uploadingHero = false;
         this.heroUploadSeq = 0;
+        this.snapNtfySynced = false;
+        this.snapRetryCount = 0;
+        this.snapRetryTimer = null;
         this.stopped = false;
 
         this.latestStateWire = '';
-        this.latestSnapWire = '';
-        this.latestHeroWire = '';
+        this.latestCam360Wire = this._readWireFile(this.snapCacheFile);
+        this.latestSnapWire = this.latestCam360Wire;
+        this.latestHeroWire = this._readWireFile(this.heroCacheFile);
+        if (this.latestCam360Wire) this.snapNtfySynced = true;
         this.lastDiagObj = null;
 
         this.mqtt = new Mqtt.MqttBridge({
@@ -188,7 +196,69 @@ class CloudBridge {
         });
         if (this.enabled) {
             this.mqtt.start();
+            if (this.latestCam360Wire) {
+                this.mqtt.publish(this.identity.mqttTopics.photo, this.latestCam360Wire, true);
+            }
+            if (this.latestHeroWire) {
+                this.mqtt.publish(this.identity.mqttTopics.hero, this.latestHeroWire, true);
+            }
         }
+    }
+
+    _readWireFile(f) {
+        if (!f) return '';
+        try {
+            const s = String(fs.readFileSync(f, 'utf8') || '').trim();
+            if (s.indexOf('BL2:') !== 0) return '';
+            const dec = decryptJson(this.identity.aesKey, s);
+            return (dec && dec.b64) ? s : '';
+        } catch (e) { return ''; }
+    }
+
+    _writeWireFile(f, wire) {
+        if (!f || !wire) return;
+        try {
+            const dir = path.dirname(f);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+            fs.writeFileSync(f + '.tmp', wire, { mode: 0o600 });
+            fs.renameSync(f + '.tmp', f);
+        } catch (e) {}
+    }
+
+    hasCachedPhoto() {
+        return !!this.latestCam360Wire;
+    }
+
+    async republishCachedPhoto() {
+        if (!this.enabled || this.stopped || !this.latestCam360Wire) return false;
+        const mqttSent = this.mqtt.publish(this.identity.mqttTopics.photo, this.latestCam360Wire, true);
+        if (mqttSent) this.lastOkAt = Date.now();
+        if (!this.snapNtfySynced) {
+            const ntfyRes = await this._sendNtfy(this.identity.topics.photo, this.latestCam360Wire, 'snap.txt', 20000);
+            if (ntfyRes) this.snapNtfySynced = true;
+            else this._scheduleSnapNtfyRetry();
+            return !!(mqttSent || ntfyRes);
+        }
+        return !!mqttSent;
+    }
+
+    _scheduleSnapNtfyRetry() {
+        if (this.stopped || this.snapNtfySynced || !this.latestSnapWire || this.snapRetryCount >= 4) return;
+        if (this.snapRetryTimer) clearTimeout(this.snapRetryTimer);
+        const waitMs = Math.max(6500, (this.ntfyCooldownUntil > Date.now() ? (this.ntfyCooldownUntil - Date.now() + 1500) : 6500));
+        this.snapRetryTimer = setTimeout(async () => {
+            this.snapRetryTimer = null;
+            if (this.stopped || this.snapNtfySynced || !this.latestSnapWire) return;
+            this.snapRetryCount++;
+            const res = await this._sendNtfy(this.identity.topics.photo, this.latestSnapWire, 'snap.txt', 20000);
+            if (res) {
+                this.snapNtfySynced = true;
+                this.snapRetryCount = 0;
+                this.log('ntfy 360 snapshot retry uploaded ok');
+            } else {
+                this._scheduleSnapNtfyRetry();
+            }
+        }, waitMs);
     }
 
     isOnline() {
@@ -330,6 +400,12 @@ class CloudBridge {
     /** Publish encrypted JPEG/PNG snapshot in 1 retained MQTT packet + 1 single `PUT` attachment on `ntfy.sh` (ZERO chunk flood!). */
     async publishSnapshot(pngBuf, meta) {
         if (!this.enabled || this.stopped || !Buffer.isBuffer(pngBuf)) return false;
+        const isCam360 = !!(meta && (meta.hasCamera || (meta.camMeta && meta.camMeta.grid === '2x2'))) ||
+            (pngBuf.length >= 2 && pngBuf[0] === 0xff && pngBuf[1] === 0xd8);
+        // Never allow a non-camera fallback text card (`hasCamera: false`) to erase an existing genuine 360° camera photo on Cloud!
+        if (!isCam360 && this.latestCam360Wire) {
+            return this.republishCachedPhoto();
+        }
         const now = (meta && meta.at) || Date.now();
         const fullPacket = encryptJson(this.identity.aesKey, {
             t: 'photo_full',
@@ -337,15 +413,27 @@ class CloudBridge {
             at: now,
             title: (meta && meta.title) || '',
             alert: !!(meta && meta.alert),
+            hasCamera: isCam360,
             camMeta: (meta && meta.camMeta) || null,
             b64: pngBuf.toString('base64'),
         });
         this.latestSnapWire = fullPacket;
+        if (isCam360) {
+            this.latestCam360Wire = fullPacket;
+            this._writeWireFile(this.snapCacheFile, fullPacket);
+        }
 
         const mqttSent = this.mqtt.publish(this.identity.mqttTopics.photo, fullPacket, true);
         if (mqttSent) this.lastOkAt = Date.now();
 
+        this.snapNtfySynced = false;
+        this.snapRetryCount = 0;
         const ntfyRes = await this._sendNtfy(this.identity.topics.photo, fullPacket, 'snap.txt', 20000);
+        if (ntfyRes) {
+            this.snapNtfySynced = true;
+        } else {
+            this._scheduleSnapNtfyRetry();
+        }
         return !!(mqttSent || ntfyRes);
     }
 
@@ -370,6 +458,7 @@ class CloudBridge {
                 b64: pngBuf.toString('base64'),
             });
             this.latestHeroWire = fullPacket;
+            this._writeWireFile(this.heroCacheFile, fullPacket);
 
             const mqttSent = this.mqtt.publish(this.identity.mqttTopics.hero, fullPacket, true);
             if (mqttSent) this.lastOkAt = Date.now();
@@ -456,6 +545,7 @@ class CloudBridge {
 
     stop() {
         this.stopped = true;
+        if (this.snapRetryTimer) { clearTimeout(this.snapRetryTimer); this.snapRetryTimer = null; }
         if (this.mqtt) this.mqtt.stop();
     }
 }

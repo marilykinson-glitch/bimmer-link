@@ -931,6 +931,15 @@ def check_car_link_logic_in_jxa():
     if (dwa302.state.dwaAlarmActive !== true || dwa302.state.dwaAlarmReason !== 'Mở nắp capo') {{
       throw new Error('Option 302 active hood alarm translation mismatch: ' + JSON.stringify(dwa302.state));
     }}
+
+    // Test 8 (v0.6.3): Stationary 1CR Remote Start must NEVER fire a fake 0 km `parked` event when 1CR shuts off!
+    var res1crTrk = new C.TelemetryTracker();
+    res1crTrk.state.climate1cr.active = true;
+    var evStart1cr = res1crTrk.update({{ condition: 3, rpm: 920, speed: 0, stage: 'P' }}, 4000000);
+    var evStop1cr = res1crTrk.update({{ condition: 2, rpm: 0, speed: 0, stage: 'P', climate1cr: {{ active: false, mode: 'off' }} }}, 4060000);
+    if (evStart1cr.length !== 0 || evStop1cr.length !== 0 || res1crTrk.activeTrip !== null) {{
+      throw new Error('Stationary 1CR falsely triggered parked/trip: ' + JSON.stringify([evStart1cr, evStop1cr, res1crTrk.activeTrip]));
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)

@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.6.2';
+const VERSION = '0.6.3';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -444,6 +444,7 @@ function createService(customCfg) {
         upOpts,
         relayHost: C.relayHost || undefined,
         seenFile: path.join(C.state, 'seen-cmds.json'),
+        cacheDir: C.state,
         enabled: !C.noCloud,
         log,
         onCommand: async (cmdObj) => {
@@ -702,12 +703,13 @@ function createService(customCfg) {
     async function tryGrab360(timeoutMs) {
         if (C.noWorker) return null;
         const dur = timeoutMs || 6200;
-        const rawPath = path.join(C.run, 'cam4.rgba');
-        try { fs.unlinkSync(rawPath); } catch (e) {}
+        const grabPath = path.join(C.run, 'cam4.grab.rgba');
+        const keepPath = path.join(C.run, 'cam4.rgba');
+        try { fs.unlinkSync(grabPath); } catch (e) {}
         try {
-            return await Cam360.capture360Frame({
+            const grabbed = await Cam360.capture360Frame({
                 runDir: C.run,
-                rawOutFile: rawPath,
+                rawOutFile: grabPath,
                 timeoutMs: dur,
                 wakeCam: async () => {
                     const r1 = await callOapBridge('ICAM2', 'cam_attach', 'cam', {}, undefined, 3200);
@@ -720,6 +722,10 @@ function createService(customCfg) {
                 },
                 log,
             });
+            if (grabbed && grabbed.ok && grabbed.rgba) {
+                try { fs.renameSync(grabPath, keepPath); } catch (e) {}
+            }
+            return grabbed;
         } catch (e) {
             return null;
         }
@@ -746,9 +752,9 @@ function createService(customCfg) {
         if (config.parkSnapshot) {
             const camGrab = await tryGrab360(4800);
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: parkedTs, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: parkedTs, tzOffsetMin: config.tzOffsetMin }, { camFrame });
             syncCloudState(true, { event: 'parked' });
-            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', camMeta: snap.camMeta || null, at: parkedTs }).then((ok) => {
+            cloud.publishSnapshot(snap.png, { hasCamera: snap.hasCamera, title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', camMeta: snap.camMeta || null, at: parkedTs }).then((ok) => {
                 log('park snapshot: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + ok);
             }).catch(() => {});
             if (config.botToken && config.chatId) {
@@ -776,9 +782,9 @@ function createService(customCfg) {
         tell('🚨 CẢNH BÁO DWA: ' + alertReason, 'crit');
         const camGrab = await tryGrab360(4500);
         const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
-        const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'BAO DONG CHONG TROM DWA!', modelTitle: heroData.meta.modelTitle, alert: true, valet: config.valet, at: now, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+        const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'BAO DONG CHONG TROM DWA!', modelTitle: heroData.meta.modelTitle, alert: true, valet: config.valet, at: now, tzOffsetMin: config.tzOffsetMin }, { camFrame });
         syncCloudState(true, { alert: { kind: 'dwa_alarm', reason: alertReason, at: now } });
-        cloud.publishSnapshot(snap.png, { title: '🚨 ' + alertReason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
+        cloud.publishSnapshot(snap.png, { hasCamera: snap.hasCamera, title: '🚨 ' + alertReason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
         if (config.botToken && config.chatId) {
             const cap = Tg.formatStatusCaption('🚨 ' + alertReason, S.telemetry, { valet: config.valet });
             tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled).catch((e) => log('dwa alert err: ' + e.message));
@@ -795,9 +801,9 @@ function createService(customCfg) {
             if (S.valetAlerts[kind] && now - S.valetAlerts[kind] < 90000) return;
             S.valetAlerts[kind] = now;
             tell('CẢNH BÁO VALET: ' + reason, 'crit');
-            const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now, tzOffsetMin: config.tzOffsetMin }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now, tzOffsetMin: config.tzOffsetMin }, {});
             syncCloudState(true, { alert: { kind, reason, at: now } });
-            cloud.publishSnapshot(snap.png, { title: 'Cảnh báo Valet: ' + reason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
+            cloud.publishSnapshot(snap.png, { hasCamera: snap.hasCamera, title: 'Cảnh báo Valet: ' + reason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('🚨 CẢNH BÁO VALET: ' + reason, t, { valet: v });
                 tg.sendSnapshotPhoto(snap.png, cap, t, true).catch((e) => log('valet alert err: ' + e.message));
@@ -851,18 +857,21 @@ function createService(customCfg) {
             const camGrab = pairRes[1];
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
             const snapTs = realNow();
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: snapTs, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: snapTs, tzOffsetMin: config.tzOffsetMin }, { camFrame });
             syncCloudState(true);
+            const preserved360 = !snap.hasCamera && cloud.hasCachedPhoto();
             const snapLabel = snap.hasCamera ? '4 camera 360° quanh xe' : 'thẻ trạng thái đỗ xe';
-            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', camMeta: snap.camMeta || null, at: snapTs }).catch(() => false);
-            log('snap_now: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + cloudSent);
+            const cloudSent = await cloud.publishSnapshot(snap.png, { hasCamera: snap.hasCamera, title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', camMeta: snap.camMeta || null, at: snapTs }).catch(() => false);
+            log('snap_now: hasCamera=' + snap.hasCamera + ', preserved360=' + preserved360 + ', bytes=' + snap.png.length + ', sent=' + cloudSent);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
                 await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled);
-                tell('Đã chụp ' + snapLabel + ' & gửi lên App MyBMW + Telegram!', 'go');
-                return { ok: true, hasCamera: snap.hasCamera, message: S.message };
             }
-            tell(cloudSent ? ('Đã chụp ' + snapLabel + ' & gửi về App MyBMW!') : ('Đã chụp ' + snapLabel + '.'), 'go');
+            if (preserved360) {
+                tell('Camera 360° (ICAM2) đang nghỉ khi chưa bật khoá điện — giữ nguyên ảnh 360° gần nhất & đã đồng bộ lại lên Cloud cho mọi máy!', 'go');
+                return { ok: true, hasCamera: false, preserved360: true, message: S.message };
+            }
+            tell(cloudSent ? ('Đã chụp ' + snapLabel + ' & đồng bộ lên Cloud (iPhone / Android)!') : ('Đã chụp ' + snapLabel + '.'), 'go');
             return { ok: true, hasCamera: snap.hasCamera, message: S.message };
         }
 
