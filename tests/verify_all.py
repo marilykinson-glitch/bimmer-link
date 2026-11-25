@@ -134,8 +134,9 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
             assert man_j['proxies'].get('de.bmw.infotainment.climate.Climate2') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.climate.climatemaster.ClimateMaster') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.lsc.LSCDataSink') == '*'
-            assert 'statusRangeTankStatus' in man_j['proxies'].get('de.bmw.infotainment.KombiIF', {}).get('attributes', {})
-            assert 'currentLocation' in man_j['proxies'].get('de.bmw.infotainment.navigation.positioning.Positioning', {}).get('attributes', {})
+            assert man_j['proxies'].get('de.bmw.infotainment.KombiIF') == '*'
+            assert man_j['proxies'].get('de.bmw.infotainment.navigation.positioning.Positioning') == '*'
+            assert man_j['proxies'].get('com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu') == '*'
 
         cloud_src = open(os.path.join(ROOT, 'tools/bimmer-link/cloud.js'), encoding='utf-8').read()
         m_chunk = re.search(r'const CHUNK_BYTES\s*=\s*(\d+);', cloud_src)
@@ -1321,11 +1322,24 @@ def check_pwa_and_manifest_filtering():
 
     with tempfile.TemporaryDirectory(prefix='bl-cat-') as td:
         cat = os.path.join(td, 'someip-interfaces.json')
-        json.dump({'interfaces': {
-            'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy': {'instances': {'1': {}}},
-            'de.bmw.infotainment.climate.Climate2': {'instances': {'1': {}}},
-            'de.bmw.infotainment.climate.CustomStandklima': {'instances': {'1': {}}},
-        }}, open(cat, 'w', encoding='utf-8'))
+        json.dump({
+            'interfaces': {
+                'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy': {'serviceId': 1},
+                'de.bmw.infotainment.climate.Climate2': {'serviceId': 2},
+                'de.bmw.infotainment.climate.CustomStandklima': {'serviceId': 3},
+                'de.bmw.infotainment.navigation.positioning.Positioning': {'serviceId': 4},
+                'de.bmw.body.customdoor.DoorStatus': {'serviceId': 5},
+                'de.bmw.body.ghost.NoInstanceIface': {'serviceId': 6},
+            },
+            'instanceIDs': {
+                'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy': {'1': 1},
+                'de.bmw.infotainment.climate.Climate2': {'1': 1},
+                'de.bmw.infotainment.climate.CustomStandklima': {'1': 1},
+                'de.bmw.infotainment.navigation.positioning.Positioning': {'Main_Instance': 128},
+                'de.bmw.body.customdoor.DoorStatus': {'Body_Inst': 1},
+                'de.bmw.body.ghost.NoInstanceIface': {},
+            },
+        }, open(cat, 'w', encoding='utf-8'))
         env = dict(os.environ, OAP_SOMEIP_CATALOG=cat)
         spec_path = os.path.join(ROOT, 'apps/bimmer_link/app.json')
         out = subprocess.run([
@@ -1334,9 +1348,12 @@ def check_pwa_and_manifest_filtering():
             f"import build; m = build.manifest_for(json.load(open({json.dumps(spec_path)}))); print(json.dumps(m['proxies']))"
         ], env=env, capture_output=True, text=True, check=True).stdout
         proxies = json.loads(out)
-        assert 'de.bmw.infotainment.video.cameraproxy.ICAM2Proxy' in proxies
-        assert 'de.bmw.infotainment.climate.Climate2' in proxies
-        assert 'de.bmw.infotainment.climate.CustomStandklima' in proxies
+        assert proxies.get('de.bmw.infotainment.video.cameraproxy.ICAM2Proxy') == '*'
+        assert proxies.get('de.bmw.infotainment.climate.Climate2') == '*'
+        assert proxies.get('de.bmw.infotainment.climate.CustomStandklima') == '*'
+        assert proxies.get('de.bmw.infotainment.navigation.positioning.Positioning') == '*', 'Positioning must use wildcard * (Main_Instance, NEVER hardcoded "1"!)'
+        assert proxies.get('de.bmw.body.customdoor.DoorStatus') == '*', 'autoVehicleSignals must read top-level instanceIDs!'
+        assert 'de.bmw.body.ghost.NoInstanceIface' not in proxies, 'Interfaces with empty instanceIDs must be skipped!'
         assert 'de.bmw.infotainment.climate.climatemaster.ClimateMaster' not in proxies
 
         # Verify VietMap-slot `/proc/<pid>/cwd`-only UID discovery in bimmer-link.js!

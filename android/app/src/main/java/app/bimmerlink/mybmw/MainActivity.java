@@ -30,7 +30,7 @@ import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final String VIRTUAL_ORIGIN = "https://app.mybmw.local";
-    private static final int APK_VERSION_CODE = 17;
+    private static final int APK_VERSION_CODE = 18;
     private static final int REQ_QR_SCAN = 201;
     private WebView webView;
 

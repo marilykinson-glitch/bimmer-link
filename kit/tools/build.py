@@ -302,27 +302,49 @@ def build_ui(spec, language='en'):
 SOMEIP_CATALOG = os.environ.get('OAP_SOMEIP_CATALOG', '/etc/oap/someip/someip-interfaces.json')
 
 
-def load_unit_interfaces():
+def load_unit_catalog():
     if not os.path.isfile(SOMEIP_CATALOG):
-        return None
+        return None, None
     try:
         db = json.load(open(SOMEIP_CATALOG, encoding='utf-8'))
         if isinstance(db, dict) and isinstance(db.get('interfaces'), dict):
-            return db['interfaces']
+            insts = db.get('instanceIDs') if isinstance(db.get('instanceIDs'), dict) else None
+            return db['interfaces'], insts
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def load_unit_interfaces():
+    ifaces, _ = load_unit_catalog()
+    return ifaces
+
+
+def _iface_has_instances(name, meta, unit_insts):
+    if isinstance(meta, dict) and meta.get('instances'):
+        return True
+    if unit_insts is not None:
+        return bool(unit_insts.get(name))
+    return False
 
 
 def manifest_for(spec):
     proxies = dict(PLATFORM_PROXIES)
-    unit_ifaces = load_unit_interfaces()
+    unit_ifaces, unit_insts = load_unit_catalog()
     for iface, fields in spec.get('signals', {}).items():
         is_opt = isinstance(fields, dict) and bool(fields.get('_optional'))
-        if unit_ifaces is not None and iface not in unit_ifaces:
-            if is_opt:
+        if unit_ifaces is not None:
+            if iface not in unit_ifaces:
+                if is_opt:
+                    continue
+            elif is_opt and unit_insts is not None and not _iface_has_instances(iface, unit_ifaces.get(iface), unit_insts):
                 continue
+        has_custom_inst = isinstance(fields, dict) and ('_instances' in fields)
         inst = fields.pop('_instances', '1') if isinstance(fields, dict) else '1'
+        if not has_custom_inst and unit_insts is not None and isinstance(unit_insts.get(iface), dict):
+            avail = list(unit_insts[iface].keys())
+            if avail and '1' not in avail:
+                inst = '*'
         entry = {'instances': inst}
         if isinstance(fields, dict):
             if fields.get('_all'):
@@ -342,7 +364,7 @@ def manifest_for(spec):
         for name, meta in sorted(unit_ifaces.items()):
             if name in proxies or '.oap.' in name:
                 continue
-            if pat.search(name) and isinstance(meta, dict) and meta.get('instances'):
+            if pat.search(name) and _iface_has_instances(name, meta, unit_insts):
                 proxies[name] = '*'
     if spec.get('autoVehicleSignals') and unit_ifaces is not None:
         vpat = re.compile(r'(door|tuer|flap|klappe|bonnet|hood|tailgate|trunk|centrallock|doorlock|verriegel|checkcontrol|kombiinterface|kombiif|tpms|lscdatasource|exteriorlight|horn|remotecontrol|rcn|\.body\.)', re.I)
@@ -351,7 +373,7 @@ def manifest_for(spec):
         for name, meta in sorted(unit_ifaces.items()):
             if name in proxies or skip.search(name):
                 continue
-            if vpat.search(name) and isinstance(meta, dict) and meta.get('instances'):
+            if vpat.search(name) and _iface_has_instances(name, meta, unit_insts):
                 proxies[name] = '*'
                 added += 1
                 if added >= 32:

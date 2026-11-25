@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.5).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.6).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -2734,7 +2734,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.5').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.6').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

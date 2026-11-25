@@ -1615,8 +1615,8 @@ async function runWorker() {
             const mergedKeys = Object.keys(merged);
             if (!mergedKeys.length) continue;
             try {
-                let opened = await openDynamicProxies(name, merged, [], [], 3);
-                if (!opened.list.length) opened = await openWildcardProxies(name, 3);
+                let opened = await openWildcardProxies(name, 3);
+                if (!opened.list.length) opened = await openDynamicProxies(name, merged, [], [], 3);
                 if (!opened.list.length) continue;
                 const cfgFields = (opened.cfg && opened.cfg.fields) || {};
                 opened.list.forEach((instItem, instIdx) => {

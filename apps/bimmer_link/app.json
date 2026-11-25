@@ -2,7 +2,7 @@
   "id": "bimmer_link",
   "title": "MyBMW & 1CR",
   "description": "MyBMW không cần ConnectedDrive dành cho BMW iDrive 7 (MGU): tự động chụp 4 camera 360° / thẻ trạng thái kèm vị trí hầm gửi về App MyBMW & Telegram mỗi khi tắt máy đỗ xe, bật chế độ Valet giám sát giao xe 1 chạm, điều khiển đề nổ làm mát từ xa Option 1CR và nạp giờ khởi hành vào hộp BDC/IHKA.",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "startType": "autostart",
   "autoClimateSignals": true,
   "autoVehicleSignals": true,
@@ -18,69 +18,18 @@
     "de.bmw.infotainment.lsc.LSCDataSink": { "_all": true, "_optional": "1CR LSC status" },
     "de.bmw.infotainment.lsc.LSCDataSource": { "_all": true, "_optional": "1CR LSC control" },
     "de.bmw.infotainment.lsc.LSC": { "_all": true, "_optional": "1CR LSC service" },
-    "de.bmw.infotainment.checkcontrol.CheckControlMaster": {
-      "_optional": "Active Check Control messages",
-      "basicList": "rs"
-    },
-    "de.bmw.infotainment.KombiInterface_2": {
-      "_optional": "Check Control names & KOMBI CBS list",
-      "ccList": "rs",
-      "newCCMessage": "rs",
-      "cbsDataServiceList": "rs",
-      "cbsDataSBA": "rs"
-    },
-    "de.bmw.infotainment.KombiIF": {
-      "_optional": "KOMBI range, tank, odo & vehicle clock",
-      "statusShowTimeDate": "rs",
-      "statusTimeDate": "rs",
-      "statusRangeTankStatus": "rs"
-    },
-    "de.bmw.infotainment.vehicle.TPMS": {
-      "_optional": "4-wheel TPMS pressure & temperature",
-      "statusTyrePressure": "rs",
-      "statusTargetTyrePressure": "rs",
-      "statusTyreTemperature": "rs"
-    },
-    "de.bmw.infrastructure.EnvironmentalInformation": {
-      "_optional": "Exterior temp & units",
-      "ExteriorTemperature": "s",
-      "UnitBN2020": "rs"
-    },
-    "de.bmw.infotainment.vehicle.Vehicle": {
-      "_optional": "Vehicle display units",
-      "statusNewCurrentUnitsStatusExt": "rs"
-    },
-    "de.bmw.infotainment.vehicle.Vehicle2": {
-      "_optional": "Vehicle2 speed",
-      "statusCarSpeed2": "rs"
-    },
-    "de.bmw.infotainment.vehicle.CDS": {
-      "_optional": "Engine speed, temp, status & 12V",
-      "statusEngineSpeed2": "rs",
-      "statusEngineTemperature": "rs",
-      "statusBattery2": "rs",
-      "statusEngineStatus": "rs"
-    },
-    "de.bmw.infrastructure.VehicleCondition": {
-      "_optional": "VehicleCondition",
-      "VehicleCondition": "s"
-    },
-    "de.bmw.infrastructure.VehicleInformation": {
-      "_optional": "VehicleInformation",
-      "statusGearboxDrive": "s",
-      "DataPowerTrain2": "s"
-    },
-    "de.bmw.infotainment.navigation.positioning.Positioning": {
-      "_optional": "Navigation underground dead-reckoning position",
-      "currentLocation": "rs",
-      "rawPositionData": "rs"
-    },
-    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
-      "_optional": "InternalTasu UDS",
-      "_instances": "SystemFunctionsInternalTasuInst1",
-      "_methods": ["sendTasuRequest"],
-      "_broadcasts": ["sendTasuResponse"]
-    },
+    "de.bmw.infotainment.checkcontrol.CheckControlMaster": { "_all": true, "_optional": "Active Check Control messages" },
+    "de.bmw.infotainment.KombiInterface_2": { "_all": true, "_optional": "Check Control names & KOMBI CBS list" },
+    "de.bmw.infotainment.KombiIF": { "_all": true, "_optional": "KOMBI range, tank, odo & vehicle clock" },
+    "de.bmw.infotainment.vehicle.TPMS": { "_all": true, "_optional": "4-wheel TPMS pressure & temperature" },
+    "de.bmw.infrastructure.EnvironmentalInformation": { "_all": true, "_optional": "Exterior temp & units" },
+    "de.bmw.infotainment.vehicle.Vehicle": { "_all": true, "_optional": "Vehicle status & closures" },
+    "de.bmw.infotainment.vehicle.Vehicle2": { "_all": true, "_optional": "Vehicle2 speed" },
+    "de.bmw.infotainment.vehicle.CDS": { "_all": true, "_optional": "Engine speed, temp, status & 12V" },
+    "de.bmw.infrastructure.VehicleCondition": { "_all": true, "_optional": "VehicleCondition" },
+    "de.bmw.infrastructure.VehicleInformation": { "_all": true, "_optional": "VehicleInformation" },
+    "de.bmw.infotainment.navigation.positioning.Positioning": { "_all": true, "_optional": "Navigation underground dead-reckoning position" },
+    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": { "_all": true, "_optional": "InternalTasu UDS" },
     "de.bmw.body.steeringwheelcomfort.SteeringWheelClimate": { "_all": true, "_optional": "SteeringWheelClimate" }
   },
   "screens": [

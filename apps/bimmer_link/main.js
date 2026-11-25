@@ -294,15 +294,23 @@ mgu.run({
         }
 
         // Direct verified OAP subscriptions matching mgu_diagnostics, car_vitals & service on G30 iDrive 7
+        function firstOapInst(ifn) {
+            try {
+                const cfg = signals && signals.loadConfig ? signals.loadConfig(ifn) : null;
+                const ks = Object.keys((cfg && cfg.instances) || {});
+                if (ks.length) return ks[0];
+            } catch (e) {}
+            return '1';
+        }
         if (signals && signals.watch && signals.hasNative && signals.hasNative()) {
             let kombi2Sub = null;
-            signals.watch('de.bmw.infotainment.KombiInterface_2', '1', {
+            signals.watch('de.bmw.infotainment.KombiInterface_2', firstOapInst('de.bmw.infotainment.KombiInterface_2'), {
                 ccList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'ccList', v),
                 newCCMessage: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'newCCMessage', v),
                 cbsDataServiceList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'cbsDataServiceList', v),
             }, log, { pollMs: 12000 }).then((s) => { kombi2Sub = s; }).catch(() => {});
 
-            signals.watch('de.bmw.infotainment.checkcontrol.CheckControlMaster', '1', {
+            signals.watch('de.bmw.infotainment.checkcontrol.CheckControlMaster', firstOapInst('de.bmw.infotainment.checkcontrol.CheckControlMaster'), {
                 basicList: (v) => {
                     recordOapField('de.bmw.infotainment.checkcontrol.CheckControlMaster', 'basicList', v);
                     if (kombi2Sub && kombi2Sub.proxy) {
@@ -313,13 +321,13 @@ mgu.run({
                 },
             }, log, { pollMs: 4500 }).catch(() => {});
 
-            signals.watch('de.bmw.infotainment.KombiIF', '1', {
+            signals.watch('de.bmw.infotainment.KombiIF', firstOapInst('de.bmw.infotainment.KombiIF'), {
                 statusRangeTankStatus: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusRangeTankStatus', v),
                 statusShowTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusShowTimeDate', v),
                 statusTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusTimeDate', v),
             }, log, { pollMs: 10000 }).catch(() => {});
 
-            signals.watch('de.bmw.infotainment.lsc.LSCDataSink', '1', {
+            signals.watch('de.bmw.infotainment.lsc.LSCDataSink', firstOapInst('de.bmw.infotainment.lsc.LSCDataSink'), {
                 dWAStatus: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'dWAStatus', v),
                 positionWindowRegulatorDRD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorDRD', v),
                 positionWindowRegulatorPSD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorPSD', v),
@@ -329,11 +337,15 @@ mgu.run({
                 statusExtendedControlsTrunk: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'statusExtendedControlsTrunk', v),
             }, log, { pollMs: 5000 }).catch(() => {});
 
-            signals.watch('de.bmw.infotainment.vehicle.TPMS', '1', {
+            signals.watch('de.bmw.infotainment.vehicle.TPMS', firstOapInst('de.bmw.infotainment.vehicle.TPMS'), {
                 statusTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyrePressure', v),
                 statusTargetTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTargetTyrePressure', v),
                 statusTyreTemperature: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyreTemperature', v),
             }, log, { pollMs: 12000 }).catch(() => {});
+
+            signals.watch('de.bmw.infotainment.navigation.positioning.Positioning', firstOapInst('de.bmw.infotainment.navigation.positioning.Positioning'), {
+                rawPositionData: (v) => recordOapField('de.bmw.infotainment.navigation.positioning.Positioning', 'rawPositionData', v),
+            }, log, { pollMs: 15000 }).catch(() => {});
         }
 
         async function startOapBodyWatchers() {
