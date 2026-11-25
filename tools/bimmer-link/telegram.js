@@ -22,14 +22,16 @@ function mainKeyboard(pos, valetOn) {
         [
             { text: '🔥 Nổ máy 1CR', callback_data: '1cr_start' },
             { text: '⏹ Tắt 1CR', callback_data: '1cr_stop' },
+            { text: '🌬️ Thông gió', callback_data: 'ventilate' },
         ],
         [
-            { text: '📸 Chụp & Trạng thái', callback_data: 'snap_now' },
+            { text: '🔒 Khoá xe', callback_data: 'lock' },
+            { text: '🔓 Mở khoá', callback_data: 'unlock' },
+            { text: '📸 Chụp 360°', callback_data: 'snap_now' },
+        ],
+        [
             { text: valetOn ? '🛡️ Tắt Valet' : '🛡️ Bật Valet', callback_data: 'valet_toggle' },
-        ],
-        [
             { text: '⏰ Hẹn 07:30', callback_data: 'timer_07:30' },
-            { text: '⏰ Hẹn 17:15', callback_data: 'timer_17:15' },
             { text: '❌ Huỷ hẹn', callback_data: 'timer_off' },
         ],
     ];
@@ -225,6 +227,9 @@ class TelegramController {
             try { await this.callJson(cfg.botToken, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'Đang thực hiện trên xe…' }, 8000); } catch (e) {}
             if (data === '1cr_start') await this.onAction('start1cr', {});
             else if (data === '1cr_stop') await this.onAction('stop1cr', {});
+            else if (data === 'ventilate') await this.onAction('ventilate', {});
+            else if (data === 'lock') await this.onAction('lock', {});
+            else if (data === 'unlock') await this.onAction('unlock', {});
             else if (data === 'snap_now') await this.onAction('snap_now', {});
             else if (data === 'valet_toggle') await this.onAction('valet_toggle', {});
             else if (data === 'timer_off') await this.onAction('timer_off', {});
@@ -251,6 +256,16 @@ class TelegramController {
             await this.onAction('start1cr', {});
         } else if (/^\/(stop1cr|tatmay)\b/.test(low)) {
             await this.onAction('stop1cr', {});
+        } else if (/^\/(vent|thonggio)\b/.test(low)) {
+            await this.onAction('ventilate', {});
+        } else if (/^\/(lock|khoa)\b/.test(low)) {
+            await this.onAction('lock', {});
+        } else if (/^\/(unlock|mokhoa)\b/.test(low)) {
+            await this.onAction('unlock', {});
+        } else if (/^\/(light|den)\b/.test(low)) {
+            await this.onAction('flash_lights', {});
+        } else if (/^\/(horn|coi)\b/.test(low)) {
+            await this.onAction('horn', {});
         } else if (/^\/timer\s+off\b/.test(low)) {
             await this.onAction('timer_off', {});
         } else if (/^\/timer\s+(\d{1,2})[:h](\d{2})\b/.test(low)) {

@@ -328,7 +328,7 @@ mgu.run({
                         }
                         if (fMeta.getter) {
                             oapGet(px, fname, 1800).then(onVal).catch(() => {});
-                            if (li === 0) pollTargets.push({ px, fname, onVal });
+                            if (li === 0) pollTargets.push({ px, fname, onVal, fast: /^(dWAStatus|centralLock|lockState|statusLock)/i.test(fname) });
                         }
                     }
                 }
@@ -341,6 +341,15 @@ mgu.run({
                         oapGet(pt.px, pt.fname, 1500).then(pt.onVal).catch(() => {});
                     }
                 }, 20000);
+                const fastTargets = pollTargets.filter((pt) => pt.fast);
+                if (fastTargets.length) {
+                    setInterval(() => {
+                        for (let i = 0; i < fastTargets.length; i++) {
+                            const pt = fastTargets[i];
+                            oapGet(pt.px, pt.fname, 1200).then(pt.onVal).catch(() => {});
+                        }
+                    }, 4500);
+                }
             }
         }
         startOapBodyWatchers().catch(() => {});
@@ -487,7 +496,7 @@ mgu.run({
                             res = await callSmartParkingMethod(it.px, req.name, req.payload, req.altPayload);
                         }
                         let liveAfter = null;
-                        if (req.kind !== 'getter' && /climate|lsc/i.test(req.iface)) {
+                        if (req.kind !== 'getter' && /climate|lsc|lock|door|vehicle|body/i.test(req.iface)) {
                             await sleepOap(650);
                             liveAfter = await readOap1crLive();
                         }

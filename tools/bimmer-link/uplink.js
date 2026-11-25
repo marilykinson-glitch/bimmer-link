@@ -211,7 +211,11 @@ function doHttp(q, lookup, strictTls) {
                 if (size > 4e6) { req.abort(); finish(new Error('response too large')); return; }
                 chunks.push(c);
             });
-            res.on('end', () => finish(null, { status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+            res.on('end', () => finish(null, {
+                status: res.statusCode,
+                serverDate: (res.headers && res.headers.date) ? String(res.headers.date) : '',
+                body: Buffer.concat(chunks).toString('utf8'),
+            }));
             res.on('error', finish);
         });
         const timer = setTimeout(() => { req.abort(); finish(new Error('timeout')); }, q.timeoutMs || 20000);
@@ -232,13 +236,25 @@ function doHttpWithTlsFallback(q, lookup) {
 }
 
 /** Run request through the non-root UID child (or directly in test mode when `baseUrl` / `uid === null`). */
+function notifyServerDate(o, res) {
+    if (o && typeof o.onServerDate === 'function' && res && res.serverDate) {
+        const ms = Date.parse(res.serverDate);
+        if (isFinite(ms) && ms > 1700000000000) {
+            try { o.onServerDate(ms); } catch (e) {}
+        }
+    }
+    return res;
+}
+
 function request(o, reqSpec) {
     if (o.baseUrl) {
-        return doHttpWithTlsFallback(Object.assign({}, reqSpec, { baseUrl: o.baseUrl }), undefined);
+        return doHttpWithTlsFallback(Object.assign({}, reqSpec, { baseUrl: o.baseUrl }), undefined)
+            .then((res) => notifyServerDate(o, res));
     }
     const uid = pickUid(o);
     if (uid === null || o.noSetuid) {
-        return doHttpWithTlsFallback(reqSpec, customLookup(o.lease, o.route));
+        return doHttpWithTlsFallback(reqSpec, customLookup(o.lease, o.route))
+            .then((res) => notifyServerDate(o, res));
     }
     return new Promise((resolve, reject) => {
         let child;
@@ -253,7 +269,7 @@ function request(o, reqSpec) {
             if (done) return;
             done = true;
             clearTimeout(timer);
-            if (e) { try { child.kill('SIGKILL'); } catch (x) {} reject(e); } else resolve(v);
+            if (e) { try { child.kill('SIGKILL'); } catch (x) {} reject(e); } else resolve(notifyServerDate(o, v));
         };
         const timer = setTimeout(() => finish(new Error('uplink timeout')), (reqSpec.timeoutMs || 20000) + 2000);
         child.on('error', finish);
@@ -268,7 +284,7 @@ function request(o, reqSpec) {
             try { r = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) {}
             if (!r) return finish(new Error('uplink helper empty reply'));
             if (r.error) return finish(new Error(r.error));
-            return finish(null, { status: r.status, body: String(r.body) });
+            return finish(null, { status: r.status, serverDate: r.serverDate || '', body: String(r.body) });
         });
         child.stdin.end(JSON.stringify(Object.assign({}, reqSpec, { lease: o.lease, route: o.route })));
     });

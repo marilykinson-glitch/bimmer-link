@@ -301,6 +301,7 @@ class CloudBridge {
             statePayload.telemetry && statePayload.telemetry.health && statePayload.telemetry.health.checkedAt,
             statePayload.valet && statePayload.valet.enabled,
             statePayload.servicePlan,
+            statePayload.parkingMemo,
             statePayload.destination,
             statePayload.lastTrip && statePayload.lastTrip.endedAt,
             statePayload.alert,

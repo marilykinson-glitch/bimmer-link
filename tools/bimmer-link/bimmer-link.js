@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.6.1';
+const VERSION = '0.6.2';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -81,6 +81,12 @@ function defaultConfig() {
         wakeNotify: false,
         autoSyncTimer: false,
         dailyTimer: '07:30',
+        tzOffsetMin: 420,
+        hasDwa302: false,
+        parkingMemo: {
+            note: '',
+            parkedAt: 0,
+        },
         appearance: {
             chassis: '',
             trimLine: '',
@@ -109,7 +115,9 @@ function normalizeConfig(raw) {
     const v = r.valet && typeof r.valet === 'object' ? r.valet : {};
     const ap = r.appearance && typeof r.appearance === 'object' ? r.appearance : {};
     const sp = r.servicePlan && typeof r.servicePlan === 'object' ? r.servicePlan : {};
+    const pm = r.parkingMemo && typeof r.parkingMemo === 'object' ? r.parkingMemo : {};
     const dst = r.destination && typeof r.destination === 'object' ? r.destination : null;
+    const rawTz = Number(r.tzOffsetMin);
     return {
         botToken: typeof r.botToken === 'string' ? r.botToken.trim() : '',
         chatId: r.chatId !== undefined && r.chatId !== null ? String(r.chatId).trim() : '',
@@ -118,6 +126,12 @@ function normalizeConfig(raw) {
         wakeNotify: !!r.wakeNotify,
         autoSyncTimer: !!r.autoSyncTimer,
         dailyTimer: /^\d{2}:\d{2}$/.test(String(r.dailyTimer || '')) ? String(r.dailyTimer) : d.dailyTimer,
+        tzOffsetMin: (typeof r.tzOffsetMin === 'number' && isFinite(rawTz) && Math.abs(rawTz) <= 840) ? Math.round(rawTz) : d.tzOffsetMin,
+        hasDwa302: !!r.hasDwa302,
+        parkingMemo: {
+            note: typeof pm.note === 'string' ? pm.note.trim().slice(0, 100) : '',
+            parkedAt: Math.max(0, Number(pm.parkedAt) || 0),
+        },
         appearance: {
             chassis: typeof ap.chassis === 'string' ? ap.chassis.trim().toUpperCase().slice(0, 20) : '',
             trimLine: typeof ap.trimLine === 'string' ? ap.trimLine.trim().slice(0, 40) : '',
@@ -344,8 +358,17 @@ function createService(customCfg) {
         wantCamUntil: 0,
         oapReq: null,
         oapSeq: 1,
+        clockSkewMs: 0,
         server: null,
     };
+
+    const syncClock = (ms) => {
+        if (typeof ms === 'number' && isFinite(ms) && ms > 1700000000000) {
+            const diff = ms - Date.now();
+            S.clockSkewMs = Math.abs(diff) > 30000 ? diff : 0;
+        }
+    };
+    const realNow = () => Date.now() + S.clockSkewMs;
 
     const upOpts = Up.options({
         stateDir: path.join(C.state, 'state'),
@@ -354,6 +377,7 @@ function createService(customCfg) {
         route: C.route,
         baseUrl: C.tgBaseUrl,
         noSetuid: !!C.tgBaseUrl,
+        onServerDate: syncClock,
         log,
     });
 
@@ -425,6 +449,14 @@ function createService(customCfg) {
         onCommand: async (cmdObj) => {
             const c = String(cmdObj.cmd || '');
             const a = cmdObj.arg || {};
+            if (!cmdObj.queueIfAsleep && cmdObj.at) syncClock(Number(cmdObj.at));
+            if (typeof cmdObj.tzOffsetMin === 'number' && isFinite(cmdObj.tzOffsetMin) && Math.abs(cmdObj.tzOffsetMin) <= 840) {
+                const nextTz = Math.round(cmdObj.tzOffsetMin);
+                if (config.tzOffsetMin !== nextTz) {
+                    config.tzOffsetMin = nextTz;
+                    saveConfig();
+                }
+            }
             const ack = (ok, message, detail) => cloud.publishDiag({
                 t: 'cmd_ack',
                 id: cmdObj.id,
@@ -528,6 +560,7 @@ function createService(customCfg) {
             trips: trips.slice(0, 12),
             valet: config.valet,
             servicePlan: config.servicePlan,
+            parkingMemo: config.parkingMemo,
             destination: config.destination,
             autoSyncTimer: config.autoSyncTimer,
             dailyTimer: config.dailyTimer,
@@ -593,10 +626,17 @@ function createService(customCfg) {
         if (msg.ev === 'ready') {
             S.workerUp = true;
             log('car-link ready (climate interfaces=' + msg.discoveredClimate + ')');
+            if (config.hasDwa302) {
+                callWorker('set_prefs', { hasDwa302: true }, 2000).catch(() => {});
+            }
             writeStatus();
         } else if (msg.ev === 'telemetry') {
             S.workerUp = true;
             if (msg.state) S.telemetry = msg.state;
+            if (S.telemetry && (S.telemetry.dwaArmed === true || S.telemetry._sawDwaArmed) && !config.hasDwa302) {
+                config.hasDwa302 = true;
+                saveConfig();
+            }
             S.activeTrip = msg.activeTrip || null;
             if (msg.lastTrip) S.lastTrip = msg.lastTrip;
             if (S.telemetry && S.telemetry.trueChassis && S.telemetry.trueChassis !== lastTrueChassis) {
@@ -699,12 +739,16 @@ function createService(customCfg) {
             await callWorker('schedule1cr', { hour: Number(parts[0]), minute: Number(parts[1]), enabled: true, userInitiated: true }, 4500);
         }
 
+        const parkedTs = realNow();
+        config.parkingMemo.parkedAt = parkedTs;
+        saveConfig();
+
         if (config.parkSnapshot) {
             const camGrab = await tryGrab360(4800);
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'DA DO XE AN TOAN', modelTitle: heroData.meta.modelTitle, trip, valet: config.valet, at: parkedTs, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { event: 'parked' });
-            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', camMeta: snap.camMeta || null, at: Date.now() }).then((ok) => {
+            cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° lúc đỗ xe' : 'Đã đỗ xe', camMeta: snap.camMeta || null, at: parkedTs }).then((ok) => {
                 log('park snapshot: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + ok);
             }).catch(() => {});
             if (config.botToken && config.chatId) {
@@ -725,14 +769,14 @@ function createService(customCfg) {
     }
 
     async function onDwaAlarmTriggered(reason) {
-        const now = Date.now();
+        const now = realNow();
         if (S.valetAlerts.dwa && now - S.valetAlerts.dwa < 90000) return;
         S.valetAlerts.dwa = now;
         const alertReason = 'Báo động chống trộm DWA kích hoạt (' + reason + ')!';
         tell('🚨 CẢNH BÁO DWA: ' + alertReason, 'crit');
         const camGrab = await tryGrab360(4500);
         const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
-        const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'BAO DONG CHONG TROM DWA!', modelTitle: heroData.meta.modelTitle, alert: true, valet: config.valet, at: now }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+        const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'BAO DONG CHONG TROM DWA!', modelTitle: heroData.meta.modelTitle, alert: true, valet: config.valet, at: now, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
         syncCloudState(true, { alert: { kind: 'dwa_alarm', reason: alertReason, at: now } });
         cloud.publishSnapshot(snap.png, { title: '🚨 ' + alertReason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
         if (config.botToken && config.chatId) {
@@ -746,12 +790,12 @@ function createService(customCfg) {
         const v = config.valet;
         if (!v || !v.enabled) return;
         const t = S.telemetry;
-        const now = Date.now();
+        const now = realNow();
         const trigger = (kind, reason) => {
             if (S.valetAlerts[kind] && now - S.valetAlerts[kind] < 90000) return;
             S.valetAlerts[kind] = now;
             tell('CẢNH BÁO VALET: ' + reason, 'crit');
-            const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(t, { title: 'CANH BAO VALET: ' + reason, alert: true, valet: v, at: now, tzOffsetMin: config.tzOffsetMin }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true, { alert: { kind, reason, at: now } });
             cloud.publishSnapshot(snap.png, { title: 'Cảnh báo Valet: ' + reason, alert: true, camMeta: snap.camMeta || null, at: now }).catch(() => {});
             if (config.botToken && config.chatId) {
@@ -806,10 +850,11 @@ function createService(customCfg) {
             ]);
             const camGrab = pairRes[1];
             const camFrame = (camGrab && camGrab.ok && camGrab.rgba) ? { w: camGrab.width, h: camGrab.height, rgba: camGrab.rgba } : null;
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: Date.now() }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snapTs = realNow();
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'ANH CHUP TRUC TIEP TU XE', modelTitle: heroData.meta.modelTitle, trip: S.lastTrip, valet: config.valet, at: snapTs, tzOffsetMin: config.tzOffsetMin }, { camFrame, rawCamFile: path.join(C.run, 'cam4.rgba') });
             syncCloudState(true);
             const snapLabel = snap.hasCamera ? '4 camera 360° quanh xe' : 'thẻ trạng thái đỗ xe';
-            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', camMeta: snap.camMeta || null, at: Date.now() }).catch(() => false);
+            const cloudSent = await cloud.publishSnapshot(snap.png, { title: snap.hasCamera ? 'Ảnh 4 camera 360° trực tiếp' : 'Ảnh chụp trực tiếp', camMeta: snap.camMeta || null, at: snapTs }).catch(() => false);
             log('snap_now: hasCamera=' + snap.hasCamera + ', bytes=' + snap.png.length + ', sent=' + cloudSent);
             if (config.botToken && config.chatId) {
                 const cap = Tg.formatStatusCaption('ẢNH CHỤP TRỰC TIẾP TỪ XE', S.telemetry, { trip: S.lastTrip, valet: config.valet });
@@ -821,10 +866,12 @@ function createService(customCfg) {
             return { ok: true, hasCamera: snap.hasCamera, message: S.message };
         }
 
-        if (action === 'start1cr' || action === 'stop1cr') {
-            const wantOn = action === 'start1cr';
+        if (action === 'start1cr' || action === 'stop1cr' || action === 'ventilate') {
+            const isVentReq = action === 'ventilate';
+            const curVentOn = !!(S.telemetry.climate1cr && S.telemetry.climate1cr.active && S.telemetry.climate1cr.mode === 'vent_only');
+            const wantOn = isVentReq ? !curVentOn : (action === 'start1cr');
             const preOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1800);
-            const prepRep = await callWorker('prepare_1cr', { wantOn, oapLive: (preOap && preOap.liveAfter) || null }, 4500);
+            const prepRep = await callWorker('prepare_1cr', { wantOn, ventOnly: isVentReq && wantOn, oapLive: (preOap && preOap.liveAfter) || null }, 4500);
             if (!prepRep || !prepRep.ok || !prepRep.result) {
                 const fallbackErr = (prepRep && prepRep.error) || 'Trợ thủ tín hiệu xe chưa sẵn sàng';
                 tell('1CR: ' + fallbackErr, 'warn');
@@ -939,16 +986,18 @@ function createService(customCfg) {
                 if (verdict.mode === 'engine_1cr') {
                     startMsg = '🔥 Đã đề nổ động cơ 1CR & bật điều hoà làm mát cabin (' + hitLabel + ')!';
                 } else if (verdict.mode === 'vent_only') {
-                    startMsg = '🌬️ Đã bật quạt thông gió cabin (' + hitLabel + '), nhưng động cơ chưa nổ — muốn nổ máy 1CR hãy ra ngoài bấm KHOÁ XE (hoặc kiểm tra FSC 1CR trong DME/BDC).';
+                    startMsg = isVentReq
+                        ? ('🌬️ Đã bật quạt thông gió tươi cabin không nổ máy (' + hitLabel + ')!')
+                        : ('🌬️ Đã bật quạt thông gió cabin (' + hitLabel + '), nhưng động cơ chưa nổ — muốn nổ máy 1CR hãy ra ngoài bấm KHOÁ XE (hoặc kiểm tra FSC 1CR trong DME/BDC).');
                 } else {
                     startMsg = '❄️ Đã bật chế độ làm mát từ xa AutoMode (' + hitLabel + ')!';
                 }
                 await callWorker('verify_1cr', {
                     waitMs: 0,
-                    lastAction: 'Kích nổ / Làm mát 1CR',
+                    lastAction: isVentReq ? 'Thông gió quạt cabin' : 'Kích nổ / Làm mát 1CR',
                     lastResult: startMsg.slice(0, 90),
                 }, 2000);
-                tell(startMsg, verdict.mode === 'vent_only' ? 'warn' : 'go');
+                tell(startMsg, (verdict.mode === 'vent_only' && !isVentReq) ? 'warn' : 'go');
                 if (config.botToken && config.chatId) {
                     tg.sendMessage(startMsg, S.telemetry, config.valet.enabled).catch(() => {});
                 }
@@ -1014,11 +1063,96 @@ function createService(customCfg) {
             return { ok: true, message: plain, valet: config.valet };
         }
 
+        if (action === 'lock' || action === 'unlock' || action === 'flash_lights' || action === 'horn') {
+            if (action === 'unlock' && (S.telemetry.speed || 0) > 3) {
+                return { ok: false, error: 'Xe đang lăn bánh — từ chối mở khoá từ xa để đảm bảo an toàn.' };
+            }
+            const labels = {
+                lock: 'Khoá cửa xe',
+                unlock: 'Mở khoá cửa xe',
+                flash_lights: 'Nháy đèn định vị xe',
+                horn: 'Phát còi tìm xe',
+            };
+            const prepRep = await callWorker('prepare_body_cmd', { role: action }, 3500);
+            const prep = (prepRep && prepRep.result) || { candidates: [], discoveredInterfaces: [] };
+            const cands = Array.isArray(prep.candidates) ? prep.candidates : [];
+            const trace = [];
+            let hitMethod = '';
+
+            for (let i = 0; i < cands.length; i++) {
+                const cd = cands[i];
+                const tag = cd.iface.split('.').pop() + '.' + cd.name;
+                const oapRes = await callOapBridge(cd.iface, cd.kind, cd.name, cd.payload, cd.altPayload, 2800);
+                if (oapRes && oapRes.ok) {
+                    hitMethod = tag;
+                    trace.push({ via: 'OAP-ACL', method: tag, response: oapRes.response || null });
+                    break;
+                }
+                const wkRes = await callWorker('invoke_body_one', cd, 2600);
+                if (wkRes && wkRes.ok) {
+                    hitMethod = tag;
+                    trace.push({ via: 'worker', method: tag, response: wkRes.result && wkRes.result.response });
+                    break;
+                }
+                trace.push({ ok: false, method: tag, error: (oapRes && oapRes.error) || (wkRes && wkRes.error) || 'rejected' });
+            }
+
+            const postOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1400);
+            const verRep = await callWorker('verify_body_cmd', {
+                waitMs: hitMethod ? 900 : 250,
+                oapLive: (postOap && postOap.liveAfter) || null,
+            }, 3200);
+            const after = (verRep && verRep.result) || {};
+
+            if (action === 'lock' || action === 'unlock') {
+                const wantLocked = action === 'lock';
+                const confirmed = (after.locked === wantLocked) || (wantLocked ? after.dwaArmed === true : (config.hasDwa302 && after.dwaArmed === false));
+                if (hitMethod && confirmed) {
+                    const okMsg = wantLocked
+                        ? ('🔒 Đã khoá cửa xe' + (after.dwaArmed ? ' & bật chống trộm DWA' : '') + ' (' + hitMethod + ')!')
+                        : ('🔓 Đã mở khoá cửa xe (' + hitMethod + ')!');
+                    tell(okMsg, 'go');
+                    return { ok: true, verified: true, message: okMsg, detail: { after, trace } };
+                }
+                if (hitMethod) {
+                    const sentMsg = labels[action] + ': đã gửi qua ' + hitMethod + ', nhưng trạng thái chốt cửa chưa đổi (hộp BDC yêu cầu lệnh từ kênh K-CAN2 / MGU-ATM2).';
+                    tell(sentMsg, 'warn');
+                    return { ok: false, atm2Ready: true, error: sentMsg, detail: { after, trace } };
+                }
+            } else if (hitMethod) {
+                const sigMsg = (action === 'flash_lights' ? '💡 Đã gửi lệnh nháy đèn định vị' : '📢 Đã gửi lệnh còi định vị') + ' (' + hitMethod + ')!';
+                tell(sigMsg, 'go');
+                return { ok: true, message: sigMsg, detail: { trace } };
+            }
+
+            const noPortMsg = cands.length === 0
+                ? (labels[action] + ': Đầu giải trí MGU không có cổng SOME/IP ghi trực tiếp cho lệnh này (BMW tách riêng sang nhánh CAN của hộp ATM2) — nút lệnh BL2 đã sẵn sàng để chạy qua cục MGU-ATM2!')
+                : (labels[action] + ': Hộp BDC từ chối ghi trực tiếp từ màn hình MGU — cần thực thi qua nhánh K-CAN2 của cục MGU-ATM2.');
+            tell(noPortMsg, 'warn');
+            return {
+                ok: false,
+                atm2Ready: true,
+                error: noPortMsg,
+                detail: { role: action, candidatesFound: cands.length, discoveredBodyInterfaces: prep.discoveredInterfaces, after, trace },
+            };
+        }
+
+        if (action === 'parking_memo') {
+            config.parkingMemo = {
+                note: String(arg.note || '').trim().slice(0, 100),
+                parkedAt: Number(arg.parkedAt) || config.parkingMemo.parkedAt || realNow(),
+            };
+            saveConfig();
+            const memoMsg = config.parkingMemo.note
+                ? ('📌 Đã lưu vị trí đỗ hầm: ' + config.parkingMemo.note)
+                : 'Đã xoá ghi chú vị trí đỗ.';
+            tell(memoMsg, 'go');
+            return { ok: true, message: memoMsg, detail: config.parkingMemo };
+        }
+
         if (action === 'trips') {
             const rows = trips.slice(0, 5).map((tr, idx) => {
-                const d = new Date(tr.endedAt);
-                const pad = (n) => (n < 10 ? '0' : '') + n;
-                const when = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' ' + pad(d.getDate()) + '/' + (d.getMonth() + 1);
+                const when = Snap.formatClock(tr.endedAt, config.tzOffsetMin);
                 return (idx + 1) + '. [' + when + '] ' + tr.distanceKm + ' km · ' + tr.durationMin + 'p · Max ' + tr.maxSpeed + ' km/h';
             });
             const msg = '🏁 LỊCH SỬ CHUYẾN ĐI GẦN ĐÂY:\n' + (rows.length ? rows.join('\n') : 'Chưa có chuyến đi nào được ghi nhận.');
@@ -1129,6 +1263,7 @@ function createService(customCfg) {
             dailyTimer: config.dailyTimer,
             valet: config.valet,
             servicePlan: config.servicePlan,
+            parkingMemo: config.parkingMemo,
             destination: config.destination,
             workerUp: S.workerUp,
             telemetry: S.telemetry,
@@ -1290,7 +1425,7 @@ function createService(customCfg) {
         }
 
         if (req.method === 'GET' && pathname === '/api/snapshot.png') {
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'XEM TRUOC ANH TRANG THAI', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'XEM TRUOC ANH TRANG THAI', trip: S.lastTrip, valet: config.valet, at: realNow(), tzOffsetMin: config.tzOffsetMin }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             res.writeHead(200, { 'Content-Type': snap.mime || 'image/png', 'Cache-Control': 'no-store', 'Content-Length': snap.png.length });
             res.end(snap.png);
             return;
@@ -1347,7 +1482,7 @@ function createService(customCfg) {
             config.botToken = token;
             config.chatId = chatId;
             saveConfig();
-            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'KET NOI TELEGRAM THANH CONG!', trip: S.lastTrip, valet: config.valet, at: Date.now() }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
+            const snap = Snap.renderSnapshotPng(S.telemetry, { title: 'KET NOI TELEGRAM THANH CONG!', trip: S.lastTrip, valet: config.valet, at: realNow(), tzOffsetMin: config.tzOffsetMin }, { rawCamFile: path.join(C.run, 'cam4.rgba') });
             const cap = Tg.formatStatusCaption('✅ KẾT NỐI XE BMW THÀNH CÔNG!', S.telemetry, { note: 'Bấm các nút bên dưới để điều khiển 1CR, chụp ảnh hoặc bật Valet.' });
             await tg.sendSnapshotPhoto(snap.png, cap, S.telemetry, config.valet.enabled, token, chatId);
             tell('Đã gửi ảnh thử nghiệm thành công về Telegram!', 'go');

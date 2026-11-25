@@ -806,7 +806,9 @@ function explain1crError(verdict, telState) {
 /**
  * Build prioritized, non-destructive candidate calls for `start1cr` / `stop1cr` across SP15 (`Climate2`) & SP18 (`ClimateMaster`).
  */
-function build1crOrderedCandidates(climateCatalog, liveMap, wantOn) {
+function build1crOrderedCandidates(climateCatalog, liveMap, wantOn, opts) {
+    opts = opts || {};
+    const onlyVent = !!opts.ventOnly;
     const ifs = (climateCatalog && climateCatalog.interfaces) || [];
     const lv = liveMap || {};
     const out = [];
@@ -885,6 +887,18 @@ function build1crOrderedCandidates(climateCatalog, liveMap, wantOn) {
                 return;
             }
 
+            if (onlyVent) {
+                if (hasVent) {
+                    bucket.push({
+                        iface: d.iface, kind: 'setter', name: f.name, stage: 'vent_only',
+                        hasLiveProvider: isLive,
+                        payload: buildDirectPayload(f, true, sm, false, { mode: 'vent_only' }),
+                        altPayload: buildDirectPayload(f, true, sm, true, { mode: 'vent_only' }),
+                    });
+                }
+                return;
+            }
+
             // Stage 1: Clean single-flag AutoMode ON (exact BMW iDrive / RCN 1CR trigger)
             const p1 = buildDirectPayload(f, true, sm, false, { mode: 'auto_1cr' });
             bucket.push({
@@ -919,7 +933,7 @@ function build1crOrderedCandidates(climateCatalog, liveMap, wantOn) {
         });
 
         (d.methods || []).forEach((m) => {
-            if (m.roles.indexOf('direct_write') < 0) return;
+            if (onlyVent || m.roles.indexOf('direct_write') < 0) return;
             const dur = wantOn ? 15 : 0;
             const mk = (num) => {
                 const o = {};
@@ -1240,8 +1254,11 @@ async function runWorker() {
     const climateLive = {};        // "iface.field" -> latest value
     const bodyLive = {};           // "iface.field" -> latest body/closure value
     const bodyPollers = [];        // [() => void] re-read on refresh_vitals
+    const fastSecurityPollers = []; // [() => void] 4.5s poll for DWA / CentralLock responsiveness
     const climateProxies = {};     // iface -> { list: [{ inst, proxy, available }], desc, cfgSummary }
+    const remoteBodyProxies = {};  // iface -> { list: [{ inst, proxy, available }], desc }
     let climateCatalog = { interfaces: [] };
+    let remoteBodyCatalog = { interfaces: [] };
     let tasuProxy = null;
     const tasuListeners = [];
     const camHolders = { icam: null, cam: null, xv: null, cookie: null, timer: null };
@@ -1585,9 +1602,28 @@ async function runWorker() {
                         if (/\.lsc\./i.test(desc.iface) && /pressureTyre|mileageRange|^range$|dataRangeDisplay|fuelSupply|positionWindow|positionSHD|dWAStatus/i.test(f.name)) {
                             bodyPollers.push(() => { try { px.getValue(f.name, 1600).then(onVal).catch(() => {}); } catch (e) {} });
                         }
+                        if (/\.lsc\./i.test(desc.iface) && /^dWAStatus$/i.test(f.name)) {
+                            fastSecurityPollers.push(() => { try { px.getValue(f.name, 1200).then(onVal).catch(() => {}); } catch (e) {} });
+                        }
                     }
                 });
             });
+        }
+
+        // 4b. Discover optional writable Remote Body endpoints (CentralLock / LightFlash / Horn / LSCDataSource) on MGU
+        remoteBodyCatalog = discoverRemoteBodyCatalog(db);
+        for (let i = 0; i < remoteBodyCatalog.interfaces.length; i++) {
+            const desc = remoteBodyCatalog.interfaces[i];
+            let opened = { list: [], cfg: null };
+            try { opened = await openWildcardProxies(desc.iface, 2); } catch (e) {}
+            if (!opened.list.length) {
+                const attrs = {};
+                desc.fields.forEach((f) => { attrs[f.name] = (f.getter ? 'r' : '') + (f.setter ? 'w' : '') || 'w'; });
+                try { opened = await openDynamicProxies(desc.iface, attrs, desc.methods.map((m) => m.name), [], 2); } catch (e2) {}
+            }
+            if (!opened.list.length) continue;
+            if (opened.cfg) enrichDescWithGeneratedCfg(db, db.interfaces && db.interfaces[desc.iface], desc, opened.cfg);
+            remoteBodyProxies[desc.iface] = { list: opened.list, desc };
         }
 
         // 5. UDS InternalTasu proxy for on-demand accurate 12V Battery, Fuel %, Odometer, Temps (never polled continuously!)
@@ -1921,10 +1957,11 @@ async function runWorker() {
 
         if (action === 'prepare_1cr') {
             const wantOn = !!params.wantOn;
+            const ventOnly = !!params.ventOnly;
             const roleKey = wantOn ? 'start' : 'stop';
             const verdict = await refreshLive1crVerdict(params.oapLive);
-            const built = build1crOrderedCandidates(climateCatalog, climateLive, wantOn);
-            const rawPin = savedProfile && savedProfile[roleKey];
+            const built = build1crOrderedCandidates(climateCatalog, climateLive, wantOn, { ventOnly });
+            const rawPin = (!ventOnly && savedProfile) ? savedProfile[roleKey] : null;
             const isLegacyBadPin = wantOn && rawPin && rawPin.payload &&
                 rawPin.payload.operationParkAirConditioning === 'STANDKLIMATISIERUNG_EIN' &&
                 rawPin.payload.operationParkFunctionAutoMode === 'KEINE_AKTION__S__NICHT_VERFUEGBAR' &&
@@ -1933,7 +1970,7 @@ async function runWorker() {
             return {
                 ok: true,
                 verdict,
-                consentCandidates: built.consentCandidates,
+                consentCandidates: ventOnly ? [] : built.consentCandidates,
                 candidates: pinned.concat(built.candidates),
             };
         }
@@ -2361,6 +2398,72 @@ async function runWorker() {
                 interpretBodyField(ifn, fname, val, pushPatch, tracker.state);
             });
             emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
+        } else if (cmd.op === 'set_prefs') {
+            if (cmd.params && cmd.params.hasDwa302) {
+                tracker.state._sawDwaArmed = true;
+            }
+            emit({ ev: 'reply', reqId, ok: true, state: tracker.state });
+        } else if (cmd.op === 'prepare_body_cmd') {
+            const role = String((cmd.params && cmd.params.role) || '');
+            fastSecurityPollers.forEach((fn) => { try { fn(); } catch (e) {} });
+            const cands = buildBodyCandidates(remoteBodyCatalog, role);
+            emit({
+                ev: 'reply',
+                reqId,
+                ok: true,
+                result: {
+                    role,
+                    beforeLocked: tracker.state.locked,
+                    beforeDwaArmed: tracker.state.dwaArmed,
+                    candidates: cands,
+                    discoveredInterfaces: remoteBodyCatalog.interfaces.map((x) => x.iface),
+                },
+                state: tracker.state,
+            });
+        } else if (cmd.op === 'invoke_body_one') {
+            const p = cmd.params || {};
+            const holder = remoteBodyProxies[p.iface] || climateProxies[p.iface];
+            if (!holder || !holder.list || !holder.list.length) {
+                emit({ ev: 'reply', reqId, ok: false, error: 'Proxy not open: ' + p.iface });
+            } else {
+                try {
+                    const inst = holder.list[0];
+                    let resp = null;
+                    if (p.kind === 'setter') {
+                        await nativeTick(() => within(inst.proxy.setValue(p.name, p.payload, 2200), 2500, p.name))
+                            .catch((e1) => {
+                                if (p.altPayload !== undefined) return nativeTick(() => within(inst.proxy.setValue(p.name, p.altPayload, 2200), 2500, p.name));
+                                throw e1;
+                            });
+                    } else {
+                        resp = await nativeTick(() => within(inst.proxy.callMethod(p.name, p.payload || {}, 2200), 2500, p.name))
+                            .catch((e1) => {
+                                if (p.altPayload !== undefined) return nativeTick(() => within(inst.proxy.callMethod(p.name, p.altPayload || {}, 2200), 2500, p.name));
+                                throw e1;
+                            });
+                    }
+                    emit({ ev: 'reply', reqId, ok: true, result: { ok: true, response: resp } });
+                } catch (e) {
+                    emit({ ev: 'reply', reqId, ok: false, error: e.message });
+                }
+            }
+        } else if (cmd.op === 'verify_body_cmd') {
+            const waitMs = Math.min(2500, Number(cmd.params && cmd.params.waitMs) || 850);
+            if (waitMs > 0) await sleepMs(waitMs);
+            fastSecurityPollers.forEach((fn) => { try { fn(); } catch (e) {} });
+            await refreshLive1crVerdict(cmd.params && cmd.params.oapLive);
+            const dwa = climateLive['de.bmw.infotainment.lsc.LSCDataSink.dWAStatus'];
+            if (dwa) interpretLscField('dWAStatus', dwa, pushPatch, tracker.state, carUnits);
+            emit({
+                ev: 'reply',
+                reqId,
+                ok: true,
+                result: {
+                    locked: tracker.state.locked,
+                    dwaArmed: tracker.state.dwaArmed,
+                },
+                state: tracker.state,
+            });
         } else if (cmd.op === 'scan_health') {
             const report = await scanVehicleHealth();
             emit({ ev: 'reply', reqId, ok: true, result: report, state: tracker.state });
@@ -2386,6 +2489,7 @@ async function runWorker() {
                 ok: true,
                 schema: {
                     interfaces: climateCatalog.interfaces,
+                    remoteBodyInterfaces: remoteBodyCatalog.interfaces,
                     relatedInterfaces,
                     openConfigs: cfgMap,
                     live: climateLive,
@@ -2404,6 +2508,11 @@ async function runWorker() {
         setInterval(() => {
             for (let i = 0; i < bodyPollers.length; i++) bodyPollers[i]();
         }, 15000);
+    }
+    if (fastSecurityPollers.length) {
+        setInterval(() => {
+            for (let i = 0; i < fastSecurityPollers.length; i++) fastSecurityPollers[i]();
+        }, 4500);
     }
 }
 
@@ -2938,11 +3047,13 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
     }
 
     // 3. DWA Anti-Theft Alarm & Central Lock Arming (`dWAStatus`)
-    // Note: Cars without Option 302 DWA (statusDWAAlarmHour === 252) permanently report DWA_ENTSCHAERFT even when locked!
+    // Note: Cars without Option 302 DWA permanently report DWA_ENTSCHAERFT even when locked; once DWA_GESCHAERFT or IRS/NG monitoring is seen (or persisted in config.hasDwa302), DWA_ENTSCHAERFT <-> DWA_GESCHAERFT tracks unlock/lock accurately.
     if (/^dWAStatus$/i.test(fname) && typeof val === 'object') {
         const patch = {};
-        const arm = String(val.statusDWAArming || '').toUpperCase();
-        if (arm === 'DWA_GESCHAERFT' || val.statusDWAArming === 1) {
+        const arm = String(val.statusDWAArming !== undefined ? val.statusDWAArming : '').toUpperCase();
+        const irs = String(val.statu_IRSNGMonitoring !== undefined ? val.statu_IRSNGMonitoring : '').toUpperCase();
+        const hasIrsActive = irs === 'IRS_UND_NG_UEBERWACHUNG_AKTIV' || irs === 'IRS_UND_NG_IN_REFERENZIERUNGSPHASE' || val.statu_IRSNGMonitoring === 1 || val.statu_IRSNGMonitoring === 2;
+        if (arm === 'DWA_GESCHAERFT' || val.statusDWAArming === 1 || hasIrsActive) {
             patch._sawDwaArmed = true;
             patch.dwaArmed = true;
             patch.locked = true;
@@ -2952,10 +3063,29 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
                 patch.locked = false;
             }
         }
-        const reason = String(val.statusDWAAlarmReason !== undefined ? val.statusDWAAlarmReason : '');
-        const alarmOn = !!reason && !/^(KEIN_ALARM|NO_ALARM|SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|KEINE_ANGABE|0|252|253|254|255)$/i.test(reason);
+        const cyc = val.statusAlarmArmingCycle;
+        const cycStr = String(cyc !== undefined ? cyc : '').toUpperCase();
+        const cycleRelevant = cyc === undefined || cycStr === 'RELEVANTER_ALARM' || cyc === 0;
+        const rawReason = String(val.statusDWAAlarmReason !== undefined ? val.statusDWAAlarmReason : '');
+        const isRealReason = !!rawReason && !/^(KEIN_ALARM|NO_ALARM|SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|FUNKTIONSSCHNITTSTELLE_IST_NICHT_VERFUEGBAR|FUNKTION_MELDET_FEHLER|KEINE_ANGABE|0|61|62|63|252|253|254|255)$/i.test(rawReason);
+        const alarmOn = cycleRelevant && isRealReason;
+        const DWA_REASON_VI = {
+            MOTORHAUBE_BZW_P__FRONTKLAPPE: 'Mở nắp capo', '1': 'Mở nắp capo',
+            FAHRERTUER: 'Cửa tài', '2': 'Cửa tài',
+            FAHRERTUER_HINTEN: 'Cửa sau trái', '3': 'Cửa sau trái',
+            BEIFAHRERTUER: 'Cửa phụ', '4': 'Cửa phụ',
+            BEIFAHRERTUER_HINTEN: 'Cửa sau phải', '5': 'Cửa sau phải',
+            HECKKLAPPE: 'Cốp sau', '6': 'Cốp sau',
+            HECKSCHEIBE: 'Kính hậu', '7': 'Kính hậu',
+            INNENRAUMSCHUTZ: 'Chuyển động cabin', '8': 'Chuyển động cabin',
+            NEIGUNGSGEBER: 'Nghiêng xe / Kích bánh', '9': 'Nghiêng xe / Kích bánh',
+            LEITUNGSUEBERWACHUNG: 'Cắt dây còi DWA', '10': 'Cắt dây còi DWA',
+            VERSORGUNGSSPANNUNG: 'Ngắt nguồn ắc quy', '11': 'Ngắt nguồn ắc quy',
+            PANIKALARM: 'Báo động khẩn cấp', '12': 'Báo động khẩn cấp',
+            OBD_KOMMUNIKATIONSUEBERWACHUNG: 'Cắm cổng OBD', '14': 'Cắm cổng OBD',
+        };
         patch.dwaAlarmActive = alarmOn;
-        patch.dwaAlarmReason = alarmOn ? reason : '';
+        patch.dwaAlarmReason = alarmOn ? (DWA_REASON_VI[rawReason.toUpperCase()] || rawReason) : '';
         if (Object.keys(patch).length) pushPatch(patch);
         return;
     }
@@ -3042,6 +3172,136 @@ if (require.main === module && process.argv[2] === 'worker') {
     });
 }
 
+/* ---------------- Remote Body Control Discovery (Lock / Unlock / Flash Lights / Horn) ---------------- */
+
+const BODY_CMD_SKIP_IFACE_RE = /(\.oap\.|hmi\.|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate|steeringwheel|cameraproxy|xview|nodestatemanager|lifecycle|provisioning)/i;
+const BODY_CMD_SKIP_MEMBER_RE = /(child|kinder|steering|lenk|display|screen|sim|pin|target|freq|fuel|tank|charge|lade|seat|sitz|mirror|spiegel|window|fenster|shd|ambient|interior|innen|backlight|dtc|fault|checkControl)/i;
+
+function classifyBodyCmdMember(iface, mname) {
+    if (BODY_CMD_SKIP_IFACE_RE.test(iface) || BODY_CMD_SKIP_MEMBER_RE.test(mname)) return [];
+    const full = iface + '.' + mname;
+    const roles = [];
+    if (/(remoteUnlock|doorUnlock|unlockVehicle|unlockDoor|entriegel)/i.test(full)) {
+        roles.push('unlock');
+    } else if (/(remoteLock|doorLock|lockVehicle|lockDoor|centralLock|zentralverriegel|verriegel)/i.test(full)) {
+        roles.push('lock');
+        if (!/onlyLock/i.test(mname)) roles.push('unlock');
+    }
+    if (/(lightFlash|flashLight|headlightFlash|exteriorLight.*Flash|lichthupe|remoteLight|warnblink|hazardWarn|findMyCar|vehicleFinder.*light)/i.test(full)) {
+        roles.push('flash_lights');
+    }
+    if (/(remoteHorn|hornBlow|blowHorn|hornSignal|triggerHorn|requestHorn|activateHorn|acousticLocate|signalhorn|hupe)/i.test(full)) {
+        roles.push('horn');
+    }
+    return roles;
+}
+
+function discoverRemoteBodyCatalog(db) {
+    const out = [];
+    const ifs = (db && db.interfaces) || {};
+    Object.keys(ifs).sort().forEach((ifn) => {
+        if (BODY_CMD_SKIP_IFACE_RE.test(ifn)) return;
+        const iv = ifs[ifn] || {};
+        const fields = [];
+        const methods = [];
+        Object.keys(iv.fields || {}).forEach((fn) => {
+            const fm = iv.fields[fn] || {};
+            if (!fm.setter) return;
+            const roles = classifyBodyCmdMember(ifn, fn);
+            if (!roles.length) return;
+            fields.push({
+                name: fn,
+                getter: !!fm.getter,
+                setter: true,
+                notifier: !!fm.notifier,
+                type: fm.type || fm.dataRef || null,
+                typeDef: resolveTypeDef(db, fm.type || fm.dataRef),
+                roles,
+            });
+        });
+        Object.keys(iv.methods || {}).forEach((mn) => {
+            const mm = iv.methods[mn] || {};
+            const roles = classifyBodyCmdMember(ifn, mn);
+            if (!roles.length) return;
+            const inList = Array.isArray(mm.in) ? mm.in : [];
+            methods.push({
+                name: mn,
+                inArgs: inList.map((a) => ({
+                    name: a && a.name,
+                    type: a && (a.type || a.dataRef),
+                    typeDef: resolveTypeDef(db, a && (a.type || a.dataRef)),
+                })),
+                roles,
+            });
+        });
+        if (fields.length || methods.length) {
+            out.push({ iface: ifn, serviceId: iv.serviceId || 0, fields, methods, broadcasts: [] });
+        }
+    });
+    return { interfaces: out };
+}
+
+function pickBodyRoleEnum(td, role, numericEnum) {
+    if (td && td.kind === 'enum' && Array.isArray(td.values) && td.values.length) {
+        const vals = td.values.map(String).filter((v) => !ENUM_INVALID_RE.test(v));
+        let re = ENUM_ON_TOKEN_RE;
+        if (role === 'lock') re = /(^|_)(LOCK|SECURED|VERRIEGELN|VERRIEGELT|SCHLIESSEN|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        else if (role === 'unlock') re = /(^|_)(UNLOCK|ENTRIEGELN|ENTRIEGELT|OEFFNEN|OPEN|OFF|AUS|INACTIVE|INAKTIV)(_|$)/i;
+        else if (role === 'flash_lights') re = /(^|_)(FLASH|BLINK|LICHTHUPE|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        else if (role === 'horn') re = /(^|_)(HORN|HUPE|SOUND|BLOW|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        const hit = vals.find((v) => re.test(v));
+        if (hit !== undefined) {
+            if (numericEnum && td.valueMap && td.valueMap[hit] !== undefined) return td.valueMap[hit];
+            return hit;
+        }
+    }
+    return pickEnumOrBool(td, role !== 'unlock', undefined, numericEnum);
+}
+
+function buildBodyCmdPayload(meta, role, numericEnum) {
+    const td = meta && meta.typeDef;
+    const nm = (meta && meta.name) || '';
+    if (/clientGroupId/i.test(nm)) return 0;
+    if (/duration|count|repeat|cycles/i.test(nm)) return role === 'horn' ? 1 : 2;
+    if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
+        const o = {};
+        td.fields.forEach((f) => {
+            if (f && f.name) o[f.name] = buildBodyCmdPayload(f, role, numericEnum);
+        });
+        return o;
+    }
+    return pickBodyRoleEnum(td, role, numericEnum);
+}
+
+function buildBodyCandidates(catalog, role) {
+    const out = [];
+    const ifs = (catalog && catalog.interfaces) || [];
+    ifs.forEach((d) => {
+        (d.fields || []).forEach((f) => {
+            if (!f.setter || f.roles.indexOf(role) < 0) return;
+            out.push({
+                iface: d.iface, kind: 'setter', name: f.name, role,
+                payload: buildBodyCmdPayload(f, role, false),
+                altPayload: buildBodyCmdPayload(f, role, true),
+            });
+        });
+        (d.methods || []).forEach((m) => {
+            if (m.roles.indexOf(role) < 0) return;
+            const mk = (num) => {
+                const o = {};
+                (m.inArgs || []).forEach((a) => { if (a && a.name) o[a.name] = buildBodyCmdPayload(a, role, num); });
+                return o;
+            };
+            out.push({
+                iface: d.iface, kind: 'method', name: m.name, role,
+                payload: mk(false),
+                altPayload: mk(true),
+            });
+        });
+    });
+    return out;
+}
+
 module.exports = {
     CONDITIONS,
     CONDITION_LABELS,
@@ -3052,6 +3312,10 @@ module.exports = {
     extractPlaceText,
     haversineKm,
     classifyClimateMember,
+    classifyBodyCmdMember,
+    discoverRemoteBodyCatalog,
+    buildBodyCmdPayload,
+    buildBodyCandidates,
     parseCompactSchema,
     discoverClimateCatalog,
     enrichDescWithGeneratedCfg,

@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.6.1">
+<link rel="stylesheet" href="styles.css?v=0.6.2">
 <title>MyBMW</title>
 </head>
 <body>
@@ -111,11 +111,54 @@
       <div class="fuel-track"><div class="fuel-fill" id="fuelFill"></div></div>
     </div>
 
-    <!-- 4 Circular MyBMW Remote Controls -->
+    <!-- 5 Circular MyBMW Remote Controls (Official My BMW Layout) -->
     <div class="action-dock">
       <div class="act-item">
-        <button class="act-btn" id="btn1cr" onclick="handle1crTap()">
-          <svg id="fanIcon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button type="button" class="act-btn" id="btnLock" onclick="handleLockTap()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="11" width="16" height="10" rx="2"/>
+            <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblLock">Khoá xe</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnUnlock" onclick="handleUnlockTap()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="11" width="16" height="10" rx="2"/>
+            <path d="M8 11V7a4 4 0 0 1 7.8-1"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblUnlock">Mở khoá</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnLight" onclick="sendCmd('flash_lights')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 9h6a4 4 0 0 1 0 8H4z"/>
+            <line x1="15" y1="9" x2="20" y2="7"/>
+            <line x1="16" y1="13" x2="21" y2="13"/>
+            <line x1="15" y1="17" x2="20" y2="19"/>
+          </svg>
+        </button>
+        <div class="act-label">Nháy đèn</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnHorn" onclick="handleHornTap()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+            <path d="M19 5a9.5 9.5 0 0 1 0 14"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblHorn">Bấm còi</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btn1cr" onclick="handle1crTap()">
+          <svg id="fanIcon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="2.5"/>
             <path d="M12 9.5C12 6 14.5 3.5 17 4.5C19.5 5.5 18 9.5 14.5 11"/>
             <path d="M14.5 12C18 12 20.5 14.5 19.5 17C18.5 19.5 14.5 18 13 14.5"/>
@@ -125,36 +168,14 @@
         </button>
         <div class="act-label" id="lbl1cr">Đề nổ 1CR</div>
       </div>
+    </div>
 
-      <div class="act-item">
-        <button class="act-btn" onclick="sendCmd('snap_now')">
-          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-            <circle cx="12" cy="13" r="4"/>
-          </svg>
-        </button>
-        <div class="act-label">Chụp xe</div>
-      </div>
-
-      <div class="act-item">
-        <button class="act-btn" id="btnValet" onclick="sendCmd('valet_toggle')">
-          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
-        </button>
-        <div class="act-label" id="lblValet">Valet Off</div>
-      </div>
-
-      <div class="act-item">
-        <button class="act-btn" id="btnTimerQuick" onclick="openTimerSheet()">
-          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="13" r="8"/>
-            <polyline points="12 9 12 13 15 15"/>
-            <line x1="9" y1="2" x2="15" y2="2"/>
-          </svg>
-        </button>
-        <div class="act-label" id="lblTimer">Hẹn giờ BDC</div>
-      </div>
+    <!-- 4 Quick Pro Utility Pills -->
+    <div class="quick-subdock">
+      <button type="button" class="sub-act-btn" id="btnVent" onclick="sendCmd('ventilate')">🌬️ Thông gió</button>
+      <button type="button" class="sub-act-btn" onclick="sendCmd('snap_now')">📸 Chụp 360°</button>
+      <button type="button" class="sub-act-btn" id="btnValet" onclick="sendCmd('valet_toggle')"><span id="lblValet">🛡️ Valet Off</span></button>
+      <button type="button" class="sub-act-btn" id="btnTimerQuick" onclick="openTimerSheet()"><span id="lblTimer">⏰ Hẹn BDC</span></button>
     </div>
 
     <!-- Timer Quick Card (collapsible) -->
@@ -245,6 +266,7 @@
           <button id="btnZoomSnap" class="mini-refresh hidden" onclick="openSnapModal()" title="Xem toàn màn hình">🔍</button>
         </span>
       </div>
+      <div id="homeParkMemoBadge" class="finder-badge hidden" style="margin-bottom:8px"></div>
       <div id="noSnapHint" style="font-size:13px;color:var(--dim);padding:10px 0">
         Tự động chụp 4 camera 360° (hoặc thẻ trạng thái đỗ hầm) khi tắt máy, hoặc bấm nút <b>Chụp xe</b> ở trên.
       </div>
@@ -275,10 +297,19 @@
         <span>📍 Vị trí đỗ xe</span>
         <span id="posSourceBadge" style="color:var(--go)">MGU NAV</span>
       </div>
-      <div id="addrText" style="font-size:14px;font-weight:600;margin-bottom:10px;overflow-wrap:anywhere">Đang chờ toạ độ từ xe…</div>
+      <div id="addrText" style="font-size:14px;font-weight:600;margin-bottom:8px;overflow-wrap:anywhere">Đang chờ toạ độ từ xe…</div>
+      <div class="finder-meta-row">
+        <span id="parkTimerBadge" class="finder-badge hidden">⏱️ --</span>
+        <span id="walkDistBadge" class="finder-badge hidden">📏 --</span>
+      </div>
       <div id="mapBox"></div>
       <div class="btn-row">
-        <button class="btn blue" onclick="openExternalMaps()">🧭 Mở chỉ đường tới xe</button>
+        <button type="button" class="btn blue" onclick="openExternalMaps()">🧭 Chỉ đường tới xe</button>
+        <button type="button" class="btn" onclick="locateUserOnMap()">📍 Đo từ chỗ tôi</button>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <input type="text" id="inpParkMemo" style="flex:2;min-width:165px" placeholder="Ghi chú đỗ hầm (VD: B2 - Cột D08)" onkeydown="if(event.key==='Enter')saveParkingMemo()">
+        <button type="button" class="btn" style="flex:0.7;min-width:78px" onclick="saveParkingMemo()">📌 Lưu</button>
       </div>
     </div>
 
@@ -527,6 +558,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.6.1"></script>
+<script src="app.js?v=0.6.2"></script>
 </body>
 </html>

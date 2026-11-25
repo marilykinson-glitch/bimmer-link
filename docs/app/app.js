@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.4.0).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.2).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -46,8 +46,9 @@ let lastSchema = null;
 let photoBuckets = {};
 let heroBuckets = {};
 let diagBuckets = {};
-let arm1crUntil = 0;
+let arm1crUntil = 0, armUnlockUntil = 0, armHornUntil = 0;
 let mapInstance = null, mapMarker = null, mapCircle = null, mapDestMarker = null;
+let userGeoPos = null, mapUserMarker = null, mapWalkLine = null;
 let tireUnit = localStorage.getItem('mybmw_tire_unit') === 'psi' ? 'psi' : 'bar';
 let lastDestHits = [];
 
@@ -1142,6 +1143,7 @@ function onDiagPacket(pkt) {
     document.getElementById('diagOutput').textContent = JSON.stringify({
       pinned: pkt.schema && pkt.schema.pinnedProfile,
       openConfigs: pkt.schema && pkt.schema.openConfigs,
+      remoteBodyInterfaces: pkt.schema && pkt.schema.remoteBodyInterfaces,
       live: pkt.schema && pkt.schema.live,
       logs: pkt.logs,
     }, null, 2);
@@ -1172,6 +1174,7 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
     cmd,
     arg: arg || {},
     at: Date.now(),
+    tzOffsetMin: -(new Date().getTimezoneOffset()),
     queueIfAsleep: !!queueIfAsleep,
     device,
   });
@@ -1230,6 +1233,67 @@ function handle1crTap() {
   document.getElementById('lbl1cr').textContent = 'Bấm lần 2!';
   showToast('Bấm nút Đề nổ 1CR thêm 1 lần nữa để xác nhận khởi động làm mát từ xa.', '#ffb020', 5000);
   setTimeout(() => { if (Date.now() >= arm1crUntil) renderAll(); }, 5100);
+}
+
+function handleLockTap() {
+  sendCmd('lock', {});
+}
+
+function handleUnlockTap() {
+  const now = Date.now();
+  if (now < armUnlockUntil) {
+    armUnlockUntil = 0;
+    sendCmd('unlock', {});
+    return;
+  }
+  armUnlockUntil = now + 5000;
+  const lbl = document.getElementById('lblUnlock');
+  if (lbl) lbl.textContent = 'Bấm lần 2!';
+  showToast('Bấm Mở khoá thêm 1 lần nữa để xác nhận mở chốt cửa từ xa.', '#ffb020', 5000);
+  setTimeout(() => { if (Date.now() >= armUnlockUntil) renderAll(); }, 5100);
+}
+
+function handleHornTap() {
+  const now = Date.now();
+  if (now < armHornUntil) {
+    armHornUntil = 0;
+    sendCmd('horn', {});
+    return;
+  }
+  armHornUntil = now + 5000;
+  const lbl = document.getElementById('lblHorn');
+  if (lbl) lbl.textContent = 'Bấm lần 2!';
+  showToast('Bấm Bấm còi thêm 1 lần nữa để xác nhận phát còi tìm xe.', '#ffb020', 5000);
+  setTimeout(() => { if (Date.now() >= armHornUntil) renderAll(); }, 5100);
+}
+
+function saveParkingMemo() {
+  const el = document.getElementById('inpParkMemo');
+  const note = (el && el.value || '').trim();
+  sendCmd('parking_memo', { note }, true);
+}
+
+function locateUserOnMap() {
+  if (!navigator.geolocation || !navigator.geolocation.getCurrentPosition) {
+    showToast('Thiết bị không hỗ trợ định vị GPS trình duyệt.', '#ffb020');
+    return;
+  }
+  showToast('📍 Đang lấy vị trí hiện tại của bạn…', '#38bdf8', 4000);
+  navigator.geolocation.getCurrentPosition((gp) => {
+    userGeoPos = { lat: gp.coords.latitude, lon: gp.coords.longitude, at: Date.now() };
+    renderAll();
+    refreshMap();
+    const carPos = vehicleData && vehicleData.telemetry && vehicleData.telemetry.pos;
+    if (carPos && carPos.lat != null && carPos.lon != null) {
+      const dKm = haversineClientKm(userGeoPos.lat, userGeoPos.lon, carPos.lat, carPos.lon);
+      const distTxt = dKm < 1 ? (Math.round(dKm * 1000) + ' mét') : (dKm.toFixed(2) + ' km');
+      showToast('📍 Đã đo khoảng cách: xe cách bạn ' + distTxt + '!', '#2fd27a', 6000);
+    } else {
+      showToast('📍 Đã lấy vị trí của bạn — đang chờ toạ độ xe.', '#38bdf8', 5000);
+    }
+  }, (err) => {
+    showToast('Không lấy được vị trí GPS điện thoại: ' + (err && err.message || 'Từ chối quyền'), '#ffb020', 6000);
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
 }
 
 function openTimerSheet() {
@@ -1514,6 +1578,22 @@ function renderAll() {
   document.getElementById('fuelPct').textContent = fuelLabel;
   document.getElementById('fuelFill').style.width = Math.max(0, Math.min(100, tel.fuelPct || 0)) + '%';
 
+  const btnLock = document.getElementById('btnLock');
+  if (btnLock) btnLock.className = 'act-btn' + (tel.locked === true ? ' active-go' : '');
+  const lblLock = document.getElementById('lblLock');
+  if (lblLock) lblLock.textContent = tel.locked === true ? 'Đã khoá' : 'Khoá xe';
+
+  const btnUnlock = document.getElementById('btnUnlock');
+  if (btnUnlock) btnUnlock.className = 'act-btn' + (tel.locked === false ? ' active-warn' : '');
+  if (Date.now() >= armUnlockUntil) {
+    const lblUnlock = document.getElementById('lblUnlock');
+    if (lblUnlock) lblUnlock.textContent = 'Mở khoá';
+  }
+  if (Date.now() >= armHornUntil) {
+    const lblHorn = document.getElementById('lblHorn');
+    if (lblHorn) lblHorn.textContent = 'Bấm còi';
+  }
+
   const btn1 = document.getElementById('btn1cr');
   const fan = document.getElementById('fanIcon');
   btn1.className = 'act-btn' + (c1.active ? ' active-go' : '');
@@ -1522,13 +1602,59 @@ function renderAll() {
     document.getElementById('lbl1cr').textContent = c1.active ? 'Tắt 1CR' : 'Đề nổ 1CR';
   }
 
+  const btnVent = document.getElementById('btnVent');
+  if (btnVent) {
+    const ventOn = !!(c1.active && c1.mode === 'vent_only');
+    btnVent.className = 'sub-act-btn' + (ventOn ? ' active-go' : '');
+    btnVent.textContent = ventOn ? '🌬️ Tắt quạt' : '🌬️ Thông gió';
+  }
+
   const btnV = document.getElementById('btnValet');
-  btnV.className = 'act-btn' + (valet.enabled ? ' active-warn' : '');
-  document.getElementById('lblValet').textContent = valet.enabled ? 'Valet Đang Bật' : 'Valet Off';
+  btnV.className = 'sub-act-btn' + (valet.enabled ? ' active-warn' : '');
+  document.getElementById('lblValet').textContent = valet.enabled ? '🛡️ Valet Bật' : '🛡️ Valet Off';
 
   const hasTimer = c1.timerText && c1.timerText !== 'Tắt';
-  document.getElementById('btnTimerQuick').className = 'act-btn' + (hasTimer ? ' active-go' : '');
-  document.getElementById('lblTimer').textContent = hasTimer ? ('Hẹn ' + c1.timerText) : 'Hẹn giờ BDC';
+  document.getElementById('btnTimerQuick').className = 'sub-act-btn' + (hasTimer ? ' active-go' : '');
+  document.getElementById('lblTimer').textContent = hasTimer ? ('⏰ ' + c1.timerText) : '⏰ Hẹn BDC';
+
+  const pm = (vehicleData && vehicleData.parkingMemo) || {};
+  const homeMemoEl = document.getElementById('homeParkMemoBadge');
+  if (homeMemoEl) {
+    if (pm.note) {
+      homeMemoEl.textContent = '📌 Chỗ đỗ: ' + pm.note;
+      homeMemoEl.classList.remove('hidden');
+    } else {
+      homeMemoEl.classList.add('hidden');
+    }
+  }
+  const inpMemo = document.getElementById('inpParkMemo');
+  if (inpMemo && document.activeElement !== inpMemo) {
+    inpMemo.value = pm.note || '';
+  }
+  const parkBadge = document.getElementById('parkTimerBadge');
+  if (parkBadge) {
+    const parkedSince = pm.parkedAt || (!tel.engineRunning && vehicleData.at ? vehicleData.at : 0);
+    if (!tel.engineRunning && parkedSince > 0 && Date.now() >= parkedSince - 60000) {
+      const mins = Math.max(1, Math.round((Date.now() - parkedSince) / 60000));
+      const durTxt = mins >= 1440
+        ? (Math.floor(mins / 1440) + ' ngày ' + Math.floor((mins % 1440) / 60) + ' giờ')
+        : (mins >= 60 ? (Math.floor(mins / 60) + ' giờ ' + (mins % 60) + ' phút') : (mins + ' phút'));
+      parkBadge.textContent = '⏱️ Đã đỗ ' + durTxt;
+      parkBadge.classList.remove('hidden');
+    } else {
+      parkBadge.classList.add('hidden');
+    }
+  }
+  const walkBadge = document.getElementById('walkDistBadge');
+  if (walkBadge) {
+    if (userGeoPos && tel.pos && tel.pos.lat != null && tel.pos.lon != null) {
+      const dKm = haversineClientKm(userGeoPos.lat, userGeoPos.lon, tel.pos.lat, tel.pos.lon);
+      walkBadge.textContent = dKm < 1 ? ('📏 Cách bạn ' + Math.round(dKm * 1000) + ' m') : ('📏 Cách bạn ' + dKm.toFixed(1) + ' km');
+      walkBadge.classList.remove('hidden');
+    } else {
+      walkBadge.classList.add('hidden');
+    }
+  }
 
   // Vitals
   const validOdo = (tel.odometerKm != null && !(isLegacy03 && tel.fuelPct == null && tel.odometerKm < 300)) ? tel.odometerKm : null;
@@ -2031,7 +2157,17 @@ function refreshMap() {
   if (mapMarker) mapInstance.removeLayer(mapMarker);
   if (mapCircle) mapInstance.removeLayer(mapCircle);
   if (mapDestMarker) { mapInstance.removeLayer(mapDestMarker); mapDestMarker = null; }
+  if (mapUserMarker) { mapInstance.removeLayer(mapUserMarker); mapUserMarker = null; }
+  if (mapWalkLine) { mapInstance.removeLayer(mapWalkLine); mapWalkLine = null; }
   mapMarker = L.circleMarker([pos.lat, pos.lon], { radius: 9, color: '#ffffff', weight: 2, fillColor: '#1c69d4', fillOpacity: 1 }).addTo(mapInstance);
+  if (userGeoPos && userGeoPos.lat != null && userGeoPos.lon != null) {
+    mapUserMarker = L.circleMarker([userGeoPos.lat, userGeoPos.lon], { radius: 7, color: '#ffffff', weight: 2, fillColor: '#38bdf8', fillOpacity: 0.95 }).addTo(mapInstance);
+    mapWalkLine = L.polyline([[userGeoPos.lat, userGeoPos.lon], [pos.lat, pos.lon]], { color: '#38bdf8', weight: 2, dashArray: '5,6', opacity: 0.85 }).addTo(mapInstance);
+    const dKm = haversineClientKm(userGeoPos.lat, userGeoPos.lon, pos.lat, pos.lon);
+    if (dKm > 0.03 && dKm < 25 && mapInstance.fitBounds) {
+      try { mapInstance.fitBounds([[userGeoPos.lat, userGeoPos.lon], [pos.lat, pos.lon]], { padding: [28, 28], maxZoom: 17 }); } catch (e) {}
+    }
+  }
   const dst = vehicleData && vehicleData.destination;
   if (dst && dst.lat != null && dst.lon != null) {
     mapDestMarker = L.circleMarker([dst.lat, dst.lon], { radius: 8, color: '#ffffff', weight: 2, fillColor: '#2fd27a', fillOpacity: 0.95 }).addTo(mapInstance);
@@ -2134,7 +2270,14 @@ function buildSmartCardPayload(iface, w, liveMap, wantOn) {
 function renderSchemaCards(schema) {
   const box = document.getElementById('schemaCards');
   box.innerHTML = '';
-  const ifs = (schema && schema.interfaces) || [];
+  const seenIf = {};
+  const ifs = [];
+  (((schema && schema.interfaces) || []).concat((schema && schema.remoteBodyInterfaces) || [])).forEach((iv) => {
+    if (iv && iv.iface && !seenIf[iv.iface]) {
+      seenIf[iv.iface] = true;
+      ifs.push(iv);
+    }
+  });
   if (!ifs.length) {
     box.innerHTML = '<div style="font-size:12.5px;color:var(--warn)">Chưa tìm thấy giao diện Climate nào từ phản hồi của xe.</div>';
     return;
@@ -2325,7 +2468,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.1').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.2').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

@@ -861,6 +861,76 @@ def check_car_link_logic_in_jxa():
     if (!cbs || cbs.length !== 1 || cbs[0].name !== 'Dầu động cơ' || cbs[0].severity !== 'ok') {{
       throw new Error('parseKombiCbsList mismatch: ' + JSON.stringify(cbs));
     }}
+
+    // Test 7 (v0.6.2): Vent-only 1CR candidate, Remote Body Catalog (Lock/Unlock/Light/Horn), and Option 302 DWA cycle/unlock accuracy
+    var ventPlan = C.build1crOrderedCandidates(rcCat, {{
+      'de.bmw.infotainment.climate.Climate2.statusAirConditionParkFunctions': {{
+        statusParkHeat: 'SIGNAL_UNGUELTIG',
+        statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+        statusExtraHeater: 'SIGNAL_UNGUELTIG',
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusRemoteStart: 'REMOTE_ENGINE_START_EIN'
+      }}
+    }}, true, {{ ventOnly: true }});
+    if (!ventPlan.candidates.length || ventPlan.candidates[0].stage !== 'vent_only' ||
+        ventPlan.candidates[0].payload.operationIndependentVentilate !== 'STANDLUEFTEN_EIN' ||
+        ventPlan.candidates[0].payload.operationParkFunctionAutoMode !== 'KEINE_AKTION__S__NICHT_VERFUEGBAR' ||
+        ventPlan.candidates[0].payload.operationRemoteStart !== 'KEINE_AKTION_NICHT_VERFUEGBAR') {{
+      throw new Error('ventOnly candidate mismatch: ' + JSON.stringify(ventPlan));
+    }}
+
+    var bodyDb = {{
+      interfaces: {{
+        'de.bmw.body.RemoteBodyControl': {{
+          serviceId: 50100,
+          fields: {{ centralLockingOperation: {{ setter: true }} }},
+          methods: {{ requestExteriorLightFlash: {{}}, triggerHornSignal: {{}} }}
+        }}
+      }}
+    }};
+    var rbCat = C.discoverRemoteBodyCatalog(bodyDb);
+    if (rbCat.interfaces.length !== 1) throw new Error('discoverRemoteBodyCatalog failed');
+    C.enrichDescWithGeneratedCfg(bodyDb, bodyDb.interfaces['de.bmw.body.RemoteBodyControl'], rbCat.interfaces[0], {{
+      fields: {{
+        centralLockingOperation: {{
+          schema: {{ t: 'Enum', e: {{ NO_ACTION: 0, UNLOCK: 1, LOCK: 2 }} }}
+        }}
+      }},
+      methods: {{
+        requestExteriorLightFlash: {{ id: 10, schema: {{ t: 'Struct', e: [{{ n: 'action', t: 'Enum', e: {{ OFF: 0, ON: 1 }} }}] }} }},
+        triggerHornSignal: {{ id: 11, schema: {{ t: 'Struct', e: [{{ n: 'horn', t: 'Enum', e: {{ INACTIVE: 0, ACTIVE: 1 }} }}] }} }}
+      }}
+    }});
+    var cLock = C.buildBodyCandidates(rbCat, 'lock');
+    var cUnlock = C.buildBodyCandidates(rbCat, 'unlock');
+    var cLight = C.buildBodyCandidates(rbCat, 'flash_lights');
+    var cHorn = C.buildBodyCandidates(rbCat, 'horn');
+    if (!cLock.length || cLock[0].payload !== 'LOCK' || cLock[0].altPayload !== 2) throw new Error('lock cand mismatch: ' + JSON.stringify(cLock));
+    if (!cUnlock.length || cUnlock[0].payload !== 'UNLOCK' || cUnlock[0].altPayload !== 1) throw new Error('unlock cand mismatch: ' + JSON.stringify(cUnlock));
+    if (!cLight.length || cLight[0].payload.action !== 'ON' || !cHorn.length || cHorn[0].payload.horn !== 'ACTIVE') {{
+      throw new Error('light/horn cand mismatch: ' + JSON.stringify([cLight, cHorn]));
+    }}
+
+    // Option 302 DWA: historical reason with KEIN_RELAVANTER_ALARM or sentinel 63 must NOT trigger false alarm, and DWA_ENTSCHAERFT after DWA_GESCHAERFT unlocks cleanly
+    var dwa302 = new C.TelemetryTracker();
+    dwa302.state._sawDwaArmed = true; // persisted config.hasDwa302 = true
+    C.interpretLscField('dWAStatus', {{
+      statusDWAArming: 'DWA_GESCHAERFT',
+      statusAlarmArmingCycle: 'KEIN_RELAVANTER_ALARM',
+      statusDWAAlarmReason: 'PANIKALARM'
+    }}, function(p) {{ dwa302.update(p, 3000000); }}, dwa302.state);
+    if (dwa302.state.locked !== true || dwa302.state.dwaArmed !== true || dwa302.state.dwaAlarmActive !== false) {{
+      throw new Error('Option 302 historical KEIN_RELAVANTER_ALARM mismatch: ' + JSON.stringify(dwa302.state));
+    }}
+    C.interpretLscField('dWAStatus', {{ statusDWAArming: 'DWA_ENTSCHAERFT', statusDWAAlarmReason: 63 }}, function(p) {{ dwa302.update(p, 3005000); }}, dwa302.state);
+    if (dwa302.state.locked !== false || dwa302.state.dwaArmed !== false || dwa302.state.dwaAlarmActive !== false) {{
+      throw new Error('Option 302 unlock state transition mismatch: ' + JSON.stringify(dwa302.state));
+    }}
+    C.interpretLscField('dWAStatus', {{ statusDWAArming: 1, statusAlarmArmingCycle: 'RELEVANTER_ALARM', statusDWAAlarmReason: 'MOTORHAUBE_BZW_P__FRONTKLAPPE' }}, function(p) {{ dwa302.update(p, 3010000); }}, dwa302.state);
+    if (dwa302.state.dwaAlarmActive !== true || dwa302.state.dwaAlarmReason !== 'Mở nắp capo') {{
+      throw new Error('Option 302 active hood alarm translation mismatch: ' + JSON.stringify(dwa302.state));
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)
@@ -881,15 +951,32 @@ def check_pwa_and_manifest_filtering():
     # Verify HTML IDs, JS handlers & CSS overflow-proof grid rules
     html_src = open(os.path.join(ROOT, 'docs/app/index.html'), encoding='utf-8').read()
     css_src = open(os.path.join(ROOT, 'docs/app/styles.css'), encoding='utf-8').read()
-    for grid_cls in ('.ecu-grid', '.metrics-grid', '.tpms-stage', '.swatch-grid', '.cam-tabs', '.action-dock'):
+    for grid_cls in ('.ecu-grid', '.metrics-grid', '.tpms-stage', '.swatch-grid', '.cam-tabs', '.action-dock', '.quick-subdock'):
         idx = css_src.find(grid_cls)
         assert idx >= 0, f'Missing CSS rule {grid_cls}'
         block = css_src[idx:css_src.find('}', idx)]
         assert 'minmax(0, 1fr)' in block, f'{grid_cls} must use minmax(0, 1fr) to prevent right-side column overflow!'
-    for req_id in ('homeCcList', 'healthCcList', 'kombiCbsBox', 'btnScanHealth', 'ecuHealthGrid', 'securityPills'):
+    for req_id in ('homeCcList', 'healthCcList', 'kombiCbsBox', 'btnScanHealth', 'ecuHealthGrid', 'securityPills',
+                   'btnLock', 'btnUnlock', 'btnLight', 'btnHorn', 'btnVent', 'inpParkMemo', 'parkTimerBadge', 'walkDistBadge', 'homeParkMemoBadge'):
         assert f'id="{req_id}"' in html_src, f'Missing #{req_id} in index.html'
     for fn_call in re.findall(r'on(?:click|change)="([a-zA-Z0-9_]+)\(', html_src):
         assert f'function {fn_call}(' in app_js, f'Missing handler {fn_call}() in docs/app/app.js'
+
+    # Test snapshot.js formatClock UTC -> Local Timezone (UTC+7 = +420 min) & midnight date rollover!
+    snap_src = open(os.path.join(ROOT, 'tools/bimmer-link/snapshot.js'), encoding='utf-8').read()
+    snap_clock_check = run_jxa(f"""
+    var mod = {{ exports: {{}} }};
+    new Function('require', 'module', 'exports', 'Buffer', {json.dumps(snap_src)})(
+      function() {{ return {{}}; }}, mod, mod.exports, {{}}
+    );
+    var S = mod.exports;
+    var t1 = S.formatClock(Date.UTC(2026, 10, 24, 13, 14, 0), 420);
+    var t2 = S.formatClock(Date.UTC(2026, 10, 24, 18, 30, 0), 420);
+    var t3 = S.formatClock(Date.UTC(2026, 10, 24, 2, 5, 0), -300);
+    JSON.stringify([t1, t2, t3]);
+    """)
+    sc_list = json.loads(snap_clock_check)
+    assert sc_list == ['20:14  24/11/2026', '01:30  25/11/2026', '21:05  23/11/2026'], f'Snap.formatClock timezone mismatch: {sc_list}'
 
     # Test 24-bit Baseline JPEG encoder (`jpeg.js`) at full 960x816 4-camera resolution + native macOS `sips` decode check!
     jpeg_src = open(os.path.join(ROOT, 'tools/bimmer-link/jpeg.js'), encoding='utf-8').read()

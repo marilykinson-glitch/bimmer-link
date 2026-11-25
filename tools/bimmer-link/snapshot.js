@@ -273,10 +273,17 @@ function fmtVal(v, suffix, fallback) {
         ? (v + (suffix || '')) : (fallback || '--');
 }
 
-function formatClock(ms) {
-    const d = new Date(ms || Date.now());
+function formatClock(ms, tzOffsetMin) {
+    let offMin = (typeof tzOffsetMin === 'number' && isFinite(tzOffsetMin) && Math.abs(tzOffsetMin) <= 840) ? tzOffsetMin : null;
+    if (offMin === null) {
+        const sysOff = -(new Date().getTimezoneOffset());
+        offMin = sysOff !== 0 ? sysOff : 420; // Default UTC+7 (Asia/Ho_Chi_Minh) when MGU systemd runs in UTC
+    }
+    const baseMs = (typeof ms === 'number' && isFinite(ms) && ms > 0) ? ms : Date.now();
+    const d = new Date(baseMs + Math.round(offMin * 60000));
     const pad = (n) => (n < 10 ? '0' : '') + n;
-    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + '  ' + pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear();
+    return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + '  ' +
+        pad(d.getUTCDate()) + '/' + pad(d.getUTCMonth() + 1) + '/' + d.getUTCFullYear();
 }
 
 /**
@@ -303,7 +310,7 @@ function renderSnapshotPng(telemetry, extra, opts) {
         s.fillRect(0, 720, 960, 3, '#2fd27a');
         const carHdr = ex.modelTitle ? (ex.modelTitle + ' - ') : 'BMW 360 - ';
         s.text(carHdr + (ex.title || t.conditionLabel || 'DA DO XE'), 16, 732, 2, '#2fd27a', 56);
-        s.text(formatClock(ex.at), 724, 732, 2, '#94a3b8', 18);
+        s.text(formatClock(ex.at, ex.tzOffsetMin), 724, 732, 2, '#94a3b8', 18);
         const loc = t.pos
             ? ((t.pos.street ? t.pos.street + ', ' : '') + (t.pos.district ? t.pos.district + ', ' : '') + (t.pos.city || '') + ' (' + t.pos.lat.toFixed(5) + ', ' + t.pos.lon.toFixed(5) + ')')
             : 'CHUA CO TOA DO GPS';
@@ -331,7 +338,7 @@ function renderSnapshotPng(telemetry, extra, opts) {
 
     const badgeColor = ex.alert ? '#ef4444' : (c1.active ? '#2fd27a' : '#38bdf8');
     s.text(ex.modelTitle || 'MYBMW MGU LINK & 1CR', 28, 26, 3, '#f8fafc', 31);
-    s.text(formatClock(ex.at), 610, 30, 2, '#94a3b8');
+    s.text(formatClock(ex.at, ex.tzOffsetMin), 610, 30, 2, '#94a3b8');
 
     // Status banner
     s.card(28, 66, 824, 66, badgeColor, '#0f172a');
@@ -407,6 +414,7 @@ module.exports = {
     encodePngRgba,
     encodeIndexedPngRgba,
     foldAscii,
+    formatClock,
     renderSnapshotPng,
     tryCapture4Cam,
 };
