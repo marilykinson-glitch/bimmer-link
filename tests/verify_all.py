@@ -1079,6 +1079,203 @@ def check_car_link_logic_in_jxa():
         cabVentPlan.candidates.some(function(x){{ return x.payload && x.payload.operationRemoteStart === 'REMOTE_ENGINE_START_EIN'; }})) {{
       throw new Error('allowUnlockedAutoVent plan mismatch: ' + JSON.stringify(cabVentPlan.candidates));
     }}
+
+    // Test 12 (v0.6.7): Real-car WBA71AG050CF37906 `DoorsWindowsRoofMirrors.CentralLockingSystemAndPanelStatus`,
+    // `MultiConsumerTrunkLidAction.getTrunkLidStatus`, `Vehicle2.statusZVStatus`, `A4A.statusA4ALids`, `WindowsRoofMaster`,
+    // `AntiTheft.statusDwa`, and Head-Unit RemoteBody payloads (`CentralLockingSystemGW` HU=2, `CenterLockingService`, `ControlHMI`)!
+    if (C.classifyLockToken('HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT') !== true ||
+        C.classifyLockToken('HECKKLAPPE_LOGISCH_ENTRIEGELT') !== false ||
+        C.classifyLockToken('VERRIEGELT') !== true ||
+        C.classifyLockToken('GESICHERT') !== true ||
+        C.classifyLockToken('ENTRIEGELT') !== false ||
+        C.classifyLockToken('KEINE_BETAETIGUNG') !== null ||
+        C.classifyLockToken('SIGNAL_UNGUELTIG') !== null) {{
+      throw new Error('classifyLockToken negation/enum handling failed');
+    }}
+
+    var g30Panel = new C.TelemetryTracker();
+    g30Panel.state._sawDwaArmed = true;
+    g30Panel.state.dwaArmed = false;
+    var basePanel = {{
+      statusCentralLockingSystem: 1,
+      controlCentralLockingSystem: 8,
+      statusDoorSwitchDRD: 'FAT_IST_GESCHLOSSEN',
+      statusDoorSwitchPSD: 'BEIFAHRERTUER_IST_GESCHLOSSEN',
+      statusDoorSwitchDRDR: 'FATH_IST_GESCHLOSSEN',
+      statusDoorSwitchPSDR: 'BFTH_IST_GESCHLOSSEN',
+      statusContactBootLid: 'HK_IST_GESCHLOSSEN',
+      statusContactBootLid2: 'KLAPPE_2_GESCHLOSSEN',
+      statusContactBonnet: 'MOTORHAUBE_GESCHLOSSEN',
+      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
+      statusCentralLockingSystemBootlid: 'HECKKLAPPE_LOGISCH_ENTRIEGELT'
+    }};
+    var feedBody = function(ifn, fn, payload) {{
+      C.interpretBodyField(ifn, fn, payload, function(p) {{ g30Panel.update(p, 7000000); }}, g30Panel.state);
+    }};
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', basePanel);
+    if (g30Panel.state.locked !== false || g30Panel.state.doorsOpen.length !== 0 || g30Panel.state.hoodOpen !== false || g30Panel.state.trunkOpen !== false) {{
+      throw new Error('G30 idle unlocked PanelStatus mismatch: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Open Driver Door + Rear Right Door + Bonnet + BootLid (while statusContactBootLid2 stays KLAPPE_2_GESCHLOSSEN!)
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusDoorSwitchDRD: 'FAT_IST_OFFEN',
+      statusDoorSwitchPSDR: 'BFTH_IST_OFFEN',
+      statusContactBonnet: 'MOTORHAUBE_OFFEN',
+      statusContactBootLid: 'HK_IST_OFFEN',
+      statusContactBootLid2: 'KLAPPE_2_GESCHLOSSEN'
+    }}));
+    if (g30Panel.state.doorsOpen.indexOf('Cửa Tài') < 0 ||
+        g30Panel.state.doorsOpen.indexOf('Cửa Sau Phải') < 0 ||
+        g30Panel.state.doorsOpen.length !== 2 ||
+        g30Panel.state.hoodOpen !== true ||
+        g30Panel.state.trunkOpen !== true) {{
+      throw new Error('G30 open doors/hood/trunk PanelStatus failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Close all doors, hood, and trunk
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', basePanel);
+    if (g30Panel.state.doorsOpen.length !== 0 || g30Panel.state.hoodOpen !== false || g30Panel.state.trunkOpen !== false) {{
+      throw new Error('G30 close doors/hood/trunk PanelStatus failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Sitting inside cabin (`DWA_ENTSCHAERFT`): press interior Lock button -> `HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` + `VERRIEGELN`
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusCentralLockingSystem: 4,
+      statusPushButtonCentralLockingSystem: 'VERRIEGELN',
+      statusCentralLockingSystemBootlid: 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT'
+    }}));
+    if (g30Panel.state.locked !== true || g30Panel.state._centralLockLocked !== true) {{
+      throw new Error('G30 interior lock button failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Release interior button (`KEINE_BETAETIGUNG`) + periodic 3.0s `DWA_ENTSCHAERFT` poll -> MUST remain locked=true!
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusCentralLockingSystem: 4,
+      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
+      statusCentralLockingSystemBootlid: 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT'
+    }}));
+    C.interpretLscField('dWAStatus', {{ statusDWAArming: 'DWA_ENTSCHAERFT', statusDWAAlarmReason: 'KEIN_ALARM' }}, function(p) {{ g30Panel.update(p, 7003000); }}, g30Panel.state);
+    if (g30Panel.state.locked !== true || g30Panel.state._centralLockLocked !== true) {{
+      throw new Error('G30 interior lock lost after button release / DWA poll: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Pull interior door handle twice to exit (button stays KEINE_BETAETIGUNG, bootlid becomes HECKKLAPPE_LOGISCH_ENTRIEGELT & door opens) -> locked=false!
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusDoorSwitchDRD: 'FAT_IST_OFFEN',
+      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
+      statusCentralLockingSystemBootlid: 'HECKKLAPPE_LOGISCH_ENTRIEGELT'
+    }}));
+    if (g30Panel.state.locked !== false || g30Panel.state.doorsOpen.indexOf('Cửa Tài') < 0) {{
+      throw new Error('G30 interior handle unlock + door open failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // MultiConsumerTrunkLidAction.getTrunkLidStatus + A4A.statusA4ALids + WindowsRoofMaster DVDR + AntiTheft.statusDwa
+    feedBody('de.bmw.body.MultiConsumerTrunkLidAction', 'getTrunkLidStatus', {{ statusTrunkLid: 'PRIMARYLOCKOPEN' }});
+    if (g30Panel.state.trunkOpen !== true) throw new Error('MultiConsumerTrunkLidAction PRIMARYLOCKOPEN failed');
+    feedBody('de.bmw.body.MultiConsumerTrunkLidAction', 'getTrunkLidStatus', {{ statusTrunkLid: 'PRIMARYLOCKCLOSED' }});
+    if (g30Panel.state.trunkOpen !== false) throw new Error('MultiConsumerTrunkLidAction PRIMARYLOCKCLOSED failed');
+
+    feedBody('de.bmw.infotainment.vehicle.A4A', 'statusA4ALids', {{
+      statusCentralLocking: 'VERRIEGELT',
+      statusDoorPSD: 'OFFEN',
+      statusFrontLid: 'OFFEN'
+    }});
+    if (g30Panel.state.locked !== true || g30Panel.state.hoodOpen !== true || g30Panel.state.doorsOpen.indexOf('Cửa Phụ') < 0) {{
+      throw new Error('A4A.statusA4ALids combined lock+lid decode failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    feedBody('de.bmw.body.doorsandwindows.WindowsRoofMaster', 'statusWindowsRoofMasterDVDR', {{
+      positionWindowRegulatorDRDR: 120,
+      statusPositionWindowRegulatorDRDR: 'FENSTER_OFFEN'
+    }});
+    if (g30Panel.state.windowsOpen.indexOf('Kính Sau Trái') < 0) {{
+      throw new Error('WindowsRoofMaster DVDR decode failed: ' + JSON.stringify(g30Panel.state.windowsOpen));
+    }}
+
+    feedBody('de.bmw.body.AntiTheft', 'statusDwa', {{
+      statusDWAArming: 'DWA_GESCHAERFT',
+      statusIrsNgMonitoring: 'IRS_UND_NG_UEBERWACHUNG_AKTIV',
+      statusDWAAlarmReason: 'KEIN_ALARM'
+    }});
+    if (g30Panel.state.dwaArmed !== true || g30Panel.state.locked !== true) {{
+      throw new Error('AntiTheft.statusDwa decode failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Verify Head-Unit RemoteBody payloads (`CentralLockingSystemGW`, `CenterLockingService`, `ControlHMI`)
+    var g30BodyCmdDb = {{
+      interfaces: {{
+        'de.bmw.body.centrallockingsystem.CentralLockingSystemGW': {{
+          serviceId: 21817,
+          fields: {{ requestCentralLockingSystem: {{ setter: true }} }},
+          methods: {{}}
+        }},
+        'de.bmw.body.caraccess.CenterLockingService': {{
+          serviceId: 20495,
+          fields: {{}},
+          methods: {{ requestLock: {{}}, requestUnlock: {{}} }}
+        }},
+        'de.bmw.body.ControlHMI': {{
+          serviceId: 21816,
+          fields: {{ RemoteServices: {{ setter: true }} }},
+          methods: {{}}
+        }}
+      }}
+    }};
+    var g30Rb = C.discoverRemoteBodyCatalog(g30BodyCmdDb);
+    var gwDesc = g30Rb.interfaces.filter(function(x){{ return x.iface.indexOf('CentralLockingSystemGW') >= 0; }})[0];
+    C.enrichDescWithGeneratedCfg(g30BodyCmdDb, g30BodyCmdDb.interfaces['de.bmw.body.centrallockingsystem.CentralLockingSystemGW'], gwDesc, {{
+      fields: {{
+        requestCentralLockingSystem: {{
+          setter: {{ id: 1 }},
+          schema: {{
+            t: 'Struct',
+            e: [
+              {{ n: 'idFunctionCentralLockingSystemRequest', t: 'Enum', e: {{ RCP: 1, HU: 2, SIGNAL_UNBEFUELLT: 15 }} }},
+              {{ n: 'centralLockingSystemRequest', t: 'Enum', e: {{ KEINE_BETAETIGUNG: 0, ENTRIEGELN: 1, VERRIEGELN: 2, SICHERN: 4, SIGNAL_UNBEFUELLT: 15 }} }},
+              {{ n: 'requestCentralLockingSystemID', t: 'UInt32' }}
+            ]
+          }}
+        }}
+      }}
+    }});
+    var clsDesc = g30Rb.interfaces.filter(function(x){{ return x.iface.indexOf('CenterLockingService') >= 0; }})[0];
+    C.enrichDescWithGeneratedCfg(g30BodyCmdDb, g30BodyCmdDb.interfaces['de.bmw.body.caraccess.CenterLockingService'], clsDesc, {{
+      methods: {{
+        requestLock: {{ id: 1, schema: {{ t: 'Struct', e: [{{ n: 'requesterId', t: 'Enum', e: {{ REMOTESOFTWAREUPDATE: 0, REMOTEDOORLOCK: 1, REMOTEDOORUNLOCK: 2 }} }}] }} }},
+        requestUnlock: {{ id: 2, schema: {{ t: 'Struct', e: [{{ n: 'requesterId', t: 'Enum', e: {{ REMOTESOFTWAREUPDATE: 0, REMOTEDOORLOCK: 1, REMOTEDOORUNLOCK: 2 }} }}] }} }}
+      }}
+    }});
+    var chmiDesc = g30Rb.interfaces.filter(function(x){{ return x.iface.indexOf('ControlHMI') >= 0; }})[0];
+    C.enrichDescWithGeneratedCfg(g30BodyCmdDb, g30BodyCmdDb.interfaces['de.bmw.body.ControlHMI'], chmiDesc, {{
+      fields: {{
+        RemoteServices: {{
+          setter: {{ id: 1 }},
+          schema: {{
+            t: 'Struct',
+            e: [
+              {{ n: 'requestRemoteServiceFunction', t: 'Enum', e: {{ HUPE: 0, WELCOME_MINUS_LIGHT: 1, SIGNAL_UNGUELTIG: 15 }} }},
+              {{ n: 'requestRemoteServicePause', t: 'UInt8' }},
+              {{ n: 'requestRemoteServiceRepetition', t: 'UInt8' }},
+              {{ n: 'requestRemoteServiceDuration', t: 'UInt8' }}
+            ]
+          }}
+        }}
+      }}
+    }});
+    var gwLock = C.buildBodyCandidates(g30Rb, 'lock').filter(function(x){{ return x.name === 'requestCentralLockingSystem'; }})[0];
+    if (!gwLock || gwLock.payload.idFunctionCentralLockingSystemRequest !== 'HU' || gwLock.payload.centralLockingSystemRequest !== 'VERRIEGELN' || gwLock.payload.requestCentralLockingSystemID !== 1) {{
+      throw new Error('CentralLockingSystemGW lock payload mismatch: ' + JSON.stringify(gwLock));
+    }}
+    var clsUnlock = C.buildBodyCandidates(g30Rb, 'unlock').filter(function(x){{ return x.name === 'requestUnlock'; }})[0];
+    if (!clsUnlock || clsUnlock.payload.requesterId !== 'REMOTEDOORUNLOCK') {{
+      throw new Error('CenterLockingService unlock payload mismatch: ' + JSON.stringify(clsUnlock));
+    }}
+    var chmiHorn = C.buildBodyCandidates(g30Rb, 'horn').filter(function(x){{ return x.name === 'RemoteServices'; }})[0];
+    var chmiLight = C.buildBodyCandidates(g30Rb, 'flash_lights').filter(function(x){{ return x.name === 'RemoteServices'; }})[0];
+    if (!chmiHorn || chmiHorn.payload.requestRemoteServiceFunction !== 'HUPE' || !chmiLight || chmiLight.payload.requestRemoteServiceFunction !== 'WELCOME_MINUS_LIGHT') {{
+      throw new Error('ControlHMI RemoteServices horn/light payload mismatch: ' + JSON.stringify([chmiHorn, chmiLight]));
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)
@@ -1328,6 +1525,8 @@ def check_pwa_and_manifest_filtering():
                 'de.bmw.infotainment.climate.Climate2': {'serviceId': 2},
                 'de.bmw.infotainment.climate.CustomStandklima': {'serviceId': 3},
                 'de.bmw.infotainment.navigation.positioning.Positioning': {'serviceId': 4},
+                'de.bmw.body.DoorsWindowsRoofMirrors': {'serviceId': 21808},
+                'de.bmw.infotainment.vehicle.A4A': {'serviceId': 46347},
                 'de.bmw.body.customdoor.DoorStatus': {'serviceId': 5},
                 'de.bmw.body.ghost.NoInstanceIface': {'serviceId': 6},
             },
@@ -1336,6 +1535,8 @@ def check_pwa_and_manifest_filtering():
                 'de.bmw.infotainment.climate.Climate2': {'1': 1},
                 'de.bmw.infotainment.climate.CustomStandklima': {'1': 1},
                 'de.bmw.infotainment.navigation.positioning.Positioning': {'Main_Instance': 128},
+                'de.bmw.body.DoorsWindowsRoofMirrors': {'1': 1},
+                'de.bmw.infotainment.vehicle.A4A': {'1': 1},
                 'de.bmw.body.customdoor.DoorStatus': {'Body_Inst': 1},
                 'de.bmw.body.ghost.NoInstanceIface': {},
             },
@@ -1352,9 +1553,14 @@ def check_pwa_and_manifest_filtering():
         assert proxies.get('de.bmw.infotainment.climate.Climate2') == '*'
         assert proxies.get('de.bmw.infotainment.climate.CustomStandklima') == '*'
         assert proxies.get('de.bmw.infotainment.navigation.positioning.Positioning') == '*', 'Positioning must use wildcard * (Main_Instance, NEVER hardcoded "1"!)'
+        assert proxies.get('de.bmw.body.DoorsWindowsRoofMirrors') == '*', 'DoorsWindowsRoofMirrors must be wildcard *'
+        assert proxies.get('de.bmw.infotainment.vehicle.A4A') == '*', 'A4A must be wildcard *'
         assert proxies.get('de.bmw.body.customdoor.DoorStatus') == '*', 'autoVehicleSignals must read top-level instanceIDs!'
         assert 'de.bmw.body.ghost.NoInstanceIface' not in proxies, 'Interfaces with empty instanceIDs must be skipped!'
         assert 'de.bmw.infotainment.climate.climatemaster.ClimateMaster' not in proxies
+        car_raw = open(os.path.join(ROOT, 'tools/bimmer-link/car-link.js'), encoding='utf-8').read()
+        main_raw = open(os.path.join(ROOT, 'apps/bimmer_link/main.js'), encoding='utf-8').read()
+        assert 'heldProxies.push(px)' in car_raw and 'heldWatches.push(s)' in main_raw, 'V8 GC proxy retention arrays must be present!'
 
         # Verify VietMap-slot `/proc/<pid>/cwd`-only UID discovery in bimmer-link.js!
         bl_src = open(os.path.join(ROOT, 'tools/bimmer-link/bimmer-link.js'), encoding='utf-8').read()

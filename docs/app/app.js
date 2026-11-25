@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.6).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.7).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -1898,8 +1898,8 @@ function renderSecurityPills(tel) {
     pills.push({ cls: 'ok', txt: '🛡️ Chống trộm DWA' });
   } else if (tel.locked === true) {
     pills.push({ cls: 'ok', txt: '🔒 Đã chốt khoá' });
-  } else if (tel.locked === false && !tel._liveEngineRunning && (tel.condition == null || tel.condition < 7)) {
-    pills.push({ cls: 'warn', txt: '🔓 Chưa khoá' });
+  } else if (tel.locked === false) {
+    pills.push({ cls: (!tel._liveEngineRunning && (tel.condition == null || tel.condition < 7)) ? 'warn' : 'ok', txt: '🔓 Chưa khoá' });
   }
   box.innerHTML = pills.map((p) => '<span class="sec-pill ' + p.cls + '">' + escHtml(p.txt) + '</span>').join('');
 }

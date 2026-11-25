@@ -247,6 +247,9 @@ mgu.run({
         function decodeWireBySchema(val, sc) {
             if (val === null || val === undefined || !sc || typeof sc !== 'object') return val;
             const tp = String(sc.t || '');
+            if (/^typedef$/i.test(tp) && sc.e && typeof sc.e === 'object') {
+                return decodeWireBySchema(val, sc.e);
+            }
             if (/^enum$/i.test(tp) && sc.e && typeof sc.e === 'object' && typeof val === 'number') {
                 const names = Object.keys(sc.e);
                 for (let i = 0; i < names.length; i++) {
@@ -302,15 +305,61 @@ mgu.run({
             } catch (e) {}
             return '1';
         }
+        const heldWatches = [];
         if (signals && signals.watch && signals.hasNative && signals.hasNative()) {
             let kombi2Sub = null;
-            signals.watch('de.bmw.infotainment.KombiInterface_2', firstOapInst('de.bmw.infotainment.KombiInterface_2'), {
+            const keepWatch = (iface, handlers, pollMs, onSub) => {
+                signals.watch(iface, firstOapInst(iface), handlers, log, pollMs ? { pollMs } : undefined)
+                    .then((s) => { heldWatches.push(s); if (onSub) onSub(s); })
+                    .catch(() => {});
+            };
+
+            keepWatch('de.bmw.body.DoorsWindowsRoofMirrors', {
+                CentralLockingSystemAndPanelStatus: (v) => recordOapField('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', v),
+                CentralLockingSystemAndPanelStatus2: (v) => recordOapField('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus2', v),
+                CentralLockingAndDoorLock: (v) => recordOapField('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingAndDoorLock', v),
+                PositionSHD: (v) => recordOapField('de.bmw.body.DoorsWindowsRoofMirrors', 'PositionSHD', v),
+            }, 3500);
+
+            keepWatch('de.bmw.infotainment.vehicle.Vehicle2', {
+                statusZVStatus: (v) => recordOapField('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', v),
+                statusDisplayedCCMessage: (v) => recordOapField('de.bmw.infotainment.vehicle.Vehicle2', 'statusDisplayedCCMessage', v),
+                statusOperationBootLidTrigger: (v) => recordOapField('de.bmw.infotainment.vehicle.Vehicle2', 'statusOperationBootLidTrigger', v),
+                statusSHD: (v) => recordOapField('de.bmw.infotainment.vehicle.Vehicle2', 'statusSHD', v),
+            }, 4000);
+
+            keepWatch('de.bmw.infotainment.vehicle.A4A', {
+                statusA4ALids: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusA4ALids', v),
+                statusA4AWindowRegulatorDRD: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusA4AWindowRegulatorDRD', v),
+                statusA4AWindowRegulatorPSD: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusA4AWindowRegulatorPSD', v),
+                statusA4AWindowRegulatorDRDR: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusA4AWindowRegulatorDRDR', v),
+                statusA4AWindowRegulatorPSDR: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusA4AWindowRegulatorPSDR', v),
+                statusSunroof2: (v) => recordOapField('de.bmw.infotainment.vehicle.A4A', 'statusSunroof2', v),
+            }, 4000);
+
+            keepWatch('de.bmw.body.AntiTheft', {
+                statusDwa: (v) => recordOapField('de.bmw.body.AntiTheft', 'statusDwa', v),
+                dWAAlarm: (v) => recordOapField('de.bmw.body.AntiTheft', 'dWAAlarm', v),
+            }, 4500);
+
+            keepWatch('de.bmw.body.doorsandwindows.WindowsRoofMaster', {
+                statusWindowsRoofMasterDRD: (v) => recordOapField('de.bmw.body.doorsandwindows.WindowsRoofMaster', 'statusWindowsRoofMasterDRD', v),
+                statusWindowsRoofMasterPSD: (v) => recordOapField('de.bmw.body.doorsandwindows.WindowsRoofMaster', 'statusWindowsRoofMasterPSD', v),
+                statusWindowsRoofMasterDVDR: (v) => recordOapField('de.bmw.body.doorsandwindows.WindowsRoofMaster', 'statusWindowsRoofMasterDVDR', v),
+                statusWindowsRoofMasterPSDR: (v) => recordOapField('de.bmw.body.doorsandwindows.WindowsRoofMaster', 'statusWindowsRoofMasterPSDR', v),
+            }, 6000);
+
+            keepWatch('de.bmw.infrastructure.VehicleCondition', {
+                VehicleCondition: (v) => recordOapField('de.bmw.infrastructure.VehicleCondition', 'VehicleCondition', v),
+            }, 8000);
+
+            keepWatch('de.bmw.infotainment.KombiInterface_2', {
                 ccList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'ccList', v),
                 newCCMessage: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'newCCMessage', v),
                 cbsDataServiceList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'cbsDataServiceList', v),
-            }, log, { pollMs: 12000 }).then((s) => { kombi2Sub = s; }).catch(() => {});
+            }, 12000, (s) => { kombi2Sub = s; });
 
-            signals.watch('de.bmw.infotainment.checkcontrol.CheckControlMaster', firstOapInst('de.bmw.infotainment.checkcontrol.CheckControlMaster'), {
+            keepWatch('de.bmw.infotainment.checkcontrol.CheckControlMaster', {
                 basicList: (v) => {
                     recordOapField('de.bmw.infotainment.checkcontrol.CheckControlMaster', 'basicList', v);
                     if (kombi2Sub && kombi2Sub.proxy) {
@@ -319,15 +368,15 @@ mgu.run({
                             .catch(() => {});
                     }
                 },
-            }, log, { pollMs: 4500 }).catch(() => {});
+            }, 4500);
 
-            signals.watch('de.bmw.infotainment.KombiIF', firstOapInst('de.bmw.infotainment.KombiIF'), {
+            keepWatch('de.bmw.infotainment.KombiIF', {
                 statusRangeTankStatus: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusRangeTankStatus', v),
                 statusShowTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusShowTimeDate', v),
                 statusTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusTimeDate', v),
-            }, log, { pollMs: 10000 }).catch(() => {});
+            }, 10000);
 
-            signals.watch('de.bmw.infotainment.lsc.LSCDataSink', firstOapInst('de.bmw.infotainment.lsc.LSCDataSink'), {
+            keepWatch('de.bmw.infotainment.lsc.LSCDataSink', {
                 dWAStatus: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'dWAStatus', v),
                 positionWindowRegulatorDRD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorDRD', v),
                 positionWindowRegulatorPSD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorPSD', v),
@@ -335,17 +384,17 @@ mgu.run({
                 positionWindowRegulatorPSDR: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorPSDR', v),
                 positionSHD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionSHD', v),
                 statusExtendedControlsTrunk: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'statusExtendedControlsTrunk', v),
-            }, log, { pollMs: 5000 }).catch(() => {});
+            }, 4500);
 
-            signals.watch('de.bmw.infotainment.vehicle.TPMS', firstOapInst('de.bmw.infotainment.vehicle.TPMS'), {
+            keepWatch('de.bmw.infotainment.vehicle.TPMS', {
                 statusTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyrePressure', v),
                 statusTargetTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTargetTyrePressure', v),
                 statusTyreTemperature: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyreTemperature', v),
-            }, log, { pollMs: 12000 }).catch(() => {});
+            }, 12000);
 
-            signals.watch('de.bmw.infotainment.navigation.positioning.Positioning', firstOapInst('de.bmw.infotainment.navigation.positioning.Positioning'), {
+            keepWatch('de.bmw.infotainment.navigation.positioning.Positioning', {
                 rawPositionData: (v) => recordOapField('de.bmw.infotainment.navigation.positioning.Positioning', 'rawPositionData', v),
-            }, log, { pollMs: 15000 }).catch(() => {});
+            }, 15000);
         }
 
         async function startOapBodyWatchers() {
@@ -366,7 +415,7 @@ mgu.run({
             if (!files.length) return;
 
             const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager|tasu)(\.|$)/i;
-            const wantFieldRe = /(basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusRangeTankStatus|statusShowTimeDate|statusTimeDate|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|currentLocation|rawPositionData|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition|parkingFunctionIncident)/i;
+            const wantFieldRe = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage|basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusRangeTankStatus|statusShowTimeDate|statusTimeDate|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|currentLocation|rawPositionData|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition|parkingFunctionIncident)/i;
             const skipFieldRe = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
             const pollTargets = [];
 
@@ -386,6 +435,7 @@ mgu.run({
 
                 for (let li = 0; li < list.length; li++) {
                     const px = list[li].px;
+                    const gettersOnPx = [];
                     for (let mi = 0; mi < matched.length; mi++) {
                         const fname = matched[mi];
                         const fMeta = fieldsObj[fname] || {};
@@ -396,15 +446,50 @@ mgu.run({
                             scheduleOapBodyFlush();
                         };
                         if (fMeta.event || fMeta.notifier) {
-                            try { signals.on(px, fname, onVal, log); } catch (e) {}
+                            try { await signals.on(px, fname, onVal, log); } catch (e) {}
                         }
                         if (fMeta.getter) {
-                            oapGet(px, fname, 1800).then(onVal).catch(() => {});
-                            if (li === 0) pollTargets.push({ px, fname, onVal, fast: /^(dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) });
+                            const readNow = () => { oapGet(px, fname, 1800).then(onVal).catch(() => {}); };
+                            gettersOnPx.push(readNow);
+                            readNow();
+                            if (li === 0) {
+                                pollTargets.push({
+                                    px, fname, onVal,
+                                    fast: /^(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname),
+                                });
+                            }
                         }
+                    }
+                    if (gettersOnPx.length) {
+                        if (signals.onAvailable) {
+                            signals.onAvailable(px, (avail) => { if (avail) gettersOnPx.forEach((fn) => fn()); }).catch(() => {});
+                        }
+                        setTimeout(() => { gettersOnPx.forEach((fn) => fn()); }, 900);
                     }
                 }
             }
+
+            // Read-only trunk lid status method on MultiConsumerTrunkLidAction (if available)
+            getOapInstances('de.bmw.body.MultiConsumerTrunkLidAction').then((tList) => {
+                if (!tList.length) return;
+                const tPx = tList[0].px;
+                let outSc = null;
+                try {
+                    const tCfg = signals.loadConfig('de.bmw.body.MultiConsumerTrunkLidAction');
+                    outSc = tCfg && tCfg.methods && tCfg.methods.getTrunkLidStatus && (tCfg.methods.getTrunkLidStatus.outSchema || tCfg.methods.getTrunkLidStatus.schema);
+                } catch (e) {}
+                const pollTrunk = () => {
+                    signals.call(tPx, 'getTrunkLidStatus', {}, 1500).then((r) => {
+                        if (r !== undefined && r !== null) {
+                            oapBodyLive['de.bmw.body.MultiConsumerTrunkLidAction.getTrunkLidStatus'] = outSc ? decodeWireBySchema(r, outSc) : r;
+                            scheduleOapBodyFlush();
+                        }
+                    }).catch(() => {});
+                };
+                if (signals.onAvailable) signals.onAvailable(tPx, (a) => { if (a) pollTrunk(); }).catch(() => {});
+                setTimeout(pollTrunk, 950);
+                setInterval(pollTrunk, 4000);
+            }).catch(() => {});
 
             if (pollTargets.length) {
                 setInterval(() => {
@@ -420,7 +505,7 @@ mgu.run({
                             const pt = fastTargets[i];
                             oapGet(pt.px, pt.fname, 1200).then(pt.onVal).catch(() => {});
                         }
-                    }, 4500);
+                    }, 3500);
                 }
             }
         }
@@ -450,6 +535,7 @@ mgu.run({
                     }
                 } catch (e) {}
             }
+            out._oapBodyLive = oapBodyLive;
             return out;
         }
 

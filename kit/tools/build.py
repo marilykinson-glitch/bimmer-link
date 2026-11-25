@@ -367,7 +367,7 @@ def manifest_for(spec):
             if pat.search(name) and _iface_has_instances(name, meta, unit_insts):
                 proxies[name] = '*'
     if spec.get('autoVehicleSignals') and unit_ifaces is not None:
-        vpat = re.compile(r'(door|tuer|flap|klappe|bonnet|hood|tailgate|trunk|centrallock|doorlock|verriegel|checkcontrol|kombiinterface|kombiif|tpms|lscdatasource|exteriorlight|horn|remotecontrol|rcn|\.body\.)', re.I)
+        vpat = re.compile(r'(door|tuer|flap|klappe|bonnet|hood|tailgate|trunk|centrallock|centerlock|doorlock|verriegel|checkcontrol|kombiinterface|kombiif|tpms|lscdatasource|exteriorlight|horn|remotecontrol|remoteservices|controlhmi|a4a|antitheft|windowlifter|windowsroof|rcn|\.body\.)', re.I)
         skip = re.compile(r'(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|steeringwheel|cameraproxy|xview)', re.I)
         added = 0
         for name, meta in sorted(unit_ifaces.items()):

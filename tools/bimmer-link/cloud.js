@@ -156,6 +156,9 @@ class CloudBridge {
         this.enabled = opts.enabled !== false;
 
         this.lastPushHash = '';
+        this.lastSecurityHash = '';
+        this.trailingTimer = null;
+        this.pendingStatePayload = null;
         this.lastMqttPushAt = 0;
         this.lastNtfyPushAt = 0;
         this.lastNtfyPollAt = 0;
@@ -377,10 +380,40 @@ class CloudBridge {
             statePayload.alert,
         ]);
 
+        const securitySig = JSON.stringify([
+            statePayload.telemetry && statePayload.telemetry.locked,
+            statePayload.telemetry && statePayload.telemetry.dwaArmed,
+            statePayload.telemetry && statePayload.telemetry.dwaAlarmActive,
+            statePayload.telemetry && statePayload.telemetry.doorsOpen,
+            statePayload.telemetry && statePayload.telemetry.windowsOpen,
+            statePayload.telemetry && statePayload.telemetry.trunkOpen,
+            statePayload.telemetry && statePayload.telemetry.hoodOpen,
+            statePayload.telemetry && statePayload.telemetry.engineRunning,
+            statePayload.telemetry && statePayload.telemetry.climate1cr && statePayload.telemetry.climate1cr.active,
+        ]);
+        const securityChanged = securitySig !== this.lastSecurityHash;
         const sigChanged = coreSig !== this.lastPushHash;
         if (!force && !sigChanged && (now - this.lastMqttPushAt < 15000)) return false;
-        if (!force && (now - this.lastMqttPushAt < 2500)) return false;
+        if (!force && !securityChanged && (now - this.lastMqttPushAt < 2500)) {
+            this.pendingStatePayload = statePayload;
+            if (!this.trailingTimer) {
+                const waitMs = Math.max(250, 2500 - (now - this.lastMqttPushAt));
+                this.trailingTimer = setTimeout(() => {
+                    this.trailingTimer = null;
+                    const p = this.pendingStatePayload;
+                    this.pendingStatePayload = null;
+                    if (p && !this.stopped) this.publishState(p, false).catch(() => {});
+                }, waitMs);
+            }
+            return false;
+        }
 
+        if (this.trailingTimer) {
+            clearTimeout(this.trailingTimer);
+            this.trailingTimer = null;
+            this.pendingStatePayload = null;
+        }
+        this.lastSecurityHash = securitySig;
         this.lastPushHash = coreSig;
         this.lastMqttPushAt = now;
         const packet = encryptJson(this.identity.aesKey, Object.assign({ t: 'state', at: now }, statePayload));
@@ -545,6 +578,7 @@ class CloudBridge {
 
     stop() {
         this.stopped = true;
+        if (this.trailingTimer) { clearTimeout(this.trailingTimer); this.trailingTimer = null; }
         if (this.snapRetryTimer) { clearTimeout(this.snapRetryTimer); this.snapRetryTimer = null; }
         if (this.mqtt) this.mqtt.stop();
     }

@@ -132,7 +132,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|standfunktion|stationary|precond|parkheat|parkclim|remotestart|independent|departure|abfahrt|timer|zeitvorwahl|zeitschalt|zeitplan|timeswitch|\.lsc\.|\.rcn\./i;
 const NON_CLIMATE_IFACE_RE = /^de\.bmw\.(dass\.parking|parking|infotainment\.(video|navigation|media|audio|tuner|speech|map))\./i;
 const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|standfunktion|parkheat|parkklima|parkclim|airCondition(?:ing)?ParkFunctions|parkingFunctions(?:On|RES)|parkFunction|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departurePlan|departureTime|departureSchedule|departure.*timer|abfahrt|einschaltzeit|switchontime|zeitvorwahl|zeitschalt|zeitplan|timeswitch|timerList|timerSlot|weeklyTimer|standTimer|preconditioningTimer|climatisationTimer|climatizationTimer|timer.*park|park.*timer/i;
-const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Hood|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
+const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|CenterLock|Tailgate|Trunk|Bonnet|Hood|Flap|Body|AntiTheft|A4A|Kombi|Vehicle|CDS|Fuel|Tank)/i;
 const NON_1CR_MEMBER_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|seatAuto|sitzheiz|sitzklima|armSupport|massage|fragrance|scent|ionis|ioniz|aura|acFond|climateFond|2Tier|3Tier|rearClimate|rearWindow|heckscheib|defrost|stratification|surfaceHeating|airDistribution|airBlow|airQuality|sync|functionECO|climateEco|climateSystemOn|intelligentPassenger|telephone|swipe|residualHeat|restwaerme|acSpecialFunction|extendedClimateFunctionalities/i;
 
 function fieldAttrFlags(fm) {
@@ -1253,6 +1253,9 @@ function toBytes(b) {
 function decodeWireVal(val, sc) {
     if (val === null || val === undefined || !sc || typeof sc !== 'object') return val;
     const tp = String(sc.t || '');
+    if (/^typedef$/i.test(tp) && sc.e && typeof sc.e === 'object') {
+        return decodeWireVal(val, sc.e);
+    }
     if (/^enum$/i.test(tp) && sc.e && typeof sc.e === 'object' && typeof val === 'number') {
         const names = Object.keys(sc.e);
         for (let i = 0; i < names.length; i++) {
@@ -1290,7 +1293,8 @@ async function runWorker() {
     const climateLive = {};        // "iface.field" -> latest value
     const bodyLive = {};           // "iface.field" -> latest body/closure value
     const bodyPollers = [];        // [() => void] re-read on refresh_vitals
-    const fastSecurityPollers = []; // [() => void] 4.5s poll for DWA / CentralLock responsiveness
+    const fastSecurityPollers = []; // [() => void] 3.0s poll for DWA / CentralLock / PanelStatus responsiveness
+    const heldProxies = [];        // MUST retain every subscribed someip.node proxy so V8 GC never collects C++ subscriptions!
     const climateProxies = {};     // iface -> { list: [{ inst, proxy, available }], desc, cfgSummary }
     const remoteBodyProxies = {};  // iface -> { list: [{ inst, proxy, available }], desc }
     let climateCatalog = { interfaces: [] };
@@ -1318,6 +1322,24 @@ async function runWorker() {
         return p;
     }
 
+    async function wireProxyEntry(px, inst) {
+        heldProxies.push(px);
+        const entry = { inst, proxy: px, available: !!(px.isAvailable && px.isAvailable()), onAvail: [] };
+        await nativeTick(() => {
+            try {
+                return px.subscribeToAvailability((a) => {
+                    entry.available = !!a;
+                    if (a && entry.onAvail.length) {
+                        const cbs = entry.onAvail.slice();
+                        setImmediate(() => { cbs.forEach((fn) => { try { fn(); } catch (e) {} }); });
+                    }
+                });
+            } catch (e) { return null; }
+        });
+        if (px.isAvailable && px.isAvailable()) entry.available = true;
+        return entry;
+    }
+
     async function openWildcardProxies(ifaceName, maxInst) {
         if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return { list: [], cfg: null };
         const proxies = {};
@@ -1331,9 +1353,7 @@ async function runWorker() {
             const inst = insts[i];
             try {
                 const px = await nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 5000, ifaceName + '@' + inst));
-                const entry = { inst, proxy: px, available: !!(px.isAvailable && px.isAvailable()) };
-                try { px.subscribeToAvailability((a) => { entry.available = !!a; }); } catch (e) {}
-                list.push(entry);
+                list.push(await wireProxyEntry(px, inst));
             } catch (e) {
                 emit({ ev: 'log', level: 'warn', text: 'wildcard proxy ' + ifaceName + '@' + inst + ': ' + e.message });
             }
@@ -1387,9 +1407,7 @@ async function runWorker() {
             const inst = insts[i];
             try {
                 const px = await nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 5000, ifaceName + '@' + inst));
-                const entry = { inst, proxy: px, available: !!(px.isAvailable && px.isAvailable()) };
-                try { px.subscribeToAvailability((a) => { entry.available = !!a; }); } catch (e) {}
-                list.push(entry);
+                list.push(await wireProxyEntry(px, inst));
             } catch (e) {
                 emit({ ev: 'log', level: 'warn', text: 'proxy ' + ifaceName + '@' + inst + ': ' + e.message });
             }
@@ -1418,7 +1436,8 @@ async function runWorker() {
                 if (fnames.indexOf('rawPositionData') >= 0) attrs.rawPositionData = 'rs';
                 try {
                     const opened = await openDynamicProxies(name, attrs, [], [], 2);
-                    opened.list.forEach((item) => {
+                    for (let oi = 0; oi < opened.list.length; oi++) {
+                        const item = opened.list[oi];
                         const px = item.proxy;
                         const onPos = (f, val) => {
                             const c = extractCoords(val, 0);
@@ -1427,22 +1446,28 @@ async function runWorker() {
                             if (f === 'rawPositionData' && tracker.state.pos && tracker.state.pos.source === 'nav' && (Date.now() - tracker.state.pos.at < 60000)) return;
                             pushPatch({ pos: { lat: c.lat, lon: c.lon, street: pl.street, district: pl.district, city: pl.city, source: f === 'currentLocation' ? 'nav' : 'gnss', at: Date.now() } });
                         };
-                        Object.keys(attrs).forEach((f) => {
-                            try { px.subscribe({ name: f, onReceive: (v) => onPos(f, v) }); } catch (e) {}
-                            try { px.getValue(f, 2500).then((v) => onPos(f, v)).catch(() => {}); } catch (e) {}
-                        });
-                    });
+                        const posKeys = Object.keys(attrs);
+                        for (let pk = 0; pk < posKeys.length; pk++) {
+                            const f = posKeys[pk];
+                            await nativeTick(() => px.subscribe({ name: f, onReceive: (v) => onPos(f, v) })).catch(() => {});
+                            const fetchPos = () => { try { px.getValue(f, 2500).then((v) => onPos(f, v)).catch(() => {}); } catch (e) {} };
+                            item.onAvail.push(fetchPos);
+                            if (item.available) fetchPos();
+                            setTimeout(fetchPos, 900);
+                        }
+                    }
                 } catch (e) {}
             } else if (/GnssPositioning$/i.test(name) && bnames.indexOf('positioning') >= 0) {
                 try {
                     const opened = await openDynamicProxies(name, {}, [], ['positioning'], 1);
-                    opened.list.forEach((item) => {
-                        item.proxy.subscribe({ name: 'positioning', onReceive: (v) => {
+                    for (let gi = 0; gi < opened.list.length; gi++) {
+                        const gpx = opened.list[gi].proxy;
+                        await nativeTick(() => gpx.subscribe({ name: 'positioning', onReceive: (v) => {
                             if (tracker.state.pos && (Date.now() - tracker.state.pos.at < 60000)) return;
                             const c = extractCoords(v, 0);
                             if (c) pushPatch({ pos: { lat: c.lat, lon: c.lon, street: '', district: '', city: '', source: 'gnss', at: Date.now() } });
-                        } });
-                    });
+                        } })).catch(() => {});
+                    }
                 } catch (e) {}
             }
         }
@@ -1585,7 +1610,7 @@ async function runWorker() {
         };
 
         const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|\.lsc\.|steeringwheel|cameraproxy|xview|tasu)/i;
-        const BODY_FIELD_RE = /(?:(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|window|fenster|tyrePressure|tirePressure|pressureTyre))|(door|doors|tuer|tueren|flap|flaps|klappe|klappen|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|parkingFunctionIncident)/i;
+        const BODY_FIELD_RE = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|PositionSHD|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage)|(?:(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|window|fenster|tyrePressure|tirePressure|pressureTyre))|(door|doors|tuer|tueren|flap|flaps|klappe|klappen|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|parkingFunctionIncident)/i;
         const BODY_SKIP_FIELD_RE = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
         const targetIfaces = {};
         Object.keys(coreMap).forEach((k) => { targetIfaces[k] = true; });
@@ -1605,7 +1630,7 @@ async function runWorker() {
             if (!iv || !iv.fields) continue;
             const cs = coreMap[name] || null;
             const fnames = Object.keys(iv.fields);
-            const bodyWant = fnames.filter((f) => BODY_FIELD_RE.test(f) && !BODY_SKIP_FIELD_RE.test(f)).slice(0, 40);
+            const bodyWant = fnames.filter((f) => BODY_FIELD_RE.test(f) && !BODY_SKIP_FIELD_RE.test(f)).slice(0, 48);
             const coreWant = cs ? cs.fields.filter((f) => !!iv.fields[f]) : [];
             const merged = {};
             coreWant.concat(bodyWant).forEach((fname) => {
@@ -1619,11 +1644,13 @@ async function runWorker() {
                 if (!opened.list.length) opened = await openDynamicProxies(name, merged, [], [], 3);
                 if (!opened.list.length) continue;
                 const cfgFields = (opened.cfg && opened.cfg.fields) || {};
-                opened.list.forEach((instItem, instIdx) => {
+                for (let instIdx = 0; instIdx < opened.list.length; instIdx++) {
+                    const instItem = opened.list[instIdx];
                     const px = instItem.proxy;
-                    mergedKeys.forEach((fname) => {
+                    for (let mk = 0; mk < mergedKeys.length; mk++) {
+                        const fname = mergedKeys[mk];
                         const cf = cfgFields[fname];
-                        if (opened.cfg && opened.cfg.fields && !cf) return;
+                        if (opened.cfg && opened.cfg.fields && !cf) continue;
                         const flg = fieldAttrFlags(iv.fields[fname]);
                         const canGet = cf && cf.getter !== undefined ? !!cf.getter : flg.getter;
                         const canSub = cf && (cf.event !== undefined || cf.notifier !== undefined) ? !!(cf.event || cf.notifier) : flg.notifier;
@@ -1636,21 +1663,54 @@ async function runWorker() {
                             if (isCore) cs.onField(fname, val);
                             if (isBody) interpretBodyField(name, fname, val, pushPatch, tracker.state);
                         };
-                        if (canSub) { try { px.subscribe({ name: fname, onReceive: handler }); } catch (e) {} }
+                        if (canSub) {
+                            await nativeTick(() => px.subscribe({ name: fname, onReceive: handler })).catch(() => {});
+                        }
                         if (canGet) {
-                            try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {}
+                            const fetchOne = () => { try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {} };
+                            instItem.onAvail.push(fetchOne);
+                            if (instItem.available) fetchOne();
+                            setTimeout(fetchOne, 900);
                             if (instIdx === 0 && (isBody || /\.TPMS$|CheckControl|KombiInterface|KombiIF/i.test(name))) {
                                 bodyPollers.push(() => { try { px.getValue(fname, 1600).then(handler).catch(() => {}); } catch (e) {} });
                             }
-                            if (instIdx === 0 && (/^(basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) || /centralLock|verriegel/i.test(fname))) {
+                            if (instIdx === 0 && (/^(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) || /centralLock|verriegel/i.test(fname))) {
                                 fastSecurityPollers.push(() => { try { px.getValue(fname, 1200).then(handler).catch(() => {}); } catch (e) {} });
                             }
                             if (instIdx === 0 && /KombiInterface_2$/i.test(name) && fname === 'ccList') {
                                 kombiCcPollers.push(() => { try { px.getValue('ccList', 1500).then(handler).catch(() => {}); } catch (e) {} });
                             }
                         }
-                    });
-                });
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // 3b. Read-only trunk lid status method on MultiConsumerTrunkLidAction (`getTrunkLidStatus`)
+        const trunkActName = 'de.bmw.body.MultiConsumerTrunkLidAction';
+        if (db.interfaces && db.interfaces[trunkActName] && db.interfaces[trunkActName].methods && db.interfaces[trunkActName].methods.getTrunkLidStatus) {
+            try {
+                let tOpened = await openWildcardProxies(trunkActName, 1);
+                if (!tOpened.list.length) tOpened = await openDynamicProxies(trunkActName, {}, ['getTrunkLidStatus'], [], 1);
+                if (tOpened.list.length) {
+                    const tItem = tOpened.list[0];
+                    const tMethodCfg = tOpened.cfg && tOpened.cfg.methods && tOpened.cfg.methods.getTrunkLidStatus;
+                    const tOutSc = tMethodCfg && (tMethodCfg.outSchema || tMethodCfg.schema);
+                    const pollTrunkStatus = () => {
+                        try {
+                            tItem.proxy.callMethod('getTrunkLidStatus', {}, 1400).then((rawRes) => {
+                                if (rawRes === undefined || rawRes === null) return;
+                                const val = tOutSc ? decodeWireVal(rawRes, tOutSc) : rawRes;
+                                bodyLive[trunkActName + '.getTrunkLidStatus'] = val;
+                                interpretBodyField(trunkActName, 'getTrunkLidStatus', val, pushPatch, tracker.state);
+                            }).catch(() => {});
+                        } catch (e) {}
+                    };
+                    tItem.onAvail.push(pollTrunkStatus);
+                    if (tItem.available) pollTrunkStatus();
+                    setTimeout(pollTrunkStatus, 950);
+                    fastSecurityPollers.push(pollTrunkStatus);
+                }
             } catch (e) {}
         }
 
@@ -1695,24 +1755,32 @@ async function runWorker() {
                 writableDefs,
             } : null;
             climateProxies[desc.iface] = { list: opened.list, desc, cfgSummary, rawCfg: opened.cfg };
-            opened.list.forEach((instEntry) => {
+            for (let oi = 0; oi < opened.list.length; oi++) {
+                const instEntry = opened.list[oi];
                 const px = instEntry.proxy;
-                desc.fields.forEach((f) => {
+                for (let fi = 0; fi < desc.fields.length; fi++) {
+                    const f = desc.fields[fi];
                     const key = desc.iface + '.' + f.name;
                     const fSc = opened.cfg && opened.cfg.fields && opened.cfg.fields[f.name] && opened.cfg.fields[f.name].schema;
                     const onVal = (rawVal) => {
+                        if (rawVal === undefined || rawVal === null) return;
                         const val = fSc ? decodeWireVal(rawVal, fSc) : rawVal;
                         climateLive[key] = val;
                         if (/\.lsc\./i.test(desc.iface)) {
-                            interpretLscField(f.name, val, pushPatch, tracker.state);
+                            interpretLscField(f.name, val, pushPatch, tracker.state, carUnits);
                         }
                         if (f.roles.length && f.roles[0] !== 'lsc_read') {
                             interpretClimateField(desc.iface, f, val, pushPatch, tracker.state, climateLive);
                         }
                     };
-                    if (f.notifier) { try { px.subscribe({ name: f.name, onReceive: onVal }); } catch (e) {} }
+                    if (f.notifier) {
+                        await nativeTick(() => px.subscribe({ name: f.name, onReceive: onVal })).catch(() => {});
+                    }
                     if (f.getter) {
-                        try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {}
+                        const fetchClim = () => { try { px.getValue(f.name, 2500).then(onVal).catch(() => {}); } catch (e) {} };
+                        instEntry.onAvail.push(fetchClim);
+                        if (instEntry.available) fetchClim();
+                        setTimeout(fetchClim, 900);
                         if (/\.lsc\./i.test(desc.iface) && /pressureTyre|mileageRange|^range$|dataRangeDisplay|fuelSupply|positionWindow|positionSHD|dWAStatus/i.test(f.name)) {
                             bodyPollers.push(() => { try { px.getValue(f.name, 1600).then(onVal).catch(() => {}); } catch (e) {} });
                         }
@@ -1720,8 +1788,8 @@ async function runWorker() {
                             fastSecurityPollers.push(() => { try { px.getValue(f.name, 1200).then(onVal).catch(() => {}); } catch (e) {} });
                         }
                     }
-                });
-            });
+                }
+            }
         }
 
         // 4b. Discover optional writable Remote Body endpoints (CentralLock / LightFlash / Horn / LSCDataSource) on MGU
@@ -2544,7 +2612,7 @@ async function runWorker() {
                 } else if (/^status(Target)?Tyre(Pressure|Temperature)$/i.test(fname)) {
                     interpretTpmsField(fname, val, carUnits, pushPatch, tracker.state);
                 }
-                if (/\.lsc\./i.test(ifn) || /positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|pressureTyre|tyrePressure/i.test(fname)) {
+                if (/\.lsc\./i.test(ifn) || /positionWindow|statusA4AWindowRegulator|statusWindowsRoofMaster|positionSHD|statusSHD|statusSunroof|dWAStatus|statusDwa|dWAAlarm|mileageRange|^range$|dataRangeDisplay|fuelSupply|pressureTyre|tyrePressure/i.test(fname)) {
                     interpretLscField(fname, val, pushPatch, tracker.state, carUnits);
                 }
                 interpretBodyField(ifn, fname, val, pushPatch, tracker.state);
@@ -2650,12 +2718,14 @@ async function runWorker() {
                     openConfigs: cfgMap,
                     live: climateLive,
                     bodyLive,
+                    oapBodyLive: (cmd.params && cmd.params.oapLive && cmd.params.oapLive._oapBodyLive) || null,
                     pinnedProfile: readJsonSafe(PROFILE_PATH),
                 },
             });
         }
     }
 
+    emit({ ev: 'log', level: 'info', text: 'watchers ready: heldProxies=' + heldProxies.length + ', fastPollers=' + fastSecurityPollers.length + ', bodyPollers=' + bodyPollers.length });
     emit({ ev: 'ready', discoveredClimate: climateCatalog.interfaces.length });
     emit({ ev: 'telemetry', state: tracker.state, activeTrip: null, lastTrip: null });
     // Read accurate Fuel %, 12V Voltage, Odometer & Temps once shortly after startup, and refresh non-notifying SOME/IP getters gently
@@ -2668,7 +2738,7 @@ async function runWorker() {
     if (fastSecurityPollers.length) {
         setInterval(() => {
             for (let i = 0; i < fastSecurityPollers.length; i++) fastSecurityPollers[i]();
-        }, 4500);
+        }, 3000);
     }
 }
 
@@ -2735,9 +2805,197 @@ function pickNamedNum(v, propRe, invalids, depth) {
     return null;
 }
 
+/** Negation-safe central locking enum token classifier (`HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` -> true, NEVER false!). */
+function classifyLockToken(rawStr) {
+    if (rawStr === null || rawStr === undefined || typeof rawStr === 'object' || typeof rawStr === 'boolean' || typeof rawStr === 'number') return null;
+    const s = String(rawStr).toUpperCase().trim();
+    if (!s || /UNGUELTIG|UNBEFUELLT|UNPLAUSIBEL|INVALID|UNKNOWN|NICHT_VERFUEGBAR|KEINE_AUSSAGE|KEINE_ANGABE|KEINE_BETAETIGUNG|KEINE_AKTION|NO_ACTION|INIT/.test(s)) {
+        return null;
+    }
+    if (/NICHT_LOGISCH_ENTRIEGELT|NICHT_ENTRIEGELT|NOT_UNLOCKED/.test(s)) return true;
+    if (/NICHT_VERRIEGELT|NICHT_GESICHERT|NOT_LOCKED/.test(s)) return false;
+    if (/(^|_)(LOCKED|SECURED|SELECTIVE_LOCKED|VERRIEGELT|VERRIEGELN|GESICHERT|ZENTRAL_VERRIEGELT|ZENTRALVERRIEGELT|ZENTRAL_GESICHERT|ZENTRALGESICHERT|SICHERN)(_|$)/.test(s)) {
+        return true;
+    }
+    if (/(^|_)(UNLOCKED|SELECTIVE_UNLOCKED|ENTRIEGELT|ENTRIEGELN|FAHRERTUER_ENTRIEGELT)(_|$)/.test(s)) {
+        return false;
+    }
+    return null;
+}
+
+/**
+ * Exact Franca struct interpreter for BMW BN2020 `de.bmw.body.DoorsWindowsRoofMirrors`
+ * (`CentralLockingSystemAndPanelStatus`, `CentralLockingSystemAndPanelStatus2`, `CentralLockingAndDoorLock`)
+ * and `de.bmw.body.MultiConsumerTrunkLidAction.getTrunkLidStatus`.
+ */
+function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
+    if (val === undefined || val === null) return false;
+
+    // 1. MultiConsumerTrunkLidAction.getTrunkLidStatus (`StatusTrunkLidEnum`: PRIMARYLOCKOPEN=0, PRIMARYLOCKCLOSED=1, TRUNKLIDOPENING=2, TRUNKLIDCLOSEING=3)
+    if (/getTrunkLidStatus|statusTrunkLid/i.test(fname)) {
+        const raw = (val && typeof val === 'object')
+            ? (val.trunkLidStatus !== undefined ? val.trunkLidStatus : (val.statusTrunkLid !== undefined ? val.statusTrunkLid : val.status))
+            : val;
+        const sv = String(raw !== undefined ? raw : JSON.stringify(val)).toUpperCase();
+        let trOpen = null;
+        if (/PRIMARYLOCKOPEN|TRUNKLIDOPENING|TRUNKLIDCLOSEING|TRUNKLIDCLOSING/.test(sv)) trOpen = true;
+        else if (/PRIMARYLOCKCLOSED/.test(sv)) trOpen = false;
+        if (trOpen !== null) {
+            const trunkMap = Object.assign({}, curState._trunkMap || {});
+            trunkMap.trunkAction = trOpen;
+            const anyTrunk = Object.keys(trunkMap).some((k) => trunkMap[k]) || !!curState._ccTrunk;
+            const patch = { _trunkMap: trunkMap };
+            if (anyTrunk !== curState.trunkOpen) patch.trunkOpen = anyTrunk;
+            pushPatch(patch);
+            return true;
+        }
+        return false;
+    }
+
+    if (typeof val !== 'object' || Array.isArray(val)) return false;
+
+    const hasPanelProps = (
+        val.statusDoorSwitchDRD !== undefined ||
+        val.statusDoorSwitchPSD !== undefined ||
+        val.statusDoorSwitchDRDR !== undefined ||
+        val.statusDoorSwitchPSDR !== undefined ||
+        val.statusContactBonnet !== undefined ||
+        val.statusContactBootLid !== undefined ||
+        val.statusContactBootLid2 !== undefined ||
+        val.statusContactRearScreenLocal !== undefined ||
+        val.statusPushButtonCentralLockingSystem !== undefined ||
+        val.statusCentralLockingSystemBootlid !== undefined ||
+        val.statusCentralLockingSystem !== undefined
+    );
+    if (!hasPanelProps) return false;
+
+    const patch = {};
+    const doorMap = Object.assign({}, curState._doorMap || {});
+    let doorsTouched = false;
+    const doorDefs = [
+        ['statusDoorSwitchDRD', 'Cửa Tài'],
+        ['statusDoorSwitchPSD', 'Cửa Phụ'],
+        ['statusDoorSwitchDRDR', 'Cửa Sau Trái'],
+        ['statusDoorSwitchPSDR', 'Cửa Sau Phải'],
+    ];
+    for (let i = 0; i < doorDefs.length; i++) {
+        const dv = val[doorDefs[i][0]];
+        if (dv === undefined || dv === null || dv === 2 || dv === 3) continue;
+        const sv = String(dv).toUpperCase();
+        if (/UNGUELTIG|UNPLAUSIBEL|UNBEFUELLT|INVALID/.test(sv)) continue;
+        let isOpen = null;
+        if (dv === 1 || /(^|_)(OFFEN|IST_OFFEN|OPEN|GEOEFFNET)(_|$)/.test(sv)) isOpen = true;
+        else if (dv === 0 || /(^|_)(GESCHLOSSEN|IST_GESCHLOSSEN|CLOSED|ZU)(_|$)/.test(sv)) isOpen = false;
+        if (isOpen !== null && doorMap[doorDefs[i][1]] !== isOpen) {
+            doorMap[doorDefs[i][1]] = isOpen;
+            doorsTouched = true;
+        }
+    }
+    if (doorsTouched) {
+        patch._doorMap = doorMap;
+        const physDoors = Object.keys(doorMap).filter((k) => doorMap[k]);
+        patch.doorsOpen = physDoors;
+    }
+
+    // Bonnet / Hood (`StatusContactBonnet`: MOTORHAUBE_GESCHLOSSEN=0, MOTORHAUBE_OFFEN=1, SIGNAL_UNPLAUSIBEL=2, SIGNAL_UNBEFUELLT=3)
+    if (val.statusContactBonnet !== undefined && val.statusContactBonnet !== null && val.statusContactBonnet !== 2 && val.statusContactBonnet !== 3) {
+        const bsv = String(val.statusContactBonnet).toUpperCase();
+        if (!/UNGUELTIG|UNPLAUSIBEL|UNBEFUELLT|INVALID/.test(bsv)) {
+            let hOpen = null;
+            if (val.statusContactBonnet === 1 || /(^|_)(OFFEN|IST_OFFEN|OPEN|GEOEFFNET)(_|$)/.test(bsv)) hOpen = true;
+            else if (val.statusContactBonnet === 0 || /(^|_)(GESCHLOSSEN|IST_GESCHLOSSEN|CLOSED|ZU)(_|$)/.test(bsv)) hOpen = false;
+            if (hOpen !== null) {
+                patch._hoodSwitchOpen = hOpen;
+                const effHood = hOpen || !!curState._ccHood;
+                if (effHood !== curState.hoodOpen) patch.hoodOpen = effHood;
+            }
+        }
+    }
+
+    // Boot Lid / Split Flap / Rear Glass (`_trunkMap` prevents `statusContactBootLid2=KLAPPE_2_GESCHLOSSEN` from overwriting `statusContactBootLid=HK_IST_OFFEN`!)
+    const trunkMap = Object.assign({}, curState._trunkMap || {});
+    let trunkTouched = false;
+    const trunkDefs = [
+        ['statusContactBootLid', 'boot1'],
+        ['statusContactBootLid2', 'boot2'],
+        ['statusContactRearScreenLocal', 'rearScreen'],
+    ];
+    for (let i = 0; i < trunkDefs.length; i++) {
+        const tv = val[trunkDefs[i][0]];
+        if (tv === undefined || tv === null || tv === 2 || tv === 3) continue;
+        const sv = String(tv).toUpperCase();
+        if (/UNGUELTIG|UNPLAUSIBEL|UNBEFUELLT|INVALID/.test(sv)) continue;
+        let tOpen = null;
+        if (tv === 1 || /(^|_)(OFFEN|IST_OFFEN|OPEN|GEOEFFNET)(_|$)/.test(sv)) tOpen = true;
+        else if (tv === 0 || /(^|_)(GESCHLOSSEN|IST_GESCHLOSSEN|CLOSED|ZU)(_|$)/.test(sv)) tOpen = false;
+        if (tOpen !== null && trunkMap[trunkDefs[i][1]] !== tOpen) {
+            trunkMap[trunkDefs[i][1]] = tOpen;
+            trunkTouched = true;
+        }
+    }
+    if (trunkTouched) {
+        patch._trunkMap = trunkMap;
+        const effTrunk = Object.keys(trunkMap).some((k) => trunkMap[k]) || !!curState._ccTrunk;
+        if (effTrunk !== curState.trunkOpen) patch.trunkOpen = effTrunk;
+    }
+
+    // Central Locking (`statusPushButtonCentralLockingSystem`, `statusCentralLockingSystemBootlid`, and adaptive `statusCentralLockingSystem`)
+    let lockDecision = null;
+    const pb = val.statusPushButtonCentralLockingSystem;
+    if (pb !== undefined && pb !== null && pb !== 0 && pb !== 3) {
+        const pbs = String(pb).toUpperCase();
+        if (pb === 2 || pbs === 'VERRIEGELN' || pbs === 'SICHERN') lockDecision = true;
+        else if (pb === 1 || pbs === 'ENTRIEGELN') lockDecision = false;
+    }
+    const bl = val.statusCentralLockingSystemBootlid;
+    if (lockDecision === null && bl !== undefined && bl !== null && bl !== 3) {
+        const bls = String(bl).toUpperCase();
+        if (bl === 0 || bls === 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT') {
+            lockDecision = true;
+        } else if (bl === 1 || bls === 'HECKKLAPPE_LOGISCH_ENTRIEGELT') {
+            // When DWA is armed outside and only trunk is popped via fob, cabin remains locked; when DWA is disarmed (e.g. inside cabin), bootlid logical unlock tracks ZV unlock!
+            if (!curState.dwaArmed) lockDecision = false;
+        }
+    }
+    const clsy = val.statusCentralLockingSystem;
+    if (typeof clsy === 'number' && clsy >= 1 && clsy <= 12) {
+        if (lockDecision === true) {
+            patch._clsyLockedCode = clsy;
+        } else if (lockDecision === false) {
+            patch._clsyUnlockedCode = clsy;
+        } else {
+            const lkCode = curState._clsyLockedCode;
+            const unCode = curState._clsyUnlockedCode;
+            if (lkCode !== undefined && clsy === lkCode && clsy !== unCode) lockDecision = true;
+            else if (unCode !== undefined && clsy === unCode && clsy !== lkCode && !curState.dwaArmed) lockDecision = false;
+        }
+    }
+    if (lockDecision === true) {
+        patch.locked = true;
+        patch._centralLockLocked = true;
+    } else if (lockDecision === false) {
+        patch._centralLockLocked = false;
+        if (!curState.dwaArmed) patch.locked = false;
+    }
+
+    if (Object.keys(patch).length) pushPatch(patch);
+    return true;
+}
+
 function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (val === undefined || val === null) return;
     const key = iface + '.' + fname;
+
+    // Route DWA & Window/Sunroof body fields directly into interpretLscField
+    if (/^(statusDwa|dWAAlarm|dWAStatus|statusWindowsRoofMaster(DRD|PSD|DVDR|PSDR)|statusA4AWindowRegulator(DRD|PSD|DRDR|PSDR)|PositionSHD|statusSHD|statusSunroof2)$/i.test(fname)) {
+        interpretLscField(fname, val, pushPatch, curState);
+        return;
+    }
+
+    // Exact BN2020 PanelStatus / TrunkLidStatus handler
+    if (interpretPanelAndLids(iface, fname, val, pushPatch, curState)) {
+        return;
+    }
 
     // Remaining driving range (exclude dynamicRange, speedRange, scaleRange, freqRange, etc.)
     if ((/(^|status|_)(range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite)$/i.test(fname) || /^statusRange/i.test(fname)) && !/dynamic|speed|scale|freq|audio/i.test(fname)) {
@@ -2781,17 +3039,37 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/centralLock|doorLock|lockState|lockStatus|^statusLock|zentralverriegelung|verriegelung/i.test(fname) &&
+    if (/centralLock|doorLock|lockState|lockStatus|^statusLock|statusZVStatus|statusA4ALids|zentralverriegelung|verriegelung/i.test(fname) &&
         !/ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|available|bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
-        const s = JSON.stringify(val).toUpperCase();
-        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT|ZENTRALVERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) {
+        let cabinLock = null;
+        let bootLock = null;
+        const scanLock = (kName, vNode, depth) => {
+            if (vNode === null || vNode === undefined || depth > 4) return;
+            if (/ckm|keyMemory|setting|config|tank|charge|lade|seat|sitz|steering|lenk|child|kinder/i.test(kName)) return;
+            if (typeof vNode === 'string') {
+                const tok = classifyLockToken(vNode);
+                if (tok === null) return;
+                if (/bootLid|heckklappe|trunk|tailgate|rearScreen|heckscheibe/i.test(kName)) {
+                    if (bootLock === null) bootLock = tok;
+                } else {
+                    if (tok === true) cabinLock = true;
+                    else if (cabinLock === null) cabinLock = false;
+                }
+            } else if (typeof vNode === 'object' && !Array.isArray(vNode)) {
+                const ks = Object.keys(vNode);
+                for (let i = 0; i < ks.length; i++) scanLock(ks[i], vNode[ks[i]], depth + 1);
+            }
+        };
+        scanLock('', val, 0);
+        const effLock = cabinLock !== null ? cabinLock : bootLock;
+        if (effLock === true) {
             pushPatch({ locked: true, _centralLockLocked: true });
-        } else if (/(^|_|")(UNLOCKED|ENTRIEGELT)(_|$|")/.test(s) && !/LOCKED|VERRIEGELT/.test(s)) {
+        } else if (effLock === false) {
             const patch = { _centralLockLocked: false };
             if (!curState.dwaArmed) patch.locked = false;
             pushPatch(patch);
         }
-        return;
+        // NOTE: Do NOT return early here so combined lock+lid structs (such as `statusA4ALids`) also run `interpretClosureLeaves` below!
     }
 
     if (/parkingFunctionIncident/i.test(fname)) {
@@ -2809,53 +3087,55 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/door|tuer|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|flap|klappe|checkControl/i.test(key) &&
+    if (/door|tuer|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|flap|klappe|lids|checkControl/i.test(key) &&
         !/mirror|spiegel|light|licht|handle|griff|heating|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tank|charge|lade/i.test(fname)) {
         interpretClosureLeaves(key, val, pushPatch, curState);
     }
 }
 
-const CLOSURE_SKIP_KEY_RE = /exhaust|abgas|radiator|kuehler|jalousie|cooling|climate|airFlap|vent|defrost|charge|charging|lade|tank|fuel|sunroof|shd|window|fenster|mirror|spiegel|handle|griff|light|licht|heating|lock|verriegel|available|verfuegbar|coding|codier/i;
-const CLOSURE_INVALID_VAL_RE = /UNGUELTIG|UNBEFUELLT|INVALID|UNKNOWN|UNAVAILABLE|NICHT_VERFUEGBAR|KEINE_ANGABE|NO_VALUE|INIT/i;
-const CLOSURE_CLOSED_VAL_RE = /(^|_)(CLOSED|GESCHLOSSEN|ZU|NOT_OPEN|NICHT_OFFEN|NICHT_GEOEFFNET)(_|$)/i;
-const CLOSURE_OPEN_VAL_RE = /(^|_)(OPEN|OPENED|OFFEN|GEOEFFNET|AJAR|ZWISCHENSTELLUNG|NOT_CLOSED|NICHT_GESCHLOSSEN)(_|$)/i;
+const CLOSURE_SKIP_CHILD_KEY_RE = /exhaust|abgas|radiator|kuehler|jalousie|cooling|climate|airFlap|vent|defrost|charge|charging|lade|tank|fuel|sunroof|shd|window|fenster|mirror|spiegel|handle|griff|light|licht|heating|lock|verriegel|pushButton|hotelMode|softClose|available|verfuegbar|coding|codier/i;
+const CLOSURE_INVALID_VAL_RE = /UNGUELTIG|UNBEFUELLT|UNPLAUSIBEL|INVALID|UNKNOWN|UNAVAILABLE|NICHT_VERFUEGBAR|KEINE_ANGABE|NO_VALUE|INIT/i;
+const CLOSURE_CLOSED_VAL_RE = /(^|_)(CLOSED|GESCHLOSSEN|IST_GESCHLOSSEN|PRIMARYLOCKCLOSED|ZU|NOT_OPEN|NICHT_OFFEN|NICHT_GEOEFFNET)(_|$)/i;
+const CLOSURE_OPEN_VAL_RE = /(^|_)(OPEN|OPENED|OFFEN|IST_OFFEN|PRIMARYLOCKOPEN|TRUNKLIDOPENING|TRUNKLIDCLOSEING|GEOEFFNET|AJAR|ZWISCHENSTELLUNG|NOT_CLOSED|NICHT_GESCHLOSSEN)(_|$)/i;
 
 function friendlyDoorLabel(pathKey) {
-    if (/DRDR|driverRear|rearLeft|backLeft|HL\b|RL\b/i.test(pathKey)) return 'Cửa Sau Trái';
-    if (/PSDR|passengerRear|rearRight|backRight|HR\b|RR\b/i.test(pathKey)) return 'Cửa Sau Phải';
-    if (/DRD\b|driver|frontLeft|VL\b|FL\b/i.test(pathKey)) return 'Cửa Tài';
-    if (/PSD\b|passenger|frontRight|VR\b|FR\b/i.test(pathKey)) return 'Cửa Phụ';
+    if (/DRDR|DVDR|driverRear|rearLeft|backLeft|FATH\b|HL\b|RL\b/i.test(pathKey)) return 'Cửa Sau Trái';
+    if (/PSDR|passengerRear|rearRight|backRight|BFTH\b|HR\b|RR\b/i.test(pathKey)) return 'Cửa Sau Phải';
+    if (/DRD\b|driver|frontLeft|FAT\b|VL\b|FL\b/i.test(pathKey)) return 'Cửa Tài';
+    if (/PSD\b|passenger|frontRight|BFT\b|VR\b|FR\b/i.test(pathKey)) return 'Cửa Phụ';
     return 'Cửa xe';
 }
 
 function interpretClosureLeaves(rootKey, val, pushPatch, curState) {
     const doorMap = Object.assign({}, curState._doorMap || {});
+    const trunkMap = Object.assign({}, curState._trunkMap || {});
     let doorsTouched = false;
-    let nextHood = curState.hoodOpen;
-    let nextTrunk = curState.trunkOpen;
+    let trunkTouched = false;
+    let nextHoodSwitch = curState._hoodSwitchOpen;
+    let hoodTouched = false;
 
-    const visit = (kPath, v, depth) => {
+    const visit = (kPath, leafName, v, depth) => {
         if (v === null || v === undefined || depth > 5) return;
         if (typeof v === 'object') {
             if (Array.isArray(v)) {
-                for (let i = 0; i < v.length; i++) visit(kPath + '[' + i + ']', v[i], depth + 1);
+                for (let i = 0; i < v.length; i++) visit(kPath + '[' + i + ']', leafName, v[i], depth + 1);
             } else {
                 const ks = Object.keys(v);
                 for (let i = 0; i < ks.length; i++) {
-                    if (CLOSURE_SKIP_KEY_RE.test(ks[i])) continue;
-                    visit(kPath + '.' + ks[i], v[ks[i]], depth + 1);
+                    if (CLOSURE_SKIP_CHILD_KEY_RE.test(ks[i])) continue;
+                    visit(kPath + '.' + ks[i], ks[i], v[ks[i]], depth + 1);
                 }
             }
             return;
         }
-        if (CLOSURE_SKIP_KEY_RE.test(kPath)) return;
+        if (leafName && CLOSURE_SKIP_CHILD_KEY_RE.test(leafName)) return;
         const sv = String(v).toUpperCase();
         if (CLOSURE_INVALID_VAL_RE.test(sv)) return;
 
         // CheckControl explicit text/enum identifiers
         if (/checkControl/i.test(kPath) && typeof v === 'string') {
-            if (/FRONTKLAPPE|MOTORHAUBE|BONNET|ENGINE_HOOD|HOOD_OPEN|CA_PO|CAPO/i.test(sv)) nextHood = true;
-            if (/HECKKLAPPE|BOOT_LID|TAILGATE_OPEN|TRUNK_OPEN/i.test(sv)) nextTrunk = true;
+            if (/FRONTKLAPPE|MOTORHAUBE|BONNET|ENGINE_HOOD|HOOD_OPEN|CA_PO|CAPO/i.test(sv)) { nextHoodSwitch = true; hoodTouched = true; }
+            if (/HECKKLAPPE|BOOT_LID|TAILGATE_OPEN|TRUNK_OPEN/i.test(sv)) { trunkMap.ccEnum = true; trunkTouched = true; }
             return;
         }
 
@@ -2864,17 +3144,25 @@ function interpretClosureLeaves(rootKey, val, pushPatch, curState) {
             isClosed = CLOSURE_CLOSED_VAL_RE.test(sv);
             isOpen = !isClosed && CLOSURE_OPEN_VAL_RE.test(sv);
         } else if (typeof v === 'boolean') {
-            if (/open|offen|geoeffnet|ajar/i.test(kPath)) { isOpen = v; isClosed = !v; }
-            else if (/closed|geschlossen/i.test(kPath)) { isClosed = v; isOpen = !v; }
+            if (/open|offen|geoeffnet|ajar/i.test(leafName || kPath)) { isOpen = v; isClosed = !v; }
+            else if (/closed|geschlossen/i.test(leafName || kPath)) { isClosed = v; isOpen = !v; }
         }
         if (!isOpen && !isClosed) return;
 
-        if (/frontFlap|engineFlap|engineHood|motorhaube|frontklappe|bonnet|\bhood\b|hoodContact|hoodSwitch/i.test(kPath)) {
-            nextHood = isOpen;
-        } else if (/rearFlap|tailgate|trunk|bootLid|luggageCompartment|heckklappe|heckdeckel|kofferraum|gepaeckraum|splitDoor/i.test(kPath)) {
-            nextTrunk = isOpen;
-        } else if (/(door|tuer)/i.test(kPath) && !/garage/i.test(kPath)) {
-            const lbl = friendlyDoorLabel(kPath);
+        const targetName = leafName || kPath;
+        if (/frontFlap|frontLid|engineFlap|engineHood|motorhaube|frontklappe|bonnet|\bhood\b|hoodContact|hoodSwitch/i.test(targetName) ||
+            (!leafName && /frontFlap|frontLid|engineFlap|engineHood|motorhaube|frontklappe|bonnet|\bhood\b/i.test(kPath))) {
+            nextHoodSwitch = isOpen;
+            hoodTouched = true;
+        } else if (/rearFlap|rearLid|tailgate|trunk|bootLid|rearScreen|heckscheibe|luggageCompartment|heckklappe|heckdeckel|kofferraum|gepaeckraum|splitDoor/i.test(targetName) ||
+            (!leafName && /rearFlap|rearLid|tailgate|trunk|bootLid|heckklappe|kofferraum/i.test(kPath))) {
+            const slot = leafName || 'trunk';
+            if (trunkMap[slot] !== isOpen) {
+                trunkMap[slot] = isOpen;
+                trunkTouched = true;
+            }
+        } else if (/(door|tuer|DRD|PSD|DRDR|PSDR|DVDR)/i.test(targetName) && !/garage/i.test(kPath)) {
+            const lbl = friendlyDoorLabel(targetName + ' ' + kPath);
             if (doorMap[lbl] !== isOpen) {
                 doorMap[lbl] = isOpen;
                 doorsTouched = true;
@@ -2882,10 +3170,18 @@ function interpretClosureLeaves(rootKey, val, pushPatch, curState) {
         }
     };
 
-    visit(rootKey, val, 0);
+    visit(rootKey, '', val, 0);
     const patch = {};
-    if (nextHood !== curState.hoodOpen) patch.hoodOpen = nextHood;
-    if (nextTrunk !== curState.trunkOpen) patch.trunkOpen = nextTrunk;
+    if (hoodTouched) {
+        patch._hoodSwitchOpen = !!nextHoodSwitch;
+        const effHood = !!nextHoodSwitch || !!curState._ccHood;
+        if (effHood !== curState.hoodOpen) patch.hoodOpen = effHood;
+    }
+    if (trunkTouched) {
+        patch._trunkMap = trunkMap;
+        const effTrunk = Object.keys(trunkMap).some((k) => trunkMap[k]) || !!curState._ccTrunk;
+        if (effTrunk !== curState.trunkOpen) patch.trunkOpen = effTrunk;
+    }
     if (doorsTouched) {
         patch._doorMap = doorMap;
         patch.doorsOpen = Object.keys(doorMap).filter((k) => doorMap[k]);
@@ -3095,18 +3391,19 @@ class CheckControlTracker {
             patch.hoodOpen = true;
             patch._ccHood = true;
         } else if (curState._ccHood) {
-            patch.hoodOpen = false;
+            patch.hoodOpen = !!curState._hoodSwitchOpen;
             patch._ccHood = false;
         }
         if (ccTrunk) {
             patch.trunkOpen = true;
             patch._ccTrunk = true;
         } else if (curState._ccTrunk) {
-            patch.trunkOpen = false;
+            patch.trunkOpen = Object.keys(curState._trunkMap || {}).some((k) => curState._trunkMap[k]);
             patch._ccTrunk = false;
         }
         if (ccDoors.length) {
-            patch.doorsOpen = ccDoors.slice(0, 4);
+            const physDoors = Object.keys(curState._doorMap || {}).filter((k) => curState._doorMap[k]);
+            patch.doorsOpen = physDoors.length ? physDoors : ccDoors.slice(0, 4);
             patch._ccDoors = true;
         } else if (curState._ccDoors) {
             patch.doorsOpen = Object.keys(curState._doorMap || {}).filter((k) => curState._doorMap[k]);
@@ -3196,19 +3493,19 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
         return;
     }
 
-    // 2. 4 Individual Power Windows (`positionWindowRegulatorDRD/PSD/DRDR/PSDR`) & Sunroof (`positionSHD`)
-    if (/^positionWindowRegulator(DRD|PSD|DRDR|PSDR)$/i.test(fname) || /^positionSHD$/i.test(fname)) {
+    // 2. 4 Individual Power Windows (`positionWindowRegulatorDRD/PSD/DRDR/PSDR`, `statusA4AWindowRegulator*`, `statusWindowsRoofMaster*`) & Sunroof (`positionSHD`, `statusSHD`, `statusSunroof2`)
+    if (/^(positionWindowRegulator|statusA4AWindowRegulator|statusWindowsRoofMaster)(DRD|PSD|DRDR|DVDR|PSDR)$/i.test(fname) || /^(positionSHD|statusSHD|statusSunroof2)$/i.test(fname)) {
         const wd = Object.assign({ fl: null, fr: null, rl: null, rr: null, sunroof: null }, curState.windowDetails || {});
         const s = JSON.stringify(val).toUpperCase();
-        if (/^positionSHD$/i.test(fname)) {
+        if (/^(positionSHD|statusSHD|statusSunroof2)$/i.test(fname)) {
             let sr = wd.sunroof;
-            if (/SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|INVALID/.test(s) && !/GESCHLOSSEN|GEOEFFNET|AUSGESTELLT|CLOSED|OPEN/.test(s)) {
+            if (/SIGNAL_UNGUELTIG|SIGNAL_UNBEFUELLT|INVALID/.test(s) && !/GESCHLOSSEN|NICHT_GEOEFFNET|GEOEFFNET|OFFEN|AUSGESTELLT|GEHOBEN|CLOSED|OPEN/.test(s)) {
                 sr = null;
-            } else if (/GEOEFFNET|OPEN/.test(s) && !/GESCHLOSSEN|CLOSED/.test(s)) {
+            } else if (/SHD_OFFEN|SOS_OFFEN|GEOEFFNET|(^|_|")OFFEN(_|"|$)|_OPEN/.test(s) && !/NICHT_GEOEFFNET|NICHT_OFFEN|GESCHLOSSEN|CLOSED/.test(s)) {
                 sr = 'open';
-            } else if (/AUSGESTELLT|HEBEDACH|TILT/.test(s)) {
+            } else if (/AUSGESTELLT|HEBEDACH|MAXIMAL_GEHOBEN|ZWISCHENSTELLUNG|TILT/.test(s) && !/NICHT_GEHOBEN|NICHT_GEOEFFNET|GESCHLOSSEN/.test(s)) {
                 sr = 'tilted';
-            } else if (/GESCHLOSSEN|CLOSED/.test(s)) {
+            } else if (/NICHT_GEOEFFNET|GESCHLOSSEN|CLOSED/.test(s)) {
                 sr = 'closed';
             }
             if (sr !== wd.sunroof) {
@@ -3218,13 +3515,13 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
             }
             return;
         }
-        const mapSlot = { DRD: 'fl', PSD: 'fr', DRDR: 'rl', PSDR: 'rr' };
-        const suffix = fname.replace(/^positionWindowRegulator/i, '').toUpperCase();
-        const slot = mapSlot[suffix];
+        const mapSlot = { DRD: 'fl', PSD: 'fr', DRDR: 'rl', DVDR: 'rl', PSDR: 'rr' };
+        const mSuf = /(DRDR|DVDR|PSDR|DRD|PSD)$/i.exec(fname);
+        const slot = mSuf ? mapSlot[mSuf[1].toUpperCase()] : null;
         if (!slot) return;
         let st = wd[slot];
-        if (/GEOEFFNET|ZWISCHENSTELLUNG|_OPEN|INTERMEDIATE/.test(s) && !/GESCHLOSSEN|CLOSED/.test(s)) st = 'open';
-        else if (/GESCHLOSSEN|CLOSED/.test(s)) st = 'closed';
+        if (/FENSTER_OFFEN|GEOEFFNET|ZWISCHENSTELLUNG|_OPEN|INTERMEDIATE/.test(s) && !/FENSTER_GESCHLOSSEN|GESCHLOSSEN|CLOSED/.test(s)) st = 'open';
+        else if (/FENSTER_GESCHLOSSEN|GESCHLOSSEN|CLOSED/.test(s)) st = 'closed';
         if (st !== wd[slot]) {
             wd[slot] = st;
             const openList = buildOpenWindowsList(wd);
@@ -3233,13 +3530,14 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
         return;
     }
 
-    // 3. DWA Anti-Theft Alarm & Central Lock Arming (`dWAStatus`)
+    // 3. DWA Anti-Theft Alarm & Central Lock Arming (`LSCDataSink.dWAStatus` & `AntiTheft.statusDwa`)
     // Note: Cars without Option 302 DWA permanently report DWA_ENTSCHAERFT even when locked; once DWA_GESCHAERFT or IRS/NG monitoring is seen (or persisted in config.hasDwa302), DWA_ENTSCHAERFT <-> DWA_GESCHAERFT tracks unlock/lock accurately.
-    if (/^dWAStatus$/i.test(fname) && typeof val === 'object') {
+    if (/^(dWAStatus|statusDwa)$/i.test(fname) && typeof val === 'object') {
         const patch = {};
         const arm = String(val.statusDWAArming !== undefined ? val.statusDWAArming : '').toUpperCase();
-        const irs = String(val.statu_IRSNGMonitoring !== undefined ? val.statu_IRSNGMonitoring : '').toUpperCase();
-        const hasIrsActive = irs === 'IRS_UND_NG_UEBERWACHUNG_AKTIV' || irs === 'IRS_UND_NG_IN_REFERENZIERUNGSPHASE' || val.statu_IRSNGMonitoring === 1 || val.statu_IRSNGMonitoring === 2;
+        const irsRaw = val.statu_IRSNGMonitoring !== undefined ? val.statu_IRSNGMonitoring : val.statusIrsNgMonitoring;
+        const irs = String(irsRaw !== undefined ? irsRaw : '').toUpperCase();
+        const hasIrsActive = irs === 'IRS_UND_NG_UEBERWACHUNG_AKTIV' || irs === 'IRS_UND_NG_IN_REFERENZIERUNGSPHASE' || irsRaw === 1 || irsRaw === 2;
         if (arm === 'DWA_GESCHAERFT' || val.statusDWAArming === 1 || hasIrsActive) {
             patch._sawDwaArmed = true;
             patch.dwaArmed = true;
@@ -3372,16 +3670,25 @@ function classifyBodyCmdMember(iface, mname) {
     if (BODY_CMD_SKIP_IFACE_RE.test(iface) || BODY_CMD_SKIP_MEMBER_RE.test(mname)) return [];
     const full = iface + '.' + mname;
     const roles = [];
-    if (/(remoteUnlock|doorUnlock|unlockVehicle|unlockDoor|entriegel)/i.test(full)) {
+    if (/ControlHMI\.RemoteServices$/i.test(full)) {
+        return ['flash_lights', 'horn'];
+    }
+    if (/RemoteServicesLegacy\.requirementsRemoteServices$/i.test(full)) {
+        return ['lock', 'unlock'];
+    }
+    if (/Vehicle2\.remoteControlSignals$/i.test(full)) {
+        return ['flash_lights', 'horn'];
+    }
+    if (/(^|\.)(requestUnlock|remoteUnlock|doorUnlock|unlockVehicle|unlockDoor|entriegel)/i.test(full)) {
         roles.push('unlock');
-    } else if (/(remoteLock|doorLock|lockVehicle|lockDoor|centralLock|zentralverriegel|verriegel)/i.test(full)) {
+    } else if (/(^|\.)(requestLock|requestSecure|remoteLock|doorLock|lockVehicle|lockDoor|remoteControlDoor|centralLock|zentralverriegel|verriegel)/i.test(full)) {
         roles.push('lock');
-        if (!/onlyLock/i.test(mname)) roles.push('unlock');
+        if (!/onlyLock|requestLock$|requestSecure$/i.test(mname)) roles.push('unlock');
     }
     if (/(lightFlash|flashLight|headlightFlash|exteriorLight.*Flash|lichthupe|remoteLight|warnblink|hazardWarn|findMyCar|vehicleFinder.*light)/i.test(full)) {
         roles.push('flash_lights');
     }
-    if (/(remoteHorn|hornBlow|blowHorn|hornSignal|triggerHorn|requestHorn|activateHorn|acousticLocate|signalhorn|hupe)/i.test(full)) {
+    if (/(remoteHorn|hornBlow|blowHorn|hornSignal|triggerHorn|requestHorn|activateHorn|controlHorn|acousticLocate|signalhorn|hupe)/i.test(full)) {
         roles.push('horn');
     }
     return roles;
@@ -3511,19 +3818,35 @@ async function trySendNavigationDestination(db, gen, someip, nativeTick, lat, lo
     return { ok: false, reason: 'rejected', tried };
 }
 
-function pickBodyRoleEnum(td, role, numericEnum) {
+function pickBodyRoleEnum(td, role, numericEnum, fieldName) {
     if (td && td.kind === 'enum' && Array.isArray(td.values) && td.values.length) {
         const vals = td.values.map(String).filter((v) => !ENUM_INVALID_RE.test(v));
-        let re = ENUM_ON_TOKEN_RE;
-        if (role === 'lock') re = /(^|_)(LOCK|SECURED|VERRIEGELN|VERRIEGELT|SCHLIESSEN|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
-        else if (role === 'unlock') re = /(^|_)(UNLOCK|ENTRIEGELN|ENTRIEGELT|OEFFNEN|OPEN|OFF|AUS|INACTIVE|INAKTIV)(_|$)/i;
-        else if (role === 'flash_lights') re = /(^|_)(FLASH|BLINK|LICHTHUPE|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
-        else if (role === 'horn') re = /(^|_)(HORN|HUPE|SOUND|BLOW|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
-        const hit = vals.find((v) => re.test(v));
-        if (hit !== undefined) {
-            if (numericEnum && td.valueMap && td.valueMap[hit] !== undefined) return td.valueMap[hit];
-            return hit;
+        const fn = String(fieldName || '');
+        const emitVal = (hit) => (numericEnum && td.valueMap && td.valueMap[hit] !== undefined) ? td.valueMap[hit] : hit;
+        if (/idFunctionCentralLockingSystemRequest/i.test(fn)) {
+            const hu = vals.find((v) => /^HU$/i.test(v));
+            if (hu !== undefined) return emitVal(hu);
         }
+        if (/requesterId/i.test(fn)) {
+            const wantReq = role === 'unlock' ? /REMOTEDOORUNLOCK|INTELLIGENTPERSONALAGENT/i : /REMOTEDOORLOCK|INTELLIGENTPERSONALAGENT/i;
+            const rq = vals.find((v) => wantReq.test(v));
+            if (rq !== undefined) return emitVal(rq);
+        }
+        if (/requestZVRemoteServiceDoor/i.test(fn)) {
+            const allDoors = vals.find((v) => /GESAMTES_FAHRZEUG|ALL_DOORS|ALLE_TUEREN/i.test(v));
+            if (allDoors !== undefined) return emitVal(allDoors);
+        }
+        if (/requestZVRemoteServiceClient/i.test(fn)) {
+            const cl = vals.find((v) => !/UNGUELTIG|UNBEFUELLT|KEINE/i.test(v));
+            if (cl !== undefined) return emitVal(cl);
+        }
+        let re = ENUM_ON_TOKEN_RE;
+        if (role === 'lock') re = /(^|_)(LOCK|SECURED|VERRIEGELN|VERRIEGELT|SICHERN|SCHLIESSEN|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        else if (role === 'unlock') re = /(^|_)(UNLOCK|ENTRIEGELN|ENTRIEGELT|OEFFNEN|OPEN|OFF|AUS|INACTIVE|INAKTIV)(_|$)/i;
+        else if (role === 'flash_lights') re = /(^|_)(WELCOME_MINUS_LIGHT|WELCOME_LIGHT|FLASH|BLINK|LICHTHUPE|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        else if (role === 'horn') re = /(^|_)(HUPE|HORN|SOUND|BLOW|ON|EIN|ACTIVE|AKTIV|START|ACTIVATE)(_|$)/i;
+        const hit = vals.find((v) => re.test(v));
+        if (hit !== undefined) return emitVal(hit);
     }
     return pickEnumOrBool(td, role !== 'unlock', undefined, numericEnum);
 }
@@ -3532,7 +3855,9 @@ function buildBodyCmdPayload(meta, role, numericEnum) {
     const td = meta && meta.typeDef;
     const nm = (meta && meta.name) || '';
     if (/clientGroupId/i.test(nm)) return 0;
-    if (/duration|count|repeat|cycles/i.test(nm)) return role === 'horn' ? 1 : 2;
+    if (/requestCentralLockingSystemID/i.test(nm)) return 1;
+    if (/pause/i.test(nm)) return 1;
+    if (/duration|count|repeat|repetition|cycles/i.test(nm)) return role === 'horn' ? 1 : 2;
     if (td && td.kind === 'struct' && Array.isArray(td.fields) && td.fields.length) {
         const o = {};
         td.fields.forEach((f) => {
@@ -3540,7 +3865,7 @@ function buildBodyCmdPayload(meta, role, numericEnum) {
         });
         return o;
     }
-    return pickBodyRoleEnum(td, role, numericEnum);
+    return pickBodyRoleEnum(td, role, numericEnum, nm);
 }
 
 function buildBodyCandidates(catalog, role) {
@@ -3601,6 +3926,8 @@ module.exports = {
     normViCheckText,
     buildTimerPayload,
     interpretClimateField,
+    classifyLockToken,
+    interpretPanelAndLids,
     interpretBodyField,
     interpretClosureLeaves,
     interpretLscField,
