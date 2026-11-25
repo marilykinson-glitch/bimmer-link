@@ -667,9 +667,8 @@ def check_car_link_logic_in_jxa():
     if (!cmCand || cmCand.payload.parkingFunctionsAutoMode !== 'AUTO_MODE_ON' || cmCand.payload.timeParkingFunctionsAutoMode !== 15) {{
       throw new Error('ClimateMaster.requestParkingFunctionsOn payload mismatch: ' + JSON.stringify(cmCand));
     }}
-    var lastCand = built.candidates[built.candidates.length - 1];
-    if (lastCand.stage !== 'vent_only' || lastCand.payload.operationIndependentVentilate !== 'STANDLUEFTEN_EIN') {{
-      throw new Error('Last fallback must be STANDLUEFTEN_EIN: ' + JSON.stringify(lastCand));
+    if (built.candidates.some(function(x){{ return x.stage === 'vent_only'; }})) {{
+      throw new Error('start1cr must NEVER include vent_only fallback: ' + JSON.stringify(built.candidates));
     }}
     var vdIdle = C.evaluate1crVerdict(liveIdle, {{}});
     if (vdIdle.active !== false || vdIdle.consentEnabled !== true) throw new Error('Idle must NEVER be active=true');
@@ -939,6 +938,51 @@ def check_car_link_logic_in_jxa():
     var evStop1cr = res1crTrk.update({{ condition: 2, rpm: 0, speed: 0, stage: 'P', climate1cr: {{ active: false, mode: 'off' }} }}, 4060000);
     if (evStart1cr.length !== 0 || evStop1cr.length !== 0 || res1crTrk.activeTrip !== null) {{
       throw new Error('Stationary 1CR falsely triggered parked/trip: ' + JSON.stringify([evStart1cr, evStop1cr, res1crTrk.activeTrip]));
+    }}
+
+    // Test 9 (v0.6.4): condition === 3 (`STANDFUNKTIONEN`) MUST NEVER latch `climate1cr.active = true` or `mode = 'engine_1cr'` when engine is OFF!
+    var cond3Trk = new C.TelemetryTracker();
+    cond3Trk.update({{ condition: 3, rpm: 0 }}, 5000000);
+    if (cond3Trk.state.climate1cr.active !== false) {{
+      throw new Error('condition=3 must NEVER force climate1cr.active=true: ' + JSON.stringify(cond3Trk.state.climate1cr));
+    }}
+    var vdCond3Off = C.evaluate1crVerdict({{
+      'de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions': {{
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusIndependentVentilate: 'STANDLUEFTEN_AUS',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusEngineRunParkFunction: 'REMOTE_START_NICHT_AKTIV'
+      }}
+    }}, {{ condition: 3, rpm: 0 }});
+    if (vdCond3Off.active !== false || vdCond3Off.mode !== 'off' || vdCond3Off.engineRemoteActive !== false) {{
+      throw new Error('condition=3 with AUS fields must be active=false: ' + JSON.stringify(vdCond3Off));
+    }}
+    var vdCond3Vent = C.evaluate1crVerdict({{
+      'de.bmw.infotainment.lsc.LSCDataSink.statusAirConditioningParkFunctions': {{
+        statusParkAirConditioning: 'STANDKLIMATISIERUNG_AUS',
+        statusIndependentVentilate: 'STANDLUEFTEN_EIN',
+        statusParkFunctionAutoMode: 'AUTO_MINUS_MODUS_AUS',
+        statusEngineRunParkFunction: 'REMOTE_START_NICHT_AKTIV'
+      }}
+    }}, {{ condition: 3, rpm: 0 }});
+    if (vdCond3Vent.active !== true || vdCond3Vent.mode !== 'vent_only' || vdCond3Vent.engineRemoteActive !== false) {{
+      throw new Error('condition=3 with STANDLUEFTEN_EIN must stay vent_only (NEVER engine_1cr!): ' + JSON.stringify(vdCond3Vent));
+    }}
+    var startPlanNoVent = C.build1crOrderedCandidates(rcCat, {{}}, true, {{}});
+    if (startPlanNoVent.candidates.some(function(x){{ return x.stage === 'vent_only'; }})) {{
+      throw new Error('start1cr must NEVER silently fall back to vent_only!');
+    }}
+
+    // Test 10 (v0.6.4): Vehicle.centralLockingCKM must NEVER be classified as a body command or corrupt locked=false!
+    if (C.classifyBodyCmdMember('de.bmw.infotainment.vehicle.Vehicle', 'centralLockingCKM').length !== 0) {{
+      throw new Error('centralLockingCKM must NEVER match classifyBodyCmdMember!');
+    }}
+    var ckmState = new C.TelemetryTracker().state;
+    ckmState.locked = true;
+    ckmState.dwaArmed = true;
+    C.interpretBodyField('de.bmw.infotainment.vehicle.Vehicle', 'centralLockingCKM', {{ setting: 'ALLE_TUEREN_ENTRIEGELT' }}, function(p) {{ Object.assign(ckmState, p); }}, ckmState);
+    if (ckmState.locked !== true) {{
+      throw new Error('centralLockingCKM corrupted locked state: ' + JSON.stringify(ckmState));
     }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """

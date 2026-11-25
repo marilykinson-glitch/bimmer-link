@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.3).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.4).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -968,13 +968,17 @@ function onStatePacket(pkt, ts, isLive) {
       const tel = pkt.telemetry || {};
       const c1 = tel.climate1cr || {};
       const prof = pkt.vehicleProfile || {};
+      const stAge = Date.now() - (vehicleData.rxAt || vehicleData.at || 0);
+      const isAwakeNow = stAge >= -300000 && stAge < 95000;
+      const live1cr = !!(c1.active && isAwakeNow && stAge < 16 * 60000);
+      const liveEng = !!(tel.engineRunning && isAwakeNow);
       window.AndroidBridge.onVehicleSummary(JSON.stringify({
         carName: localStorage.getItem('mybmw_car_name') || prof.modelTitle || 'BMW iDrive 7',
-        status: tel.conditionLabel || (tel.engineRunning ? 'Đang nổ máy' : 'Đã đỗ'),
+        status: !isAwakeNow ? 'Đã ngủ 0W' : (live1cr ? 'Đang chạy làm mát' : (liveEng ? 'Đang nổ máy' : 'Đã đỗ')),
         fuelPct: tel.fuelPct,
         rangeKm: tel.rangeKm,
         battery12v: tel.battery12v,
-        active1cr: !!c1.active,
+        active1cr: live1cr,
         timer1cr: c1.timerText || '',
         location: tel.pos ? ([tel.pos.street, tel.pos.district, tel.pos.city].filter(Boolean).join(', ')) : '',
         updatedAt: pkt.at || Date.now(),
@@ -1307,6 +1311,7 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
       mqttWs.send(mqttBuildPublish(identity.mqttTopics.cmd, pkt, false));
       const ackWaitMs = cmd === 'scan_health' ? 16000 : 4800;
       pendingAckTimers[cmdId] = setTimeout(() => {
+        if (!pendingAckTimers[cmdId]) return;
         delete pendingAckTimers[cmdId];
         if (!identity) return;
         openFallbackNtfySockets();
@@ -1315,6 +1320,9 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
           headers: { 'Content-Type': 'text/plain; charset=utf-8' },
           body: pkt,
         }).catch(() => {});
+        if (!queueIfAsleep && !isVehicleAwakeNow()) {
+          showToast('💤 Đầu xe MGU hiện đang ngủ sâu 0W (đã ngắt nguồn sau khi khoá xe) — để tự nổ máy khi xe ngủ hãy đặt Hẹn giờ BDC trước khi tắt máy, hoặc gắn thêm bộ đánh thức MGU-ATM2.', '#ffb020', 9500);
+        }
       }, ackWaitMs);
       showToast('Đã gửi tức thì tới xe — đang chờ phản hồi…', '#38bdf8', 8000);
       return;
@@ -1334,9 +1342,18 @@ async function sendCmd(cmd, arg, queueIfAsleep) {
   }
 }
 
+function isVehicleAwakeNow() {
+  if (!vehicleData) return false;
+  const effectiveAt = vehicleData.rxAt || vehicleData.at || 0;
+  const ageMs = Date.now() - effectiveAt;
+  return ageMs >= -300000 && ageMs < 95000;
+}
+
 function handle1crTap() {
   const tel = (vehicleData && vehicleData.telemetry) || {};
-  const active = !!(tel.climate1cr && tel.climate1cr.active);
+  const effectiveAt = (vehicleData && (vehicleData.rxAt || vehicleData.at)) || 0;
+  const ageMs = Date.now() - effectiveAt;
+  const active = isVehicleAwakeNow() && ageMs < 16 * 60000 && !!(tel.climate1cr && tel.climate1cr.active);
   if (active) {
     sendCmd('stop1cr', {});
     return;
@@ -1637,17 +1654,27 @@ function renderAll() {
   const effectiveStateAt = vehicleData.rxAt || vehicleData.at || 0;
   const ageMs = Date.now() - effectiveStateAt;
   const awake = ageMs >= -300000 && ageMs < 95000;
+  const sleepStale = !awake || ageMs >= 16 * 60000;
   const tel = vehicleData.telemetry || {};
   const c1 = tel.climate1cr || {};
   const valet = vehicleData.valet || {};
   const isLegacy03 = !vehicleData.version || vehicleData.version < '0.4.0';
 
+  // Ground-truth transient states: once MGU cuts power to 0W (`!awake`) or exceeds BMW's 15-min 1CR cutoff, NEVER show ghost running state!
+  const live1crActive = !!(c1.active && !sleepStale);
+  const liveEngineRunning = !!(tel.engineRunning && !sleepStale);
+  // If Option 302 DWA is armed (`DWA_GESCHAERFT`), central locking is physically locked even if CKM settings reported unlocked!
+  const effectiveLocked = tel.dwaArmed === true ? true : tel.locked;
+
   setConnBadge(awake ? 'live' : 'sleep', awake ? 'Trực tuyến' : 'Đang ngủ (Lưu đệm)');
   document.getElementById('updatedLabel').textContent = relTime(effectiveStateAt);
 
+  const atm2Dock = document.getElementById('atm2Dock');
+  if (atm2Dock) atm2Dock.classList.toggle('hidden', !vehicleData.atm2Online);
+
   const hasWinWarn = !!(tel.windowsOpen && tel.windowsOpen.length);
-  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || tel.locked === false);
-  glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (c1.active ? ' climate-on' : ''));
+  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || effectiveLocked === false);
+  glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (live1crActive ? ' climate-on' : ''));
 
   const sec = document.getElementById('securityBanner');
   if (hasDoorWarn) {
@@ -1669,11 +1696,13 @@ function renderAll() {
     sec.className = 'lock-banner';
     const c1Banner = c1.mode === 'engine_1cr'
       ? '🔥 ĐỘNG CƠ 1CR ĐANG NỔ LÀM MÁT'
-      : (c1.mode === 'vent_only' ? '🌬️ QUẠT THÔNG GIÓ CABIN ĐANG CHẠY' : '❄️ ĐANG CHẠY LÀM MÁT TỪ XA (AUTOMODE)');
-    sec.textContent = c1.active ? c1Banner : (tel.engineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN');
+      : (c1.mode === 'vent_only' ? '🌬️ QUẠT THÔNG GIÓ CABIN ĐANG CHẠY' : '❄️ ĐIỀU HOÀ ĐỖ XE ĐANG CHẠY (CHƯA NỔ MÁY)');
+    sec.textContent = live1crActive
+      ? c1Banner
+      : (liveEngineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : (!awake ? '🔒 ĐÃ ĐỖ & NGỦ SÂU 0W AN TOÀN' : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN'));
   }
 
-  renderSecurityPills(tel);
+  renderSecurityPills(Object.assign({}, tel, { locked: effectiveLocked }));
   renderCheckControlAlerts(tel);
 
   const kombiHint = document.getElementById('kombiHint');
@@ -1697,12 +1726,12 @@ function renderAll() {
   document.getElementById('fuelFill').style.width = Math.max(0, Math.min(100, tel.fuelPct || 0)) + '%';
 
   const btnLock = document.getElementById('btnLock');
-  if (btnLock) btnLock.className = 'act-btn' + (tel.locked === true ? ' active-go' : '');
+  if (btnLock) btnLock.className = 'act-btn' + (effectiveLocked === true ? ' active-go' : '');
   const lblLock = document.getElementById('lblLock');
-  if (lblLock) lblLock.textContent = tel.locked === true ? 'Đã khoá' : 'Khoá xe';
+  if (lblLock) lblLock.textContent = effectiveLocked === true ? 'Đã khoá' : 'Khoá xe';
 
   const btnUnlock = document.getElementById('btnUnlock');
-  if (btnUnlock) btnUnlock.className = 'act-btn' + (tel.locked === false ? ' active-warn' : '');
+  if (btnUnlock) btnUnlock.className = 'act-btn' + (effectiveLocked === false ? ' active-warn' : '');
   if (Date.now() >= armUnlockUntil) {
     const lblUnlock = document.getElementById('lblUnlock');
     if (lblUnlock) lblUnlock.textContent = 'Mở khoá';
@@ -1714,26 +1743,25 @@ function renderAll() {
 
   const btn1 = document.getElementById('btn1cr');
   const fan = document.getElementById('fanIcon');
-  btn1.className = 'act-btn' + (c1.active ? ' active-go' : '');
-  fan.classList.toggle('fan-spin', !!c1.active);
+  btn1.className = 'act-btn' + (live1crActive && c1.mode !== 'vent_only' ? ' active-go' : '');
+  fan.classList.toggle('fan-spin', !!(live1crActive && c1.mode !== 'vent_only'));
   if (Date.now() >= arm1crUntil) {
-    document.getElementById('lbl1cr').textContent = c1.active ? 'Tắt 1CR' : 'Đề nổ 1CR';
+    document.getElementById('lbl1cr').textContent = (live1crActive && c1.mode !== 'vent_only') ? 'Tắt 1CR' : 'Đề nổ 1CR';
   }
 
   const btnVent = document.getElementById('btnVent');
-  if (btnVent) {
-    const ventOn = !!(c1.active && c1.mode === 'vent_only');
-    btnVent.className = 'sub-act-btn' + (ventOn ? ' active-go' : '');
-    btnVent.textContent = ventOn ? '🌬️ Tắt quạt' : '🌬️ Thông gió';
-  }
+  const lblVent = document.getElementById('lblVent');
+  const ventOn = !!(live1crActive && c1.mode === 'vent_only');
+  if (btnVent) btnVent.className = 'act-btn' + (ventOn ? ' active-go' : '');
+  if (lblVent) lblVent.textContent = ventOn ? 'Tắt quạt' : 'Thông gió';
 
   const btnV = document.getElementById('btnValet');
   btnV.className = 'sub-act-btn' + (valet.enabled ? ' active-warn' : '');
-  document.getElementById('lblValet').textContent = valet.enabled ? '🛡️ Valet Bật' : '🛡️ Valet Off';
+  document.getElementById('lblValet').textContent = valet.enabled ? '🛡️ Chế độ Valet: Đang Bật' : '🛡️ Chế độ Valet: Tắt';
 
   const hasTimer = c1.timerText && c1.timerText !== 'Tắt';
-  document.getElementById('btnTimerQuick').className = 'sub-act-btn' + (hasTimer ? ' active-go' : '');
-  document.getElementById('lblTimer').textContent = hasTimer ? ('⏰ ' + c1.timerText) : '⏰ Hẹn BDC';
+  document.getElementById('btnTimerQuick').className = 'act-btn' + (hasTimer ? ' active-go' : '');
+  document.getElementById('lblTimer').textContent = hasTimer ? ('Hẹn ' + c1.timerText) : 'Hẹn giờ BDC';
 
   const pm = (vehicleData && vehicleData.parkingMemo) || {};
   const homeMemoEl = document.getElementById('homeParkMemoBadge');
@@ -1751,8 +1779,8 @@ function renderAll() {
   }
   const parkBadge = document.getElementById('parkTimerBadge');
   if (parkBadge) {
-    const parkedSince = pm.parkedAt || (!tel.engineRunning && vehicleData.at ? vehicleData.at : 0);
-    if (!tel.engineRunning && parkedSince > 0 && Date.now() >= parkedSince - 60000) {
+    const parkedSince = pm.parkedAt || (!liveEngineRunning && vehicleData.at ? vehicleData.at : 0);
+    if (!liveEngineRunning && parkedSince > 0 && Date.now() >= parkedSince - 60000) {
       const mins = Math.max(1, Math.round((Date.now() - parkedSince) / 60000));
       const durTxt = mins >= 1440
         ? (Math.floor(mins / 1440) + ' ngày ' + Math.floor((mins % 1440) / 60) + ' giờ')
@@ -1780,9 +1808,9 @@ function renderAll() {
   document.getElementById('mBat').textContent = tel.battery12v != null ? (tel.battery12v + ' V') : 'Ổn định';
   document.getElementById('mTemp').textContent = (tel.ambientC != null ? tel.ambientC + '°C' : '--') + (tel.cabinC != null ? (' / ' + tel.cabinC + '°C') : '');
   document.getElementById('mEngTemp').textContent = (tel.coolantC != null ? tel.coolantC + '°C' : '--') + (tel.oilC != null ? (' / ' + tel.oilC + '°C') : '');
-  const c1BoxText = c1.active
-    ? (c1.mode === 'engine_1cr' ? 'Đang nổ 1CR' : (c1.mode === 'vent_only' ? 'Quạt cabin' : 'Đang chạy'))
-    : (hasTimer ? ('Hẹn ' + c1.timerText) : (c1.discoveredCount ? ('Sẵn sàng (' + c1.discoveredCount + ' cổng)') : 'Sẵn sàng'));
+  const c1BoxText = live1crActive
+    ? (c1.mode === 'engine_1cr' ? 'Đang nổ 1CR' : (c1.mode === 'vent_only' ? 'Quạt cabin' : 'Đang bật AC'))
+    : (hasTimer ? ('Hẹn ' + c1.timerText) : (!awake ? 'Đã ngủ 0W' : (c1.discoveredCount ? ('Sẵn sàng (' + c1.discoveredCount + ' cổng)') : 'Sẵn sàng')));
   document.getElementById('m1cr').textContent = c1BoxText;
 
   if (latestSnap && latestSnap.dataUrl) {
@@ -2586,7 +2614,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.3').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.4').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

@@ -158,13 +158,13 @@ function draw(cv, G, t, v, act) {
         ? 'Đang nổ máy 1CR'
         : (c1.mode === 'vent_only'
             ? 'Quạt cabin đang chạy'
-            : (c1Active ? 'Đang chạy AutoMode' : (c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn ' + c1.timerText) : 'Sẵn sàng kích hoạt')));
+            : (c1Active ? 'AC đỗ xe (Chưa nổ)' : (c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn ' + c1.timerText) : 'Sẵn sàng kích hoạt')));
     const timerStr = c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn BDC: ' + c1.timerText) : 'Hẹn giờ: Tắt';
     infoCard(cv, G, t, rx, cy, cw, ch, {
         key: 'blCard1cr',
         title: 'Đề nổ từ xa 1CR',
         active: c1Active || !!(c1.timerText && c1.timerText !== 'Tắt'),
-        accent: c1Active ? (c1.mode === 'vent_only' ? (t.warn || '#ffb020') : (t.go || '#2fd27a')) : '#a78bfa',
+        accent: c1Active ? (c1.mode === 'engine_1cr' ? (t.go || '#2fd27a') : (t.warn || '#ffb020')) : '#a78bfa',
         headline: c1Head,
         line1: timerStr + (c1.discoveredCount ? (' · ' + c1.discoveredCount + ' cổng Climate') : ''),
         line2: c1.lastResult || 'Hỗ trợ kích trực tiếp & hẹn giờ BDC',

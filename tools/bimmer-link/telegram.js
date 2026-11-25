@@ -25,13 +25,13 @@ function mainKeyboard(pos, valetOn) {
             { text: '🌬️ Thông gió', callback_data: 'ventilate' },
         ],
         [
-            { text: '🔒 Khoá xe', callback_data: 'lock' },
-            { text: '🔓 Mở khoá', callback_data: 'unlock' },
             { text: '📸 Chụp 360°', callback_data: 'snap_now' },
+            { text: '🔄 Trạng thái', callback_data: 'status' },
+            { text: valetOn ? '🛡️ Tắt Valet' : '🛡️ Bật Valet', callback_data: 'valet_toggle' },
         ],
         [
-            { text: valetOn ? '🛡️ Tắt Valet' : '🛡️ Bật Valet', callback_data: 'valet_toggle' },
             { text: '⏰ Hẹn 07:30', callback_data: 'timer_07:30' },
+            { text: '⏰ Hẹn 17:15', callback_data: 'timer_17:15' },
             { text: '❌ Huỷ hẹn', callback_data: 'timer_off' },
         ],
     ];

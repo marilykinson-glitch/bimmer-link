@@ -709,28 +709,30 @@ function evaluate1crVerdict(liveMap, telState) {
     const dwa = lv['de.bmw.infotainment.lsc.LSCDataSink.dWAStatus'] || {};
 
     const isEin = (v) => {
-        if (v === true) return true;
+        if (v === true || v === 2) return true;
         if (typeof v === 'string') return ENUM_ON_TOKEN_RE.test(v) && !ENUM_OFF_TOKEN_RE.test(v) && !ENUM_INVALID_RE.test(v);
         return false;
     };
 
     const engRunRaw = String(lscPf.statusEngineRunParkFunction !== undefined ? lscPf.statusEngineRunParkFunction : '');
     const rcStatus = String(lscPf.statusParkFunctionRemoteControl !== undefined ? lscPf.statusParkFunctionRemoteControl : '');
-    const engineRemoteActive = engRunRaw === 'REMOTE_START_AKTIV' || lscPf.statusEngineRunParkFunction === 2 || tel.condition === 3;
     const autoModeActive = isEin(c2Pf.statusParkFunctionAutoMode) || isEin(lscPf.statusParkFunctionAutoMode) ||
         rcStatus === 'KEIN_FEHLER_AUTOMODE_AKTIV' || lscPf.statusParkFunctionRemoteControl === 8 ||
         cmPf.parkingFunctionsAutoMode === 'AUTO_MODE_ON' || cmPf.parkingFunctionsAutoMode === 2;
     const parkAcActive = isEin(c2Pf.statusParkAirConditioning) || isEin(lscPf.statusParkAirConditioning);
     const ventActive = isEin(c2Pf.statusIndependentVentilate) || isEin(lscPf.statusIndependentVentilate) || isEin(c2Pf.statusBlower);
     const heaterActive = isEin(c2Pf.statusParkHeater) || isEin(lscPf.statusParkHeater);
+    // Ground-truth ONLY: NEVER use `tel.condition === 3` (`STANDFUNKTIONEN`), which stays 3 even when engine is OFF or after climate stops!
+    const engineRemoteActive = engRunRaw === 'REMOTE_START_AKTIV' || lscPf.statusEngineRunParkFunction === 2 ||
+        ((autoModeActive || parkAcActive) && typeof tel.rpm === 'number' && tel.rpm >= 450);
     const duration = typeof lscPf.actualValueDurationParkFunction === 'number' && lscPf.actualValueDurationParkFunction < 250
         ? lscPf.actualValueDurationParkFunction : 0;
 
     let consentEnabled = null;
-    const resStr = String(c2Pf.statusSetupRemoteStart || lscPf.statusSetupRemoteStart || '');
-    if (resStr) {
-        if (isEin(resStr)) consentEnabled = true;
-        else if (ENUM_OFF_TOKEN_RE.test(resStr)) consentEnabled = false;
+    const resVal = c2Pf.statusSetupRemoteStart !== undefined ? c2Pf.statusSetupRemoteStart : lscPf.statusSetupRemoteStart;
+    if (resVal !== undefined && resVal !== null) {
+        if (isEin(resVal)) consentEnabled = true;
+        else if (resVal === 1 || ENUM_OFF_TOKEN_RE.test(String(resVal))) consentEnabled = false;
     } else if (typeof cmRes.remoteEngineStartEnabled === 'boolean') {
         consentEnabled = cmRes.remoteEngineStartEnabled;
     }
@@ -920,16 +922,6 @@ function build1crOrderedCandidates(climateCatalog, liveMap, wantOn, opts) {
                     });
                 }
             }
-
-            // Deferred final stage: Independent cabin blower (`STANDLUEFTEN_EIN`) ONLY if AutoMode / 1CR stayed completely AUS
-            if (hasVent && hasAuto) {
-                ventFallbacks.push({
-                    iface: d.iface, kind: 'setter', name: f.name, stage: 'vent_only',
-                    hasLiveProvider: isLive,
-                    payload: buildDirectPayload(f, true, sm, false, { mode: 'vent_only' }),
-                    altPayload: buildDirectPayload(f, true, sm, true, { mode: 'vent_only' }),
-                });
-            }
         });
 
         (d.methods || []).forEach((m) => {
@@ -952,7 +944,7 @@ function build1crOrderedCandidates(climateCatalog, liveMap, wantOn, opts) {
         });
     });
 
-    return { consentCandidates: consent, candidates: livePrimary.concat(secondary).concat(ventFallbacks) };
+    return { consentCandidates: consent, candidates: livePrimary.concat(secondary) };
 }
 
 /**
@@ -1086,7 +1078,6 @@ class TelemetryTracker {
         }
         if (patch && patch.condition !== undefined && patch.condition !== null) {
             s.conditionLabel = CONDITION_LABELS[patch.condition] || ('Trạng thái ' + patch.condition);
-            if (patch.condition === 3) s.climate1cr.active = true;
         }
         s.engineRunning = (typeof s.rpm === 'number' && s.rpm >= 400) || s.condition === 10;
         s.updatedAt = now;
@@ -1586,12 +1577,14 @@ async function runWorker() {
                 methods: Object.keys(opened.cfg.methods || {}),
                 writableDefs,
             } : null;
-            climateProxies[desc.iface] = { list: opened.list, desc, cfgSummary };
+            climateProxies[desc.iface] = { list: opened.list, desc, cfgSummary, rawCfg: opened.cfg };
             opened.list.forEach((instEntry) => {
                 const px = instEntry.proxy;
                 desc.fields.forEach((f) => {
                     const key = desc.iface + '.' + f.name;
-                    const onVal = (val) => {
+                    const fSc = opened.cfg && opened.cfg.fields && opened.cfg.fields[f.name] && opened.cfg.fields[f.name].schema;
+                    const onVal = (rawVal) => {
+                        const val = fSc ? decodeWireVal(rawVal, fSc) : rawVal;
                         climateLive[key] = val;
                         if (/\.lsc\./i.test(desc.iface)) {
                             interpretLscField(f.name, val, pushPatch, tracker.state);
@@ -1892,8 +1885,11 @@ async function runWorker() {
             const hasLive = Object.keys(climateLive).some((k) => k.indexOf(ifn + '.') === 0);
             if (!hasLive && !holder.list[0].available) continue;
             try {
-                const v = await nativeTick(() => within(holder.list[0].proxy.getValue(fn, 650), 750, fn));
-                if (v !== undefined && v !== null) climateLive[ifn + '.' + fn] = v;
+                const rawV = await nativeTick(() => within(holder.list[0].proxy.getValue(fn, 650), 750, fn));
+                if (rawV !== undefined && rawV !== null) {
+                    const fSc = holder.rawCfg && holder.rawCfg.fields && holder.rawCfg.fields[fn] && holder.rawCfg.fields[fn].schema;
+                    climateLive[ifn + '.' + fn] = fSc ? decodeWireVal(rawV, fSc) : rawV;
+                }
             } catch (e) {}
         }
         const verdict = evaluate1crVerdict(climateLive, tracker.state);
@@ -2629,10 +2625,14 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/centralLock|lockState|^statusLock|zentralverriegelung|verriegelung/i.test(fname) && !/bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
+    if (/centralLock|lockState|^statusLock|zentralverriegelung|verriegelung/i.test(fname) &&
+        !/ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|available|bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
-        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) pushPatch({ locked: true });
-        else if (/(^|_|")(UNLOCKED|ENTRIEGELT)(_|$|")/.test(s) && !/LOCKED|VERRIEGELT/.test(s)) pushPatch({ locked: false });
+        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) {
+            pushPatch({ locked: true });
+        } else if (/(^|_|")(UNLOCKED|ENTRIEGELT)(_|$|")/.test(s) && !/LOCKED|VERRIEGELT/.test(s)) {
+            if (!curState.dwaArmed) pushPatch({ locked: false });
+        }
         return;
     }
 
@@ -3179,7 +3179,7 @@ if (require.main === module && process.argv[2] === 'worker') {
 /* ---------------- Remote Body Control Discovery (Lock / Unlock / Flash Lights / Horn) ---------------- */
 
 const BODY_CMD_SKIP_IFACE_RE = /(\.oap\.|hmi\.|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate|steeringwheel|cameraproxy|xview|nodestatemanager|lifecycle|provisioning)/i;
-const BODY_CMD_SKIP_MEMBER_RE = /(child|kinder|steering|lenk|display|screen|sim|pin|target|freq|fuel|tank|charge|lade|seat|sitz|mirror|spiegel|window|fenster|shd|ambient|interior|innen|backlight|dtc|fault|checkControl)/i;
+const BODY_CMD_SKIP_MEMBER_RE = /(ckm|keyMemory|setting|setup|config|memory|personal|autoLock|quittier|verriegelnBei|child|kinder|steering|lenk|display|screen|sim|pin|target|freq|fuel|tank|charge|lade|seat|sitz|mirror|spiegel|window|fenster|shd|ambient|interior|innen|backlight|dtc|fault|checkControl)/i;
 
 function classifyBodyCmdMember(iface, mname) {
     if (BODY_CMD_SKIP_IFACE_RE.test(iface) || BODY_CMD_SKIP_MEMBER_RE.test(mname)) return [];

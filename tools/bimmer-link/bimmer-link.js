@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.6.3';
+const VERSION = '0.6.4';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -955,14 +955,18 @@ function createService(customCfg) {
 
                 if (verdict.active) {
                     hitLabel = shortName;
-                    if (verdict.mode === 'auto_precond' && !verdict.engineRemoteActive) {
-                        const crankLive = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1800);
-                        const crankCheck = await callWorker('verify_1cr', {
-                            waitMs: 1100,
-                            oapLive: (crankLive && crankLive.liveAfter) || null,
-                        }, 3500);
-                        if (crankCheck && crankCheck.result && crankCheck.result.verdict) {
-                            verdict = crankCheck.result.verdict;
+                    // Give BDC + DME up to ~3.2s to finish starter crank (`REMOTE_START_AKTIV`) so we never misreport engine state!
+                    if (verdict.mode === 'auto_precond' && !verdict.engineRemoteActive && !isVentReq) {
+                        for (let ck = 0; ck < 2 && !verdict.engineRemoteActive; ck++) {
+                            await new Promise((r) => setTimeout(r, 1500));
+                            const crankLive = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1600);
+                            const crankCheck = await callWorker('verify_1cr', {
+                                waitMs: 150,
+                                oapLive: (crankLive && crankLive.liveAfter) || null,
+                            }, 3200);
+                            if (crankCheck && crankCheck.result && crankCheck.result.verdict) {
+                                verdict = crankCheck.result.verdict;
+                            }
                         }
                     }
                     break;
@@ -979,6 +983,7 @@ function createService(customCfg) {
                 }, 3500);
                 if (offRep && offRep.result && offRep.result.verdict) verdict = offRep.result.verdict;
                 S.telemetry.climate1cr.active = !!verdict.active;
+                S.telemetry.climate1cr.mode = verdict.mode || 'off';
                 const stopMsg = verdict.active
                     ? 'Đã gửi lệnh tắt 1CR nhưng hộp điều hoà vẫn báo đang chạy — hãy bấm thêm lần nữa.'
                     : ('Đã tắt đề nổ / làm mát 1CR' + (hitLabel ? (' (' + hitLabel + ')') : '') + '.');
@@ -990,27 +995,28 @@ function createService(customCfg) {
             }
 
             S.telemetry.climate1cr.active = !!verdict.active;
+            S.telemetry.climate1cr.mode = verdict.mode || 'off';
             if (verdict.active) {
                 let startMsg;
+                let msgKind = 'go';
                 if (verdict.mode === 'engine_1cr') {
                     startMsg = '🔥 Đã đề nổ động cơ 1CR & bật điều hoà làm mát cabin (' + hitLabel + ')!';
                 } else if (verdict.mode === 'vent_only') {
-                    startMsg = isVentReq
-                        ? ('🌬️ Đã bật quạt thông gió tươi cabin không nổ máy (' + hitLabel + ')!')
-                        : ('🌬️ Đã bật quạt thông gió cabin (' + hitLabel + '), nhưng động cơ chưa nổ — muốn nổ máy 1CR hãy ra ngoài bấm KHOÁ XE (hoặc kiểm tra FSC 1CR trong DME/BDC).');
+                    startMsg = '🌬️ Đã bật quạt thông gió tươi cabin không nổ máy (' + hitLabel + ')!';
                 } else {
-                    startMsg = '❄️ Đã bật chế độ làm mát từ xa AutoMode (' + hitLabel + ')!';
+                    msgKind = 'warn';
+                    startMsg = '❄️ Điều hoà đỗ xe (AutoMode) đã bật quạt, nhưng ĐỘNG CƠ CHƯA ĐỀ NỔ — hãy kiểm tra xe đã bấm Khoá từ bên ngoài chưa hoặc đã chạm giới hạn 2 lần nổ 1CR liên tiếp của BMW!';
                 }
                 await callWorker('verify_1cr', {
                     waitMs: 0,
                     lastAction: isVentReq ? 'Thông gió quạt cabin' : 'Kích nổ / Làm mát 1CR',
                     lastResult: startMsg.slice(0, 90),
                 }, 2000);
-                tell(startMsg, (verdict.mode === 'vent_only' && !isVentReq) ? 'warn' : 'go');
+                tell(startMsg, msgKind);
                 if (config.botToken && config.chatId) {
                     tg.sendMessage(startMsg, S.telemetry, config.valet.enabled).catch(() => {});
                 }
-                return { ok: true, verified: true, mode: verdict.mode, message: startMsg, detail: { method: hitLabel, verdict, trace } };
+                return { ok: verdict.mode === 'engine_1cr' || isVentReq, verified: true, mode: verdict.mode, message: startMsg, detail: { method: hitLabel, verdict, trace } };
             }
 
             const errText = (lastVerifyRes && lastVerifyRes.explanation) || CarLink.explain1crError(verdict, S.telemetry);

@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.6.3">
+<link rel="stylesheet" href="styles.css?v=0.6.4">
 <title>MyBMW</title>
 </head>
 <body>
@@ -111,8 +111,56 @@
       <div class="fuel-track"><div class="fuel-fill" id="fuelFill"></div></div>
     </div>
 
-    <!-- 5 Circular MyBMW Remote Controls (Official My BMW Layout) -->
+    <!-- 4 Primary Native MGU Controls (100% Working Directly on HU_MGU) -->
     <div class="action-dock">
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btn1cr" onclick="handle1crTap()">
+          <svg id="fanIcon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="2.5"/>
+            <path d="M12 9.5C12 6 14.5 3.5 17 4.5C19.5 5.5 18 9.5 14.5 11"/>
+            <path d="M14.5 12C18 12 20.5 14.5 19.5 17C18.5 19.5 14.5 18 13 14.5"/>
+            <path d="M12 14.5C12 18 9.5 20.5 7 19.5C4.5 18.5 6 14.5 9.5 13"/>
+            <path d="M9.5 12C6 12 3.5 9.5 4.5 7C5.5 4.5 9.5 6 11 9.5"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lbl1cr">Đề nổ 1CR</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnVent" onclick="sendCmd('ventilate')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9.59 4.59A2 2 0 1 1 11 8H2"/>
+            <path d="M12.59 19.41A2 2 0 1 0 14 16H2"/>
+            <path d="M17.73 7.73A2.5 2.5 0 1 1 19.5 12H2"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblVent">Thông gió</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnSnapNow" onclick="sendCmd('snap_now')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+            <circle cx="12" cy="13" r="4"/>
+          </svg>
+        </button>
+        <div class="act-label">Chụp 360°</div>
+      </div>
+
+      <div class="act-item">
+        <button type="button" class="act-btn" id="btnTimerQuick" onclick="openTimerSheet()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="13" r="8"/>
+            <path d="M12 9v4l2.5 2"/>
+            <path d="M9 2h6"/>
+          </svg>
+        </button>
+        <div class="act-label" id="lblTimer">Hẹn giờ BDC</div>
+      </div>
+    </div>
+
+    <!-- Optional MGU-ATM2 Hardware Controls (Auto-shown only when MGU-ATM2 module is connected) -->
+    <div id="atm2Dock" class="action-dock hidden" style="margin-top:2px">
       <div class="act-item">
         <button type="button" class="act-btn" id="btnLock" onclick="handleLockTap()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -155,27 +203,12 @@
         </button>
         <div class="act-label" id="lblHorn">Bấm còi</div>
       </div>
-
-      <div class="act-item">
-        <button type="button" class="act-btn" id="btn1cr" onclick="handle1crTap()">
-          <svg id="fanIcon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="2.5"/>
-            <path d="M12 9.5C12 6 14.5 3.5 17 4.5C19.5 5.5 18 9.5 14.5 11"/>
-            <path d="M14.5 12C18 12 20.5 14.5 19.5 17C18.5 19.5 14.5 18 13 14.5"/>
-            <path d="M12 14.5C12 18 9.5 20.5 7 19.5C4.5 18.5 6 14.5 9.5 13"/>
-            <path d="M9.5 12C6 12 3.5 9.5 4.5 7C5.5 4.5 9.5 6 11 9.5"/>
-          </svg>
-        </button>
-        <div class="act-label" id="lbl1cr">Đề nổ 1CR</div>
-      </div>
     </div>
 
-    <!-- 4 Quick Pro Utility Pills -->
+    <!-- 2 Wide Pro Utility Pills (Zero Truncation) -->
     <div class="quick-subdock">
-      <button type="button" class="sub-act-btn" id="btnVent" onclick="sendCmd('ventilate')">🌬️ Thông gió</button>
-      <button type="button" class="sub-act-btn" onclick="sendCmd('snap_now')">📸 Chụp 360°</button>
-      <button type="button" class="sub-act-btn" id="btnValet" onclick="sendCmd('valet_toggle')"><span id="lblValet">🛡️ Valet Off</span></button>
-      <button type="button" class="sub-act-btn" id="btnTimerQuick" onclick="openTimerSheet()"><span id="lblTimer">⏰ Hẹn BDC</span></button>
+      <button type="button" class="sub-act-btn" id="btnValet" onclick="sendCmd('valet_toggle')"><span id="lblValet">🛡️ Chế độ Valet: Tắt</span></button>
+      <button type="button" class="sub-act-btn" onclick="sendCmd('status')">🔄 Cập nhật thông số</button>
     </div>
 
     <!-- Timer Quick Card (collapsible) -->
@@ -558,6 +591,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.6.3"></script>
+<script src="app.js?v=0.6.4"></script>
 </body>
 </html>

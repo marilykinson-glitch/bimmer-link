@@ -296,7 +296,7 @@ mgu.run({
 
             const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager)(\.|$)/i;
             const wantFieldRe = /(basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|lockState|^statusLock|verriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition)/i;
-            const skipFieldRe = /(dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
+            const skipFieldRe = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
             const pollTargets = [];
 
             for (let fi = 0; fi < files.length; fi++) {
@@ -369,8 +369,13 @@ mgu.run({
                 try {
                     const list = await getOapInstances(ifn);
                     if (!list.length) continue;
-                    const val = await oapGet(list[0].px, fn, 650).catch(() => null);
-                    if (val !== null && val !== undefined) out[ifn + '.' + fn] = val;
+                    let cfg = null;
+                    try { cfg = signals.loadConfig(ifn); } catch (e) {}
+                    const fSc = cfg && cfg.fields && cfg.fields[fn] && cfg.fields[fn].schema;
+                    const rawVal = await oapGet(list[0].px, fn, 650).catch(() => null);
+                    if (rawVal !== null && rawVal !== undefined) {
+                        out[ifn + '.' + fn] = fSc ? decodeWireBySchema(rawVal, fSc) : rawVal;
+                    }
                 } catch (e) {}
             }
             return out;
