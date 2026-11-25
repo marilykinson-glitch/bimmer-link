@@ -414,9 +414,9 @@ mgu.run({
             }
             if (!files.length) return;
 
-            const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager|tasu)(\.|$)/i;
-            const wantFieldRe = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage|basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusRangeTankStatus|statusShowTimeDate|statusTimeDate|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|currentLocation|rawPositionData|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition|parkingFunctionIncident)/i;
-            const skipFieldRe = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
+            const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager|tasu|telephone|conntelesync|connectivity|telematic|esim|esimproxy|rollsroyce|fondccu|visionaccess|doormenubutton|resetlogic|centrallockingsystemgw|caraccess|remoteservices|controlhmi)(\.|$)/i;
+            const wantFieldRe = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage|basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusRangeTankStatus|statusShowTimeDate|statusTimeDate|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|currentLocation|rawPositionData|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|doorLock|verriegel|zentralverriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition|parkingFunctionIncident)/i;
+            const skipFieldRe = /(^request|^remoteControl|windowControl|DriveRequest|windowAvailable|windowComfort|ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
             const pollTargets = [];
 
             for (let fi = 0; fi < files.length; fi++) {
@@ -455,7 +455,7 @@ mgu.run({
                             if (li === 0) {
                                 pollTargets.push({
                                     px, fname, onVal,
-                                    fast: /^(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname),
+                                    fast: /^(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLockingStatus|statusCentralLocking)/i.test(fname),
                                 });
                             }
                         }

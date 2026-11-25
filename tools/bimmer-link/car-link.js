@@ -1073,6 +1073,8 @@ class TelemetryTracker {
                 updatedAt: 0,
             },
             locked: null,
+            lockMode: null,
+            unlockedDoors: [],
             dwaArmed: null,
             dwaAlarmActive: false,
             dwaAlarmReason: '',
@@ -1609,9 +1611,9 @@ async function runWorker() {
             },
         };
 
-        const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|\.lsc\.|steeringwheel|cameraproxy|xview|tasu)/i;
-        const BODY_FIELD_RE = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|PositionSHD|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage)|(?:(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|window|fenster|tyrePressure|tirePressure|pressureTyre))|(door|doors|tuer|tueren|flap|flaps|klappe|klappen|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|parkingFunctionIncident)/i;
-        const BODY_SKIP_FIELD_RE = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
+        const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate|telephone|connectivity|telematic|remoteservices)|\.lsc\.|conntelesync|esim|rollsroyce|fondccu|visionaccess|doormenubutton|resetlogic|centrallockingsystemgw|caraccess|controlhmi|steeringwheel|cameraproxy|xview|tasu)/i;
+        const BODY_FIELD_RE = /(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|PositionSHD|statusZVStatus|statusA4ALids|statusA4AWindowRegulator|statusSunroof|statusWindowsRoofMaster|windowStatus|statusDwa\b|dWAAlarm|statusDisplayedCCMessage|statusActiveCCMessage)|(?:(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|window|fenster|tyrePressure|tirePressure|pressureTyre))|(door|doors|tuer|tueren|flap|flaps|klappe|klappen|centralLock|doorLock|verriegel|zentralverriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|parkingFunctionIncident)/i;
+        const BODY_SKIP_FIELD_RE = /(^request|^remoteControl|windowControl|DriveRequest|windowAvailable|windowComfort|ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
         const targetIfaces = {};
         Object.keys(coreMap).forEach((k) => { targetIfaces[k] = true; });
         allIfaces.forEach((k) => {
@@ -1674,7 +1676,7 @@ async function runWorker() {
                             if (instIdx === 0 && (isBody || /\.TPMS$|CheckControl|KombiInterface|KombiIF/i.test(name))) {
                                 bodyPollers.push(() => { try { px.getValue(fname, 1600).then(handler).catch(() => {}); } catch (e) {} });
                             }
-                            if (instIdx === 0 && (/^(CentralLockingSystemAndPanelStatus|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) || /centralLock|verriegel/i.test(fname))) {
+                            if (instIdx === 0 && /^(CentralLockingSystemAndPanelStatus|CentralLockingSystemAndPanelStatus2|CentralLockingAndDoorLock|statusZVStatus|statusA4ALids|statusDwa|dWAStatus|basicList|centralLockingStatus|statusCentralLocking)$/i.test(fname)) {
                                 fastSecurityPollers.push(() => { try { px.getValue(fname, 1200).then(handler).catch(() => {}); } catch (e) {} });
                             }
                             if (instIdx === 0 && /KombiInterface_2$/i.test(name) && fname === 'ccList') {
@@ -2805,22 +2807,68 @@ function pickNamedNum(v, propRe, invalids, depth) {
     return null;
 }
 
-/** Negation-safe central locking enum token classifier (`HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` -> true, NEVER false!). */
-function classifyLockToken(rawStr) {
+/**
+ * Classify BMW Central Locking (`ZV` / `CLSY`) enum strings into 4 deterministic modes:
+ *   - `'secured'`  : deadlocked from outside (`GESICHERT`, `SECURED`)
+ *   - `'locked'`   : all 4 doors locked (`VERRIEGELT`, `LOCKED`)
+ *   - `'selective'`: 1–3 doors unlocked while remaining doors stay locked (`SELEKTIV_ENTRIEGELT`, `FAHRERTUER_ENTRIEGELT`, `SELECTIVE_LOCKED`, `SELECTIVE_UNLOCKED`)
+ *   - `'unlocked'` : all doors unlocked (`ENTRIEGELT`, `UNLOCKED`)
+ * Never treats `HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` (trunk electric solenoid idle) as cabin lock!
+ */
+function classifyLockMode(rawStr) {
     if (rawStr === null || rawStr === undefined || typeof rawStr === 'object' || typeof rawStr === 'boolean' || typeof rawStr === 'number') return null;
     const s = String(rawStr).toUpperCase().trim();
-    if (!s || /UNGUELTIG|UNBEFUELLT|UNPLAUSIBEL|INVALID|UNKNOWN|NICHT_VERFUEGBAR|KEINE_AUSSAGE|KEINE_ANGABE|KEINE_BETAETIGUNG|KEINE_AKTION|NO_ACTION|INIT/.test(s)) {
+    if (!s || /UNGUELTIG|UNBEFUELLT|UNPLAUSIBEL|INVALID|UNKNOWN|NICHT_VERFUEGBAR|KEINE_AUSSAGE|KEINE_ANGABE|KEINE_BETAETIGUNG|KEINE_AKTION|NO_ACTION|INIT|HECKKLAPPE|BOOTLID/.test(s)) {
         return null;
     }
-    if (/NICHT_LOGISCH_ENTRIEGELT|NICHT_ENTRIEGELT|NOT_UNLOCKED/.test(s)) return true;
-    if (/NICHT_VERRIEGELT|NICHT_GESICHERT|NOT_LOCKED/.test(s)) return false;
-    if (/(^|_)(LOCKED|SECURED|SELECTIVE_LOCKED|VERRIEGELT|VERRIEGELN|GESICHERT|ZENTRAL_VERRIEGELT|ZENTRALVERRIEGELT|ZENTRAL_GESICHERT|ZENTRALGESICHERT|SICHERN)(_|$)/.test(s)) {
-        return true;
+    if (/NICHT_VERRIEGELT|NICHT_GESICHERT|NOT_LOCKED/.test(s)) return 'unlocked';
+    if (/NICHT_ENTRIEGELT|NOT_UNLOCKED/.test(s)) return 'locked';
+    if (/(SELEKTIV_ENTRIEGELT|SELEKTIVENTRIEGELT|SELEKTIV_VERRIEGELT|FAHRERTUER_ENTRIEGELT|FAT_ENTRIEGELT|NUR_FAHRERTUER_ENTRIEGELT|SELECTIVE_UNLOCKED|SELECTIVELY_UNLOCKED|SELECTIVE_LOCKED|SEMI_LOCKED|PARTIALLY_LOCKED|DRIVER_DOOR_UNLOCKED)/.test(s)) {
+        return 'selective';
     }
-    if (/(^|_)(UNLOCKED|SELECTIVE_UNLOCKED|ENTRIEGELT|ENTRIEGELN|FAHRERTUER_ENTRIEGELT)(_|$)/.test(s)) {
-        return false;
+    if (/(^|_)(GESICHERT|ZENTRAL_GESICHERT|ZENTRALGESICHERT|DOPPELVERRIEGELT|SECURED|DEADLOCKED)(_|$)/.test(s)) {
+        return 'secured';
+    }
+    if (/(^|_)(VERRIEGELT|VERRIEGELN|ZENTRAL_VERRIEGELT|ZENTRALVERRIEGELT|ALLE_VERRIEGELT|LOCKED|ALL_LOCKED|SICHERN)(_|$)/.test(s)) {
+        return 'locked';
+    }
+    if (/(^|_)(ENTRIEGELT|ENTRIEGELN|ZENTRAL_ENTRIEGELT|ZENTRALENTRIEGELT|ALLE_ENTRIEGELT|UNLOCKED|ALL_UNLOCKED)(_|$)/.test(s)) {
+        return 'unlocked';
     }
     return null;
+}
+
+function classifyLockToken(rawStr) {
+    const m = classifyLockMode(rawStr);
+    if (m === 'locked' || m === 'secured') return true;
+    if (m === 'unlocked' || m === 'selective') return false;
+    return null;
+}
+
+function applyLockModeToPatch(patch, mode, curState, selDoors) {
+    if (mode === 'secured' || mode === 'locked') {
+        patch.locked = true;
+        patch.lockMode = curState.dwaArmed ? 'secured' : mode;
+        patch._centralLockLocked = true;
+        patch._selectiveSinceLock = false;
+        patch.unlockedDoors = [];
+    } else if (mode === 'selective') {
+        const list = (Array.isArray(selDoors) && selDoors.length)
+            ? selDoors.slice(0, 3)
+            : ((Array.isArray(curState.unlockedDoors) && curState.unlockedDoors.length) ? curState.unlockedDoors.slice(0, 3) : ['Cửa Tài']);
+        patch.locked = false;
+        patch.lockMode = 'selective';
+        patch._centralLockLocked = false;
+        patch.unlockedDoors = list;
+    } else if (mode === 'unlocked') {
+        patch._centralLockLocked = false;
+        patch._selectiveSinceLock = false;
+        patch.unlockedDoors = [];
+        if (!curState.dwaArmed) {
+            patch.locked = false;
+            patch.lockMode = 'unlocked';
+        }
+    }
 }
 
 /**
@@ -2864,13 +2912,15 @@ function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
         val.statusContactBootLid2 !== undefined ||
         val.statusContactRearScreenLocal !== undefined ||
         val.statusPushButtonCentralLockingSystem !== undefined ||
-        val.statusCentralLockingSystemBootlid !== undefined ||
-        val.statusCentralLockingSystem !== undefined
+        val.statusCentralLockingSystem !== undefined ||
+        val.controlCentralLockingSystem !== undefined
     );
     if (!hasPanelProps) return false;
 
     const patch = {};
-    const doorMap = Object.assign({}, curState._doorMap || {});
+    const prevDoorMap = curState._doorMap || {};
+    const doorMap = Object.assign({}, prevDoorMap);
+    const newlyOpened = [];
     let doorsTouched = false;
     const doorDefs = [
         ['statusDoorSwitchDRD', 'Cửa Tài'],
@@ -2879,6 +2929,7 @@ function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
         ['statusDoorSwitchPSDR', 'Cửa Sau Phải'],
     ];
     for (let i = 0; i < doorDefs.length; i++) {
+        const lbl = doorDefs[i][1];
         const dv = val[doorDefs[i][0]];
         if (dv === undefined || dv === null || dv === 2 || dv === 3) continue;
         const sv = String(dv).toUpperCase();
@@ -2886,14 +2937,17 @@ function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
         let isOpen = null;
         if (dv === 1 || /(^|_)(OFFEN|IST_OFFEN|OPEN|GEOEFFNET)(_|$)/.test(sv)) isOpen = true;
         else if (dv === 0 || /(^|_)(GESCHLOSSEN|IST_GESCHLOSSEN|CLOSED|ZU)(_|$)/.test(sv)) isOpen = false;
-        if (isOpen !== null && doorMap[doorDefs[i][1]] !== isOpen) {
-            doorMap[doorDefs[i][1]] = isOpen;
-            doorsTouched = true;
+        if (isOpen !== null) {
+            if (isOpen && !prevDoorMap[lbl]) newlyOpened.push(lbl);
+            if (doorMap[lbl] !== isOpen) {
+                doorMap[lbl] = isOpen;
+                doorsTouched = true;
+            }
         }
     }
+    const physDoors = Object.keys(doorMap).filter((k) => doorMap[k]);
     if (doorsTouched) {
         patch._doorMap = doorMap;
-        const physDoors = Object.keys(doorMap).filter((k) => doorMap[k]);
         patch.doorsOpen = physDoors;
     }
 
@@ -2939,43 +2993,94 @@ function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
         if (effTrunk !== curState.trunkOpen) patch.trunkOpen = effTrunk;
     }
 
-    // Central Locking (`statusPushButtonCentralLockingSystem`, `statusCentralLockingSystemBootlid`, and adaptive `statusCentralLockingSystem`)
-    let lockDecision = null;
+    // Central Locking (`statusPushButtonCentralLockingSystem`, edge-only `controlCentralLockingSystem`, `statusCentralLockingSystem`, and interior door-handle selective unlock!)
+    // NOTE: `statusCentralLockingSystemBootlid` (`HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT`) is intentionally NEVER read here because it stays 0 whenever the trunk button is idle, even when the car is unlocked!
+    let nextMode = null;
+    let explicitFullUnlock = false;
+    let selDoors = Array.isArray(curState.unlockedDoors) ? curState.unlockedDoors.slice() : [];
+
     const pb = val.statusPushButtonCentralLockingSystem;
     if (pb !== undefined && pb !== null && pb !== 0 && pb !== 3) {
         const pbs = String(pb).toUpperCase();
-        if (pb === 2 || pbs === 'VERRIEGELN' || pbs === 'SICHERN') lockDecision = true;
-        else if (pb === 1 || pbs === 'ENTRIEGELN') lockDecision = false;
-    }
-    const bl = val.statusCentralLockingSystemBootlid;
-    if (lockDecision === null && bl !== undefined && bl !== null && bl !== 3) {
-        const bls = String(bl).toUpperCase();
-        if (bl === 0 || bls === 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT') {
-            lockDecision = true;
-        } else if (bl === 1 || bls === 'HECKKLAPPE_LOGISCH_ENTRIEGELT') {
-            // When DWA is armed outside and only trunk is popped via fob, cabin remains locked; when DWA is disarmed (e.g. inside cabin), bootlid logical unlock tracks ZV unlock!
-            if (!curState.dwaArmed) lockDecision = false;
+        if ((pb === 2 || pbs === 'VERRIEGELN' || pbs === 'SICHERN') && physDoors.length === 0) {
+            nextMode = 'locked';
+        } else if (pb === 1 || pbs === 'ENTRIEGELN') {
+            nextMode = 'unlocked';
+            explicitFullUnlock = true;
         }
     }
+
+    const ctr = val.controlCentralLockingSystem;
+    if (typeof ctr === 'number' && ctr >= 0 && ctr <= 15) {
+        if (nextMode === null && curState._lastCtrClsy !== undefined && curState._lastCtrClsy !== ctr) {
+            if (ctr === 1) { nextMode = 'unlocked'; explicitFullUnlock = true; }
+            else if (ctr === 2 && physDoors.length === 0) { nextMode = 'locked'; }
+            else if (ctr === 4 && physDoors.length === 0) { nextMode = 'secured'; }
+        }
+        patch._lastCtrClsy = ctr;
+    }
+
+    // Interior lock -> pull 1 door handle (`newlyOpened` while previously locked/selective & not DWA-armed & central Unlock button was NOT pressed):
+    // That door unlocks mechanically while the other 3 doors remain locked (`selective`)!
+    const wasCabinLockedOrSel = (curState.locked === true || curState.lockMode === 'locked' || curState.lockMode === 'selective') && !curState.dwaArmed;
+    if (!explicitFullUnlock && nextMode === null && wasCabinLockedOrSel && (newlyOpened.length > 0 || (curState.locked === true && physDoors.length > 0))) {
+        const addList = newlyOpened.length ? newlyOpened : physDoors;
+        for (let i = 0; i < addList.length; i++) {
+            if (selDoors.indexOf(addList[i]) < 0) selDoors.push(addList[i]);
+        }
+        if (selDoors.length >= 4) {
+            nextMode = 'unlocked';
+            selDoors = [];
+        } else {
+            nextMode = 'selective';
+            patch._selectiveSinceLock = true;
+        }
+    }
+
     const clsy = val.statusCentralLockingSystem;
     if (typeof clsy === 'number' && clsy >= 1 && clsy <= 12) {
-        if (lockDecision === true) {
+        const prevClsy = curState._lastClsy;
+        patch._lastClsy = clsy;
+        if (nextMode === 'locked' || nextMode === 'secured') {
             patch._clsyLockedCode = clsy;
-        } else if (lockDecision === false) {
+        } else if (nextMode === 'unlocked' && explicitFullUnlock) {
             patch._clsyUnlockedCode = clsy;
-        } else {
-            const lkCode = curState._clsyLockedCode;
-            const unCode = curState._clsyUnlockedCode;
-            if (lkCode !== undefined && clsy === lkCode && clsy !== unCode) lockDecision = true;
-            else if (unCode !== undefined && clsy === unCode && clsy !== lkCode && !curState.dwaArmed) lockDecision = false;
+        } else if (nextMode === 'selective') {
+            patch._clsySelectiveCode = clsy;
+        } else if (nextMode === null) {
+            // Even when `_hasStringZv` is active, a real hardware `ST_CLSY -> 1 (ENTRIEGELT)` edge with all doors closed means all 4 doors just unlocked (e.g. keyfob unlock from selective mode)
+            if (curState._hasStringZv) {
+                if (clsy === 1 && prevClsy !== undefined && prevClsy !== 1 && physDoors.length === 0) {
+                    nextMode = 'unlocked';
+                }
+            } else {
+                const lkCode = curState._clsyLockedCode;
+                const unCode = curState._clsyUnlockedCode;
+                const selCode = curState._clsySelectiveCode;
+                if (clsy === 1 || (unCode !== undefined && clsy === unCode && clsy !== lkCode)) {
+                    if (curState._selectiveSinceLock && (prevClsy === undefined || prevClsy === clsy)) {
+                        nextMode = 'selective';
+                    } else {
+                        nextMode = 'unlocked';
+                    }
+                } else if (selCode !== undefined && clsy === selCode && clsy !== lkCode && (prevClsy === undefined || prevClsy === clsy)) {
+                    nextMode = 'selective';
+                } else if ((lkCode !== undefined && clsy === lkCode) || (clsy >= 2 && clsy <= 12)) {
+                    if (physDoors.length === 0 && (!curState._selectiveSinceLock || (prevClsy !== undefined && prevClsy !== clsy) || (curState.speed || 0) >= 18)) {
+                        nextMode = curState.dwaArmed ? 'secured' : 'locked';
+                    }
+                }
+            }
         }
     }
-    if (lockDecision === true) {
-        patch.locked = true;
-        patch._centralLockLocked = true;
-    } else if (lockDecision === false) {
-        patch._centralLockLocked = false;
-        if (!curState.dwaArmed) patch.locked = false;
+
+    if (physDoors.length > 0 && (nextMode === 'locked' || nextMode === 'secured')) {
+        nextMode = physDoors.length < 4 ? 'selective' : 'unlocked';
+        if (!selDoors.length) selDoors = physDoors.slice();
+    }
+
+    if (nextMode !== null) {
+        applyLockModeToPatch(patch, nextMode, curState, selDoors);
     }
 
     if (Object.keys(patch).length) pushPatch(patch);
@@ -2984,6 +3089,10 @@ function interpretPanelAndLids(iface, fname, val, pushPatch, curState) {
 
 function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (val === undefined || val === null) return;
+    // Ignore non-vehicle infotainment/telematics lock states (Telephone.lockState, ConnTeleSync.lockState, EsimProxy.lockStatus, RollsRoyce, etc.)
+    if (/(telephone|conntelesync|connectivity|telematic|esim|rollsroyce|fondccu|visionaccess|doormenubutton|resetlogic|centrallockingsystemgw|caraccess|remoteservices|controlhmi)/i.test(iface)) {
+        return;
+    }
     const key = iface + '.' + fname;
 
     // Route DWA & Window/Sunroof body fields directly into interpretLscField
@@ -3039,39 +3148,6 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/centralLock|doorLock|lockState|lockStatus|^statusLock|statusZVStatus|statusA4ALids|zentralverriegelung|verriegelung/i.test(fname) &&
-        !/ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|available|bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
-        let cabinLock = null;
-        let bootLock = null;
-        const scanLock = (kName, vNode, depth) => {
-            if (vNode === null || vNode === undefined || depth > 4) return;
-            if (/ckm|keyMemory|setting|config|tank|charge|lade|seat|sitz|steering|lenk|child|kinder/i.test(kName)) return;
-            if (typeof vNode === 'string') {
-                const tok = classifyLockToken(vNode);
-                if (tok === null) return;
-                if (/bootLid|heckklappe|trunk|tailgate|rearScreen|heckscheibe/i.test(kName)) {
-                    if (bootLock === null) bootLock = tok;
-                } else {
-                    if (tok === true) cabinLock = true;
-                    else if (cabinLock === null) cabinLock = false;
-                }
-            } else if (typeof vNode === 'object' && !Array.isArray(vNode)) {
-                const ks = Object.keys(vNode);
-                for (let i = 0; i < ks.length; i++) scanLock(ks[i], vNode[ks[i]], depth + 1);
-            }
-        };
-        scanLock('', val, 0);
-        const effLock = cabinLock !== null ? cabinLock : bootLock;
-        if (effLock === true) {
-            pushPatch({ locked: true, _centralLockLocked: true });
-        } else if (effLock === false) {
-            const patch = { _centralLockLocked: false };
-            if (!curState.dwaArmed) patch.locked = false;
-            pushPatch(patch);
-        }
-        // NOTE: Do NOT return early here so combined lock+lid structs (such as `statusA4ALids`) also run `interpretClosureLeaves` below!
-    }
-
     if (/parkingFunctionIncident/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
         const patch = {};
@@ -3090,6 +3166,43 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
     if (/door|tuer|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|flap|klappe|lids|checkControl/i.test(key) &&
         !/mirror|spiegel|light|licht|handle|griff|heating|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tank|charge|lade/i.test(fname)) {
         interpretClosureLeaves(key, val, pushPatch, curState);
+    }
+
+    if (/(\.body\.|\.vehicle\.|\.infrastructure\.Vehicle)/i.test(iface) &&
+        /centralLock|doorLock|statusZVStatus|statusA4ALids|zentralverriegelung|verriegelung/i.test(fname) &&
+        !/^request|ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|available|bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
+        let cabinMode = null;
+        const scanLock = (kName, vNode, depth) => {
+            if (vNode === null || vNode === undefined || depth > 4) return;
+            if (/ckm|keyMemory|setting|config|tank|charge|lade|seat|sitz|steering|lenk|child|kinder|bootLid|heckklappe|trunk|tailgate|rearScreen|heckscheibe/i.test(kName)) return;
+            if (typeof vNode === 'string') {
+                const m = classifyLockMode(vNode);
+                if (!m) return;
+                if (m === 'selective') cabinMode = 'selective';
+                else if (m === 'secured' && cabinMode !== 'selective') cabinMode = 'secured';
+                else if (m === 'locked' && !cabinMode) cabinMode = 'locked';
+                else if (m === 'unlocked' && !cabinMode) cabinMode = 'unlocked';
+            } else if (typeof vNode === 'object' && !Array.isArray(vNode)) {
+                const ks = Object.keys(vNode);
+                for (let i = 0; i < ks.length; i++) scanLock(ks[i], vNode[ks[i]], depth + 1);
+            }
+        };
+        scanLock('', val, 0);
+        if (cabinMode !== null) {
+            const prevRawZv = curState._lastRawZvMode;
+            const zPatch = { _hasStringZv: true, _lastRawZvMode: cabinMode };
+            const openCnt = (curState.doorsOpen && curState.doorsOpen.length) || 0;
+            let effMode = cabinMode;
+            if ((cabinMode === 'locked' || cabinMode === 'secured') && openCnt > 0) {
+                effMode = openCnt < 4 ? 'selective' : 'unlocked';
+            } else if (cabinMode === 'locked' && curState._selectiveSinceLock && prevRawZv === 'locked' && (curState.speed || 0) < 18) {
+                effMode = 'selective';
+            } else if (cabinMode === 'unlocked' && curState._selectiveSinceLock && (openCnt > 0 || prevRawZv === 'unlocked')) {
+                effMode = 'selective';
+            }
+            applyLockModeToPatch(zPatch, effMode, curState, openCnt > 0 && !(curState.unlockedDoors && curState.unlockedDoors.length) ? curState.doorsOpen : undefined);
+            pushPatch(zPatch);
+        }
     }
 }
 
@@ -3542,13 +3655,20 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
             patch._sawDwaArmed = true;
             patch.dwaArmed = true;
             patch.locked = true;
+            patch.lockMode = 'secured';
+            patch._selectiveSinceLock = false;
+            patch.unlockedDoors = [];
         } else if (arm === 'DWA_ENTSCHAERFT' || val.statusDWAArming === 0) {
             if (curState._sawDwaArmed) {
                 patch.dwaArmed = false;
-                // Only transition `locked = false` on the unlock edge (when DWA was previously armed -> disarmed)
-                // so locking doors while sitting inside the cabin (where BMW keeps DWA disarmed) is never overwritten!
-                if (curState.dwaArmed === true && !curState._centralLockLocked) {
+                // Transition `locked = false` ONLY on the exterior disarm edge (`curState.dwaArmed === true` -> `false`)
+                // so locking doors while sitting inside the cabin (`curState.dwaArmed` already `false`) is NEVER overwritten!
+                if (curState.dwaArmed === true) {
+                    patch._centralLockLocked = false;
                     patch.locked = false;
+                    patch.lockMode = 'unlocked';
+                    patch._selectiveSinceLock = false;
+                    patch.unlockedDoors = [];
                 }
             }
         }
@@ -3926,6 +4046,7 @@ module.exports = {
     normViCheckText,
     buildTimerPayload,
     interpretClimateField,
+    classifyLockMode,
     classifyLockToken,
     interpretPanelAndLids,
     interpretBodyField,

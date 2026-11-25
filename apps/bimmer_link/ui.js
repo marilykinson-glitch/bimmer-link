@@ -180,12 +180,15 @@ function draw(cv, G, t, v, act) {
     const fuelBat = 'Xăng: ' + (tel.fuelPct != null ? tel.fuelPct + '%' : '--') +
         (tel.rangeKm != null ? (' (' + tel.rangeKm + ' km)') : '') +
         ' · Bình: ' + (tel.battery12v != null ? (tel.battery12v + 'V') : 'OK');
-    const parkedUnlocked = tel.locked === false && !tel.engineRunning && (tel.condition == null || tel.condition < 7);
+    const isSelective = tel.lockMode === 'selective';
+    const parkedUnlocked = (tel.locked === false && !tel.engineRunning && (tel.condition == null || tel.condition < 7)) || isSelective;
     const hasOpen = (tel.doorsOpen && tel.doorsOpen.length) || (tel.windowsOpen && tel.windowsOpen.length) || tel.trunkOpen || tel.hoodOpen || parkedUnlocked;
     const dst = v.destination;
     const tireSummary = (tel.tires && tel.tires.fl != null)
         ? ('Lốp: ' + tel.tires.fl + '/' + tel.tires.fr + ' bar')
         : ('Máy ' + (tel.coolantC != null ? tel.coolantC + '°C' : '--') + ' · Ngoài ' + (tel.ambientC != null ? tel.ambientC + '°C' : '--'));
+    const uDoors = (Array.isArray(tel.unlockedDoors) && tel.unlockedDoors.length) ? tel.unlockedDoors : ['Cửa Tài'];
+    const selText = 'Mở chốt ' + (uDoors.length === 1 ? uDoors[0] : (uDoors.length + ' cửa')) + ' (' + Math.max(1, 4 - uDoors.length) + ' cửa khoá)';
     const card2Line2 = dst
         ? ('Điểm đến App: ' + dst.name)
         : (hasOpen
@@ -194,8 +197,8 @@ function draw(cv, G, t, v, act) {
                 : (tel.trunkOpen
                     ? 'Chú ý: Cốp sau đang mở!'
                     : ((tel.doorsOpen && tel.doorsOpen.length)
-                        ? ('Chú ý: Mở ' + tel.doorsOpen.join(', '))
-                        : ((tel.windowsOpen && tel.windowsOpen.length) ? ('Mở: ' + tel.windowsOpen.join(', ')) : 'Chú ý: Cửa xe đang mở khoá'))))
+                        ? ('Chú ý: Mở ' + tel.doorsOpen.join(', ') + (isSelective ? (' (' + Math.max(1, 4 - uDoors.length) + ' cửa khoá)') : ''))
+                        : ((tel.windowsOpen && tel.windowsOpen.length) ? ('Mở: ' + tel.windowsOpen.join(', ')) : (isSelective ? ('Chú ý: ' + selText) : 'Chú ý: Cửa xe đang mở khoá')))))
             : ('4 cửa, kính & capo kín · ' + tireSummary));
     infoCard(cv, G, t, rx + cw + gap, cy, cw, ch, {
         key: 'blCardCar',

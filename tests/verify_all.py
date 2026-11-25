@@ -1080,17 +1080,22 @@ def check_car_link_logic_in_jxa():
       throw new Error('allowUnlockedAutoVent plan mismatch: ' + JSON.stringify(cabVentPlan.candidates));
     }}
 
-    // Test 12 (v0.6.7): Real-car WBA71AG050CF37906 `DoorsWindowsRoofMirrors.CentralLockingSystemAndPanelStatus`,
-    // `MultiConsumerTrunkLidAction.getTrunkLidStatus`, `Vehicle2.statusZVStatus`, `A4A.statusA4ALids`, `WindowsRoofMaster`,
-    // `AntiTheft.statusDwa`, and Head-Unit RemoteBody payloads (`CentralLockingSystemGW` HU=2, `CenterLockingService`, `ControlHMI`)!
-    if (C.classifyLockToken('HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT') !== true ||
-        C.classifyLockToken('HECKKLAPPE_LOGISCH_ENTRIEGELT') !== false ||
+    // Test 12 (v0.6.7 + v0.6.8): Real-car WBA71AG050CF37906 `DoorsWindowsRoofMirrors.CentralLockingSystemAndPanelStatus`,
+    // ZERO 3-second lock/unlock flicker (`HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` & `Telephone.lockState` / `EsimProxy.lockStatus` ignored!),
+    // AND Selective 1-of-4 Door Unlock (`bấm lock trong xe -> mở Cửa Tài ra nhưng 3 cửa kia còn lock` => `lockMode: 'selective'`)!
+    if (C.classifyLockMode('HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT') !== null ||
+        C.classifyLockMode('HECKKLAPPE_LOGISCH_ENTRIEGELT') !== null ||
+        C.classifyLockMode('VERRIEGELT') !== 'locked' ||
+        C.classifyLockMode('GESICHERT') !== 'secured' ||
+        C.classifyLockMode('FAHRERTUER_ENTRIEGELT') !== 'selective' ||
+        C.classifyLockMode('SELEKTIV_ENTRIEGELT') !== 'selective' ||
+        C.classifyLockMode('SELECTIVE_LOCKED') !== 'selective' ||
+        C.classifyLockMode('ENTRIEGELT') !== 'unlocked' ||
         C.classifyLockToken('VERRIEGELT') !== true ||
-        C.classifyLockToken('GESICHERT') !== true ||
-        C.classifyLockToken('ENTRIEGELT') !== false ||
+        C.classifyLockToken('FAHRERTUER_ENTRIEGELT') !== false ||
         C.classifyLockToken('KEINE_BETAETIGUNG') !== null ||
         C.classifyLockToken('SIGNAL_UNGUELTIG') !== null) {{
-      throw new Error('classifyLockToken negation/enum handling failed');
+      throw new Error('classifyLockMode / classifyLockToken handling failed');
     }}
 
     var g30Panel = new C.TelemetryTracker();
@@ -1107,14 +1112,17 @@ def check_car_link_logic_in_jxa():
       statusContactBootLid2: 'KLAPPE_2_GESCHLOSSEN',
       statusContactBonnet: 'MOTORHAUBE_GESCHLOSSEN',
       statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
-      statusCentralLockingSystemBootlid: 'HECKKLAPPE_LOGISCH_ENTRIEGELT'
+      statusCentralLockingSystemBootlid: 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT'
     }};
     var feedBody = function(ifn, fn, payload) {{
       C.interpretBodyField(ifn, fn, payload, function(p) {{ g30Panel.update(p, 7000000); }}, g30Panel.state);
     }};
+    // CRITICAL ANTI-FLICKER CHECK #1: Even when `statusCentralLockingSystemBootlid` is `HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` (0 at idle),
+    // unlocked car (`clsy=1` / `ZVStatus=ENTRIEGELT`) MUST STAY `locked === false` with ZERO jump to `true`!
+    feedBody('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', {{ statusZV: 'ENTRIEGELT' }});
     feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', basePanel);
-    if (g30Panel.state.locked !== false || g30Panel.state.doorsOpen.length !== 0 || g30Panel.state.hoodOpen !== false || g30Panel.state.trunkOpen !== false) {{
-      throw new Error('G30 idle unlocked PanelStatus mismatch: ' + JSON.stringify(g30Panel.state));
+    if (g30Panel.state.locked !== false || g30Panel.state.lockMode !== 'unlocked' || g30Panel.state.doorsOpen.length !== 0 || g30Panel.state.hoodOpen !== false || g30Panel.state.trunkOpen !== false) {{
+      throw new Error('G30 idle unlocked anti-flicker failed: ' + JSON.stringify(g30Panel.state));
     }}
 
     // Open Driver Door + Rear Right Door + Bonnet + BootLid (while statusContactBootLid2 stays KLAPPE_2_GESCHLOSSEN!)
@@ -1139,35 +1147,77 @@ def check_car_link_logic_in_jxa():
       throw new Error('G30 close doors/hood/trunk PanelStatus failed: ' + JSON.stringify(g30Panel.state));
     }}
 
-    // Sitting inside cabin (`DWA_ENTSCHAERFT`): press interior Lock button -> `HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT` + `VERRIEGELN`
+    // Sitting inside cabin (`DWA_ENTSCHAERFT`): press interior Lock button -> `VERRIEGELN` + `ZVStatus = VERRIEGELT`
     feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
       statusCentralLockingSystem: 4,
       statusPushButtonCentralLockingSystem: 'VERRIEGELN',
       statusCentralLockingSystemBootlid: 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT'
     }}));
-    if (g30Panel.state.locked !== true || g30Panel.state._centralLockLocked !== true) {{
+    feedBody('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', {{ statusZV: 'VERRIEGELT' }});
+    if (g30Panel.state.locked !== true || g30Panel.state.lockMode !== 'locked' || g30Panel.state._centralLockLocked !== true) {{
       throw new Error('G30 interior lock button failed: ' + JSON.stringify(g30Panel.state));
     }}
 
-    // Release interior button (`KEINE_BETAETIGUNG`) + periodic 3.0s `DWA_ENTSCHAERFT` poll -> MUST remain locked=true!
+    // CRITICAL ANTI-FLICKER CHECK #2: Release interior button + poll `Telephone.lockState='UNLOCKED'`, `ConnTeleSync.lockState='UNLOCKED'`,
+    // `EsimProxy.lockStatus='UNLOCKED'`, `CentralLockingSystemGW`, and `dWAStatus='DWA_ENTSCHAERFT'` -> MUST STAY `locked === true`!
     feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
       statusCentralLockingSystem: 4,
       statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
       statusCentralLockingSystemBootlid: 'HECKKLAPPE_NICHT_LOGISCH_ENTRIEGELT'
     }}));
+    feedBody('de.bmw.infotainment.Telephone', 'lockState', 'UNLOCKED');
+    feedBody('de.bmw.infotainment.connectivity.conntelematicssync.ConnTeleSync', 'lockState', 'UNLOCKED');
+    feedBody('de.bmw.infotainment.telematic.esimproxy.EsimProxy', 'lockStatus', 'UNLOCKED');
+    feedBody('de.bmw.body.centrallockingsystem.CentralLockingSystemGW', 'requestCentralLockingSystem', {{ centralLockingSystemRequest: 'ENTRIEGELN' }});
     C.interpretLscField('dWAStatus', {{ statusDWAArming: 'DWA_ENTSCHAERFT', statusDWAAlarmReason: 'KEIN_ALARM' }}, function(p) {{ g30Panel.update(p, 7003000); }}, g30Panel.state);
-    if (g30Panel.state.locked !== true || g30Panel.state._centralLockLocked !== true) {{
-      throw new Error('G30 interior lock lost after button release / DWA poll: ' + JSON.stringify(g30Panel.state));
+    if (g30Panel.state.locked !== true || g30Panel.state.lockMode !== 'locked') {{
+      throw new Error('Bogus Telephone/EsimProxy/DWA poll caused lock flicker: ' + JSON.stringify(g30Panel.state));
     }}
 
-    // Pull interior door handle twice to exit (button stays KEINE_BETAETIGUNG, bootlid becomes HECKKLAPPE_LOGISCH_ENTRIEGELT & door opens) -> locked=false!
+    // USER SCENARIO (v0.6.8): Locked inside cabin -> driver pulls interior handle to open `Cửa Tài` while the other 3 doors stay locked!
     feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusCentralLockingSystem: 2,
       statusDoorSwitchDRD: 'FAT_IST_OFFEN',
-      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG',
-      statusCentralLockingSystemBootlid: 'HECKKLAPPE_LOGISCH_ENTRIEGELT'
+      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG'
     }}));
-    if (g30Panel.state.locked !== false || g30Panel.state.doorsOpen.indexOf('Cửa Tài') < 0) {{
-      throw new Error('G30 interior handle unlock + door open failed: ' + JSON.stringify(g30Panel.state));
+    if (g30Panel.state.locked !== false ||
+        g30Panel.state.lockMode !== 'selective' ||
+        g30Panel.state.unlockedDoors.indexOf('Cửa Tài') < 0 ||
+        g30Panel.state.unlockedDoors.length !== 1 ||
+        g30Panel.state.doorsOpen.indexOf('Cửa Tài') < 0) {{
+      throw new Error('Interior lock -> open Cửa Tài selective state failed: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Driver closes `Cửa Tài` WITHOUT pressing Lock or Unlock (3 doors still locked, Cửa Tài still unlocked!)
+    // Even if `statusZVStatus` polls static `'VERRIEGELT'` or `'FAHRERTUER_ENTRIEGELT'`, `lockMode` MUST stay `'selective'`!
+    feedBody('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus', Object.assign({{}}, basePanel, {{
+      statusCentralLockingSystem: 2,
+      statusDoorSwitchDRD: 'FAT_IST_GESCHLOSSEN',
+      statusPushButtonCentralLockingSystem: 'KEINE_BETAETIGUNG'
+    }}));
+    feedBody('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', {{ statusZV: 'VERRIEGELT' }});
+    feedBody('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', {{ statusZV: 'FAHRERTUER_ENTRIEGELT' }});
+    if (g30Panel.state.doorsOpen.length !== 0 ||
+        g30Panel.state.locked !== false ||
+        g30Panel.state.lockMode !== 'selective' ||
+        g30Panel.state.unlockedDoors[0] !== 'Cửa Tài') {{
+      throw new Error('Closed Cửa Tài must remain selective (Cửa Tài unlocked, 3 doors locked) until Lock/Unlock: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Unlock via key fob (`statusZVStatus` transitions `'FAHRERTUER_ENTRIEGELT'` -> `'ENTRIEGELT'` with `KEINE_BETAETIGUNG`) -> MUST clear selective to `'unlocked'`!
+    feedBody('de.bmw.infotainment.vehicle.Vehicle2', 'statusZVStatus', {{ statusZV: 'ENTRIEGELT' }});
+    if (g30Panel.state.locked !== false || g30Panel.state.lockMode !== 'unlocked' || g30Panel.state.unlockedDoors.length !== 0) {{
+      throw new Error('Keyfob ZV ENTRIEGELT transition must clear selective mode to unlocked: ' + JSON.stringify(g30Panel.state));
+    }}
+
+    // Also verify numeric-only `ST_CLSY = 2` (`VERRIEGELT` inside at 0 km/h) on fresh tracker without `statusZVStatus`
+    var g30NumOnly = new C.TelemetryTracker();
+    g30NumOnly.state.dwaArmed = false;
+    C.interpretBodyField('de.bmw.body.DoorsWindowsRoofMirrors', 'CentralLockingSystemAndPanelStatus2', Object.assign({{}}, basePanel, {{
+      statusCentralLockingSystem: 2
+    }}), function(p) {{ g30NumOnly.update(p, 7010000); }}, g30NumOnly.state);
+    if (g30NumOnly.state.locked !== true || g30NumOnly.state.lockMode !== 'locked') {{
+      throw new Error('Numeric ST_CLSY=2 stationary interior lock failed: ' + JSON.stringify(g30NumOnly.state));
     }}
 
     // MultiConsumerTrunkLidAction.getTrunkLidStatus + A4A.statusA4ALids + WindowsRoofMaster DVDR + AntiTheft.statusDwa
@@ -1178,10 +1228,10 @@ def check_car_link_logic_in_jxa():
 
     feedBody('de.bmw.infotainment.vehicle.A4A', 'statusA4ALids', {{
       statusCentralLocking: 'VERRIEGELT',
-      statusDoorPSD: 'OFFEN',
+      statusDoorPSD: 'GESCHLOSSEN',
       statusFrontLid: 'OFFEN'
     }});
-    if (g30Panel.state.locked !== true || g30Panel.state.hoodOpen !== true || g30Panel.state.doorsOpen.indexOf('Cửa Phụ') < 0) {{
+    if (g30Panel.state.locked !== true || g30Panel.state.lockMode !== 'locked' || g30Panel.state.hoodOpen !== true) {{
       throw new Error('A4A.statusA4ALids combined lock+lid decode failed: ' + JSON.stringify(g30Panel.state));
     }}
 

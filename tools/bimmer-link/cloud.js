@@ -361,6 +361,8 @@ class CloudBridge {
             statePayload.telemetry && statePayload.telemetry.odometerKm,
             statePayload.telemetry && statePayload.telemetry.battery12v,
             statePayload.telemetry && statePayload.telemetry.locked,
+            statePayload.telemetry && statePayload.telemetry.lockMode,
+            statePayload.telemetry && statePayload.telemetry.unlockedDoors,
             statePayload.telemetry && statePayload.telemetry.dwaArmed,
             statePayload.telemetry && statePayload.telemetry.dwaAlarmActive,
             statePayload.telemetry && statePayload.telemetry.doorsOpen,
@@ -382,6 +384,8 @@ class CloudBridge {
 
         const securitySig = JSON.stringify([
             statePayload.telemetry && statePayload.telemetry.locked,
+            statePayload.telemetry && statePayload.telemetry.lockMode,
+            statePayload.telemetry && statePayload.telemetry.unlockedDoors,
             statePayload.telemetry && statePayload.telemetry.dwaArmed,
             statePayload.telemetry && statePayload.telemetry.dwaAlarmActive,
             statePayload.telemetry && statePayload.telemetry.doorsOpen,

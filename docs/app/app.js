@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.7).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.8).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -1678,9 +1678,12 @@ function renderAll() {
   const atm2Dock = document.getElementById('atm2Dock');
   if (atm2Dock) atm2Dock.classList.toggle('hidden', !vehicleData.atm2Online);
 
+  const isSelectiveLock = tel.dwaArmed !== true && tel.lockMode === 'selective';
+  const selDoors = (Array.isArray(tel.unlockedDoors) && tel.unlockedDoors.length) ? tel.unlockedDoors : ['Cửa Tài'];
+  const selLockedCnt = Math.max(1, 4 - selDoors.length);
   const hasWinWarn = !!(tel.windowsOpen && tel.windowsOpen.length);
   const parkedUnlocked = effectiveLocked === false && !liveEngineRunning && (tel.condition == null || tel.condition < 7);
-  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || parkedUnlocked);
+  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || isSelectiveLock || parkedUnlocked);
   glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (live1crActive ? ' climate-on' : ''));
 
   const sec = document.getElementById('securityBanner');
@@ -1695,9 +1698,13 @@ function renderAll() {
     } else if (tel.hoodOpen) {
       sec.textContent = '⚠️ NẮP CAPO ĐANG MỞ';
     } else if (tel.doorsOpen && tel.doorsOpen.length) {
-      sec.textContent = '⚠️ CỬA XE ĐANG MỞ (' + tel.doorsOpen.join(', ').toUpperCase() + ')';
+      sec.textContent = isSelectiveLock
+        ? ('⚠️ ĐANG MỞ ' + tel.doorsOpen.join(', ').toUpperCase() + ' (' + selLockedCnt + ' CỬA KIA ĐANG KHOÁ)')
+        : ('⚠️ CỬA XE ĐANG MỞ (' + tel.doorsOpen.join(', ').toUpperCase() + ')');
     } else if (hasWinWarn) {
       sec.textContent = '⚠️ KÍNH CHƯA ĐÓNG KÍN (' + tel.windowsOpen.join(', ').toUpperCase() + ')';
+    } else if (isSelectiveLock) {
+      sec.textContent = '🔓 MỞ CHỐT ' + (selDoors.length === 1 ? selDoors[0].toUpperCase() : (selDoors.length + ' CỬA')) + ' · ' + selLockedCnt + ' CỬA ĐANG KHOÁ';
     } else {
       sec.textContent = '🔓 XE CHƯA KHOÁ (KHOÁ CỬA ĐỂ ĐỀ NỔ 1CR)';
     }
@@ -1898,6 +1905,11 @@ function renderSecurityPills(tel) {
     pills.push({ cls: 'ok', txt: '🛡️ Chống trộm DWA' });
   } else if (tel.locked === true) {
     pills.push({ cls: 'ok', txt: '🔒 Đã chốt khoá' });
+  } else if (tel.lockMode === 'selective') {
+    const uDoors = (Array.isArray(tel.unlockedDoors) && tel.unlockedDoors.length) ? tel.unlockedDoors : ['Cửa Tài'];
+    const remLocked = Math.max(1, 4 - uDoors.length);
+    const openLbl = uDoors.length === 1 ? uDoors[0] : (uDoors.length + ' cửa');
+    pills.push({ cls: 'warn', txt: '🔓 Mở chốt ' + openLbl + ' · ' + remLocked + ' cửa khoá' });
   } else if (tel.locked === false) {
     pills.push({ cls: (!tel._liveEngineRunning && (tel.condition == null || tel.condition < 7)) ? 'warn' : 'ok', txt: '🔓 Chưa khoá' });
   }
