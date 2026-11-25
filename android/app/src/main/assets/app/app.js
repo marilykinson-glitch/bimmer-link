@@ -1,6 +1,6 @@
 'use strict';
 /**
- * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.4).
+ * app.js - MyBMW Dark Luxury Client for iPhone Fullscreen PWA & Android Native APK (v0.6.5).
  *
  * Syncs with `tools/bimmer-link/cloud.js` using standard WebCrypto (SHA-256 + AES-GCM) over `ntfy.sh`
  * WebSocket + 12-hour cached history + instant `cmd_ack` bidirectional command feedback + BMW Factory Paint Studio.
@@ -50,6 +50,8 @@ let diagBuckets = {};
 let arm1crUntil = 0, armUnlockUntil = 0, armHornUntil = 0;
 let mapInstance = null, mapMarker = null, mapCircle = null, mapDestMarker = null;
 let userGeoPos = null, mapUserMarker = null, mapWalkLine = null;
+let reverseAddrCache = loadLocal('mybmw_rev_addr') || {};
+let reverseAddrInFlight = {};
 let tireUnit = localStorage.getItem('mybmw_tire_unit') === 'psi' ? 'psi' : 'bar';
 let lastDestHits = [];
 
@@ -133,7 +135,10 @@ function switchView(name, btn) {
   });
   Array.prototype.forEach.call(document.querySelectorAll('.nav-tab'), (b) => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
-  if (name === 'map') setTimeout(refreshMap, 80);
+  if (name === 'map') {
+    setTimeout(refreshMap, 60);
+    setTimeout(() => { if (mapInstance) mapInstance.invalidateSize(); }, 220);
+  }
 }
 
 /* ---------------- Photorealistic Studio Bodywork Carpaint Shader (Fallback & Instant Preview) ---------------- */
@@ -1267,6 +1272,7 @@ function onDiagPacket(pkt) {
       openConfigs: pkt.schema && pkt.schema.openConfigs,
       remoteBodyInterfaces: pkt.schema && pkt.schema.remoteBodyInterfaces,
       live: pkt.schema && pkt.schema.live,
+      bodyLive: pkt.schema && pkt.schema.bodyLive,
       logs: pkt.logs,
     }, null, 2);
     showToast('✅ Đã nhận danh sách ' + (((pkt.schema && pkt.schema.interfaces) || []).length) + ' giao diện Climate/1CR từ xe!', '#2fd27a');
@@ -1673,7 +1679,8 @@ function renderAll() {
   if (atm2Dock) atm2Dock.classList.toggle('hidden', !vehicleData.atm2Online);
 
   const hasWinWarn = !!(tel.windowsOpen && tel.windowsOpen.length);
-  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || effectiveLocked === false);
+  const parkedUnlocked = effectiveLocked === false && !liveEngineRunning && (tel.condition == null || tel.condition < 7);
+  const hasDoorWarn = !!(tel.dwaAlarmActive || (tel.doorsOpen && tel.doorsOpen.length) || hasWinWarn || tel.trunkOpen || tel.hoodOpen || parkedUnlocked);
   glow.className = 'studio-glow' + (hasDoorWarn ? ' alert-on' : (live1crActive ? ' climate-on' : ''));
 
   const sec = document.getElementById('securityBanner');
@@ -1681,12 +1688,14 @@ function renderAll() {
     sec.className = 'lock-banner warn';
     if (tel.dwaAlarmActive) {
       sec.textContent = '🚨 BÁO ĐỘNG CHỐNG TRỘM DWA ĐANG KÍCH HOẠT!';
+    } else if (tel.trunkOpen && tel.hoodOpen) {
+      sec.textContent = '⚠️ NẮP CAPO & CỐP SAU ĐANG MỞ';
     } else if (tel.trunkOpen) {
       sec.textContent = '⚠️ CỐP SAU ĐANG MỞ';
     } else if (tel.hoodOpen) {
       sec.textContent = '⚠️ NẮP CAPO ĐANG MỞ';
     } else if (tel.doorsOpen && tel.doorsOpen.length) {
-      sec.textContent = '⚠️ CÓ CỬA CHƯA ĐÓNG KÍN';
+      sec.textContent = '⚠️ CỬA XE ĐANG MỞ (' + tel.doorsOpen.join(', ').toUpperCase() + ')';
     } else if (hasWinWarn) {
       sec.textContent = '⚠️ KÍNH CHƯA ĐÓNG KÍN (' + tel.windowsOpen.join(', ').toUpperCase() + ')';
     } else {
@@ -1699,10 +1708,10 @@ function renderAll() {
       : (c1.mode === 'vent_only' ? '🌬️ QUẠT THÔNG GIÓ CABIN ĐANG CHẠY' : '❄️ ĐIỀU HOÀ ĐỖ XE ĐANG CHẠY (CHƯA NỔ MÁY)');
     sec.textContent = live1crActive
       ? c1Banner
-      : (liveEngineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : (!awake ? '🔒 ĐÃ ĐỖ & NGỦ SÂU 0W AN TOÀN' : '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN'));
+      : (liveEngineRunning ? ('🟢 ĐANG VẬN HÀNH (' + (tel.speed || 0) + ' KM/H)') : (!awake ? '🔒 ĐÃ ĐỖ & NGỦ SÂU 0W AN TOÀN' : (effectiveLocked === true ? '🔒 ĐÃ ĐỖ & KHOÁ AN TOÀN' : '🅿️ ĐANG ĐỖ TRONG XE')));
   }
 
-  renderSecurityPills(Object.assign({}, tel, { locked: effectiveLocked }));
+  renderSecurityPills(Object.assign({}, tel, { locked: effectiveLocked, _liveEngineRunning: liveEngineRunning }));
   renderCheckControlAlerts(tel);
 
   const kombiHint = document.getElementById('kombiHint');
@@ -1759,9 +1768,9 @@ function renderAll() {
   btnV.className = 'sub-act-btn' + (valet.enabled ? ' active-warn' : '');
   document.getElementById('lblValet').textContent = valet.enabled ? '🛡️ Chế độ Valet: Đang Bật' : '🛡️ Chế độ Valet: Tắt';
 
-  const hasTimer = c1.timerText && c1.timerText !== 'Tắt';
+  const hasTimer = vehicleData.timerEnabled !== false && c1.timerText && c1.timerText !== 'Tắt';
   document.getElementById('btnTimerQuick').className = 'act-btn' + (hasTimer ? ' active-go' : '');
-  document.getElementById('lblTimer').textContent = hasTimer ? ('Hẹn ' + c1.timerText) : 'Hẹn giờ BDC';
+  document.getElementById('lblTimer').textContent = hasTimer ? ('Hẹn ' + c1.timerText) : 'Hẹn giờ 1CR';
 
   const pm = (vehicleData && vehicleData.parkingMemo) || {};
   const homeMemoEl = document.getElementById('homeParkMemoBadge');
@@ -1861,10 +1870,10 @@ function renderSecurityPills(tel) {
   const box = document.getElementById('securityPills');
   if (!box) return;
   const pills = [];
-  const dOpen = (tel.doorsOpen && tel.doorsOpen.length) || 0;
+  const dList = Array.isArray(tel.doorsOpen) ? tel.doorsOpen : [];
   pills.push({
-    cls: dOpen ? 'warn' : 'ok',
-    txt: dOpen ? '⚠️ Cửa đang mở' : '✓ 4 Cửa kín',
+    cls: dList.length ? 'warn' : 'ok',
+    txt: dList.length ? ('⚠️ Mở: ' + dList.join(', ')) : '✓ 4 Cửa kín',
   });
   const wOpen = tel.windowsOpen || [];
   const wd = tel.windowDetails || {};
@@ -1876,7 +1885,9 @@ function renderSecurityPills(tel) {
   } else {
     pills.push({ cls: 'ok', txt: '✓ Kính đóng kín' });
   }
-  if (tel.trunkOpen || tel.hoodOpen) {
+  if (tel.trunkOpen && tel.hoodOpen) {
+    pills.push({ cls: 'warn', txt: '⚠️ Cốp & Capo mở' });
+  } else if (tel.trunkOpen || tel.hoodOpen) {
     pills.push({ cls: 'warn', txt: tel.trunkOpen ? '⚠️ Cốp sau mở' : '⚠️ Capo mở' });
   } else {
     pills.push({ cls: 'ok', txt: '✓ Cốp & Capo kín' });
@@ -1885,7 +1896,9 @@ function renderSecurityPills(tel) {
     pills.push({ cls: 'crit', txt: '🚨 Báo động DWA!' });
   } else if (tel.dwaArmed === true) {
     pills.push({ cls: 'ok', txt: '🛡️ Chống trộm DWA' });
-  } else if (tel.locked === false) {
+  } else if (tel.locked === true) {
+    pills.push({ cls: 'ok', txt: '🔒 Đã chốt khoá' });
+  } else if (tel.locked === false && !tel._liveEngineRunning && (tel.condition == null || tel.condition < 7)) {
     pills.push({ cls: 'warn', txt: '🔓 Chưa khoá' });
   }
   box.innerHTML = pills.map((p) => '<span class="sec-pill ' + p.cls + '">' + escHtml(p.txt) + '</span>').join('');
@@ -2167,6 +2180,37 @@ function parseInputCoords(raw) {
   return { lat, lon };
 }
 
+function dedupeAddressParts(parts) {
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = String(parts[i] || '').trim();
+    if (!p) continue;
+    if (!out.some((x) => x.toLowerCase() === p.toLowerCase())) out.push(p);
+  }
+  return out;
+}
+
+function formatPhotonFeature(f, fallbackName) {
+  const p = (f && f.properties) || {};
+  const g = (f && f.geometry && Array.isArray(f.geometry.coordinates)) ? f.geometry.coordinates : null;
+  if (!g || g.length < 2) return null;
+  const lon = Number(g[0]), lat = Number(g[1]);
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  const streetFull = [p.housenumber, p.street].filter(Boolean).join(' ');
+  const title = p.name || streetFull || p.district || p.city || fallbackName || 'Địa điểm';
+  const addrParts = dedupeAddressParts([
+    p.name ? streetFull : '',
+    p.district || p.suburb || p.locality || p.county || '',
+    p.city || p.state || '',
+  ]).filter((x) => x.toLowerCase() !== String(title).toLowerCase());
+  return {
+    name: title,
+    address: addrParts.join(', ') || (lat.toFixed(5) + ', ' + lon.toFixed(5)),
+    lat,
+    lon,
+  };
+}
+
 async function searchDestination() {
   const qEl = document.getElementById('inpDestQuery');
   const box = document.getElementById('destResults');
@@ -2186,26 +2230,50 @@ async function searchDestination() {
   }
 
   box.innerHTML = '<div style="color:var(--dim);padding:6px 0">Đang tìm địa điểm…</div>';
+  const carPos = vehicleData && vehicleData.telemetry && vehicleData.telemetry.pos;
+  const bias = (carPos && isFinite(carPos.lat) && isFinite(carPos.lon))
+    ? ('&lat=' + encodeURIComponent(carPos.lat.toFixed(4)) + '&lon=' + encodeURIComponent(carPos.lon.toFixed(4)))
+    : '&lat=10.7769&lon=106.7009';
+
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=4&accept-language=vi&q=' + encodeURIComponent(q);
-    const r = await fetch(url, { headers: { Accept: 'application/json' } });
-    const arr = await r.json();
-    if (!Array.isArray(arr) || !arr.length) {
-      box.innerHTML = '<div style="color:var(--warn);padding:6px 0">Không tìm thấy địa điểm khớp — bạn có thể dán toạ độ lat,lon từ Google Maps.</div>';
+    // Primary CORS-enabled geocoder (`Access-Control-Allow-Origin: *`, works inside Android WebView `app.mybmw.local` & iOS PWA)
+    let hits = [];
+    try {
+      const pUrl = 'https://photon.komoot.io/api/?limit=5' + bias + '&q=' + encodeURIComponent(q);
+      const pr = await fetch(pUrl, { headers: { Accept: 'application/json' } });
+      if (pr.ok) {
+        const pj = await pr.json();
+        hits = ((pj && pj.features) || []).map((f) => formatPhotonFeature(f, q)).filter(Boolean);
+      }
+    } catch (ePhoton) {}
+
+    if (!hits.length) {
+      const nUrl = 'https://nominatim.openstreetmap.org/search?format=json&limit=4&accept-language=vi&q=' + encodeURIComponent(q);
+      const nr = await fetch(nUrl, { headers: { Accept: 'application/json' } });
+      if (nr.ok) {
+        const arr = await nr.json();
+        if (Array.isArray(arr)) {
+          hits = arr.slice(0, 4).map((it) => {
+            const parts = String(it.display_name || '').split(',').map((s) => s.trim()).filter(Boolean);
+            return {
+              name: it.name || parts[0] || q,
+              address: parts.slice(1, 4).join(', '),
+              lat: Number(it.lat),
+              lon: Number(it.lon),
+            };
+          }).filter((x) => isFinite(x.lat) && isFinite(x.lon));
+        }
+      }
+    }
+
+    if (!hits.length) {
+      box.innerHTML = '<div style="color:var(--warn);padding:6px 0">Không tìm thấy địa điểm khớp — hãy thử gõ rõ hơn (VD: "Sân bay Tân Sơn Nhất") hoặc dán toạ độ lat,lon từ Google Maps.</div>';
       return;
     }
-    lastDestHits = arr.slice(0, 4).map((it) => {
-      const parts = String(it.display_name || '').split(',').map((s) => s.trim()).filter(Boolean);
-      return {
-        name: it.name || parts[0] || q,
-        address: parts.slice(1, 4).join(', '),
-        lat: Number(it.lat),
-        lon: Number(it.lon),
-      };
-    });
+    lastDestHits = hits.slice(0, 5);
     renderDestHits();
   } catch (e) {
-    box.innerHTML = '<div style="color:var(--crit);padding:6px 0">Lỗi tìm địa điểm: ' + escHtml(e.message) + '</div>';
+    box.innerHTML = '<div style="color:var(--crit);padding:6px 0">Không kết nối được máy chủ bản đồ (' + escHtml(e.message) + ') — hãy kiểm tra mạng 4G/Wi-Fi hoặc dán trực tiếp toạ độ lat,lon.</div>';
   }
 }
 
@@ -2234,6 +2302,16 @@ function clearCarDestination() {
   sendCmd('clear_destination', {}, true);
 }
 
+function openSentDestinationMaps() {
+  const dst = vehicleData && vehicleData.destination;
+  if (!dst || dst.lat == null || dst.lon == null) return showToast('Chưa có điểm đến đã ghim.', '#ffb020');
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const url = isIOS
+    ? ('http://maps.apple.com/?daddr=' + dst.lat + ',' + dst.lon + '&dirflg=d')
+    : ('https://www.google.com/maps/dir/?api=1&destination=' + dst.lat + ',' + dst.lon + '&travelmode=driving');
+  window.open(url, '_blank');
+}
+
 function renderActiveDestination(tel) {
   const box = document.getElementById('sentDestBox');
   if (!box) return;
@@ -2246,7 +2324,8 @@ function renderActiveDestination(tel) {
   const distTxt = (tel && tel.pos && dst.lat != null && dst.lon != null)
     ? (' · Cách xe ' + haversineClientKm(tel.pos.lat, tel.pos.lon, dst.lat, dst.lon).toFixed(1) + ' km')
     : '';
-  document.getElementById('sentDestTitle').textContent = '📌 Đang ghim trên xe: ' + dst.name;
+  const navTag = dst.navSynced ? '🧭 Đã đẩy vào Dẫn đường xe: ' : '📌 Đang ghim trên màn hình xe: ';
+  document.getElementById('sentDestTitle').textContent = navTag + dst.name;
   document.getElementById('sentDestSub').textContent = (dst.address || (dst.lat.toFixed(4) + ', ' + dst.lon.toFixed(4))) + distTxt;
 }
 
@@ -2284,18 +2363,59 @@ function renderTripAnalytics(trips, effChassis) {
   scEl.style.color = score >= 88 ? 'var(--go)' : 'var(--warn)';
 }
 
+function ensureReverseAddress(pos) {
+  if (!pos || !isFinite(pos.lat) || !isFinite(pos.lon)) return '';
+  const nativePlace = dedupeAddressParts([pos.street, pos.district, pos.city]).join(', ');
+  if (nativePlace) return nativePlace;
+  const key = pos.lat.toFixed(4) + ',' + pos.lon.toFixed(4);
+  if (reverseAddrCache[key]) return reverseAddrCache[key];
+  if (reverseAddrInFlight[key]) return '';
+  reverseAddrInFlight[key] = true;
+  fetch('https://photon.komoot.io/reverse?lat=' + encodeURIComponent(pos.lat.toFixed(5)) + '&lon=' + encodeURIComponent(pos.lon.toFixed(5)), {
+    headers: { Accept: 'application/json' },
+  }).then((r) => (r.ok ? r.json() : null)).then((j) => {
+    delete reverseAddrInFlight[key];
+    const f = j && Array.isArray(j.features) && j.features[0];
+    if (!f || !f.properties) return;
+    const p = f.properties;
+    const streetFull = [p.housenumber, p.street].filter(Boolean).join(' ');
+    const resolved = dedupeAddressParts([
+      p.name || '',
+      streetFull,
+      p.district || p.suburb || p.locality || '',
+      p.city || p.state || '',
+    ]).slice(0, 3).join(', ');
+    if (resolved) {
+      reverseAddrCache[key] = resolved;
+      const keys = Object.keys(reverseAddrCache);
+      if (keys.length > 40) delete reverseAddrCache[keys[0]];
+      saveLocal('mybmw_rev_addr', reverseAddrCache);
+      const addrEl = document.getElementById('addrText');
+      if (addrEl) {
+        addrEl.textContent = resolved + ' · (' + pos.lat.toFixed(5) + ', ' + pos.lon.toFixed(5) + ')';
+      }
+    }
+  }).catch(() => { delete reverseAddrInFlight[key]; });
+  return '';
+}
+
 function refreshMap() {
   const tel = (vehicleData && vehicleData.telemetry) || {};
   const pos = tel.pos;
-  if (pos) {
-    const place = [pos.street, pos.district, pos.city].filter(Boolean).join(', ');
+  if (pos && isFinite(pos.lat) && isFinite(pos.lon)) {
+    const place = ensureReverseAddress(pos);
     document.getElementById('addrText').textContent = (place ? place + ' · ' : '') + '(' + pos.lat.toFixed(5) + ', ' + pos.lon.toFixed(5) + ')';
     document.getElementById('posSourceBadge').textContent = String(pos.source || 'NAV').toUpperCase();
+  } else {
+    document.getElementById('addrText').textContent = 'Chưa nhận được toạ độ đỗ xe — hãy bấm "🔄 Cập nhật thông số" khi xe đang bật điện.';
   }
-  if (!window.L || !pos) return;
+  if (!window.L || !pos || !isFinite(pos.lat) || !isFinite(pos.lon)) return;
   if (!mapInstance) {
     mapInstance = L.map('mapBox', { zoomControl: false }).setView([pos.lat, pos.lon], 16);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(mapInstance);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(mapInstance);
   } else {
     mapInstance.setView([pos.lat, pos.lon], 16);
     mapInstance.invalidateSize();
@@ -2614,7 +2734,7 @@ window.injectPairCodeFromNative = async function (raw) {
         regs.forEach((r) => { r.unregister().catch(() => {}); });
       }).catch(() => {});
     } else {
-      navigator.serviceWorker.register('./sw.js?v=0.6.4').then((reg) => {
+      navigator.serviceWorker.register('./sw.js?v=0.6.5').then((reg) => {
         try { reg.update(); } catch (e) {}
       }).catch(() => {});
     }

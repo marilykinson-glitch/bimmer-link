@@ -29,7 +29,7 @@ const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
 
-const VERSION = '0.6.4';
+const VERSION = '0.6.5';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -60,8 +60,9 @@ function log(m) {
 }
 
 const mkdirp = (d) => {
-    if (fs.existsSync(d)) return;
-    mkdirp(path.dirname(d));
+    if (!d || fs.existsSync(d)) return;
+    const parent = path.dirname(d);
+    if (parent && parent !== d) mkdirp(parent);
     try { fs.mkdirSync(d); } catch (e) { if (e.code !== 'EEXIST') throw e; }
 };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } };
@@ -79,8 +80,10 @@ function defaultConfig() {
         ownerName: '',
         parkSnapshot: true,
         wakeNotify: false,
+        timerEnabled: false,
         autoSyncTimer: false,
         dailyTimer: '07:30',
+        lastTimerFiredKey: '',
         tzOffsetMin: 420,
         hasDwa302: false,
         parkingMemo: {
@@ -124,8 +127,10 @@ function normalizeConfig(raw) {
         ownerName: typeof r.ownerName === 'string' ? r.ownerName.slice(0, 60) : '',
         parkSnapshot: r.parkSnapshot !== false,
         wakeNotify: !!r.wakeNotify,
+        timerEnabled: !!r.timerEnabled,
         autoSyncTimer: !!r.autoSyncTimer,
         dailyTimer: /^\d{2}:\d{2}$/.test(String(r.dailyTimer || '')) ? String(r.dailyTimer) : d.dailyTimer,
+        lastTimerFiredKey: typeof r.lastTimerFiredKey === 'string' ? r.lastTimerFiredKey.slice(0, 32) : '',
         tzOffsetMin: (typeof r.tzOffsetMin === 'number' && isFinite(rawTz) && Math.abs(rawTz) <= 840) ? Math.round(rawTz) : d.tzOffsetMin,
         hasDwa302: !!r.hasDwa302,
         parkingMemo: {
@@ -155,6 +160,8 @@ function normalizeConfig(raw) {
             address: String(dst.address || '').slice(0, 140),
             lat: Number(dst.lat),
             lon: Number(dst.lon),
+            navSynced: !!dst.navSynced,
+            navMethod: String(dst.navMethod || '').slice(0, 80),
             sentAt: Number(dst.sentAt) || Date.now(),
         } : null,
     };
@@ -530,10 +537,11 @@ function createService(customCfg) {
             }
             if (c === 'timer_prefs' && a) {
                 if (typeof a.autoSyncTimer === 'boolean') config.autoSyncTimer = a.autoSyncTimer;
-                if (a.dailyTimer) config.dailyTimer = String(a.dailyTimer);
+                if (typeof a.timerEnabled === 'boolean') config.timerEnabled = a.timerEnabled;
+                if (a.dailyTimer && /^\d{2}:\d{2}$/.test(String(a.dailyTimer))) config.dailyTimer = String(a.dailyTimer);
                 saveConfig();
                 syncCloudState(true);
-                await ack(true, 'Đã lưu tuỳ chọn tự đồng bộ hẹn giờ 1CR!');
+                await ack(true, 'Đã lưu tuỳ chọn hẹn giờ 1CR!');
                 return;
             }
 
@@ -563,6 +571,7 @@ function createService(customCfg) {
             servicePlan: config.servicePlan,
             parkingMemo: config.parkingMemo,
             destination: config.destination,
+            timerEnabled: !!config.timerEnabled,
             autoSyncTimer: config.autoSyncTimer,
             dailyTimer: config.dailyTimer,
             message: S.message,
@@ -631,9 +640,22 @@ function createService(customCfg) {
                 callWorker('set_prefs', { hasDwa302: true }, 2000).catch(() => {});
             }
             writeStatus();
+        } else if (msg.ev === 'car_clock') {
+            if (typeof msg.utcMs === 'number' && isFinite(msg.utcMs)) syncClock(msg.utcMs);
+            if (typeof msg.tzMin === 'number' && isFinite(msg.tzMin) && Math.abs(msg.tzMin) <= 840 && config.tzOffsetMin !== Math.round(msg.tzMin)) {
+                config.tzOffsetMin = Math.round(msg.tzMin);
+                saveConfig();
+            }
         } else if (msg.ev === 'telemetry') {
             S.workerUp = true;
             if (msg.state) S.telemetry = msg.state;
+            if (S.telemetry && S.telemetry.climate1cr) {
+                if (config.timerEnabled && config.dailyTimer && (!S.telemetry.climate1cr.timerText || S.telemetry.climate1cr.timerText === 'Tắt')) {
+                    S.telemetry.climate1cr.timerText = config.dailyTimer;
+                } else if (!config.timerEnabled && S.telemetry.climate1cr.timerText && S.telemetry.climate1cr.timerText !== 'Tắt') {
+                    S.telemetry.climate1cr.timerText = 'Tắt';
+                }
+            }
             if (S.telemetry && (S.telemetry.dwaArmed === true || S.telemetry._sawDwaArmed) && !config.hasDwa302) {
                 config.hasDwa302 = true;
                 saveConfig();
@@ -877,20 +899,33 @@ function createService(customCfg) {
 
         if (action === 'start1cr' || action === 'stop1cr' || action === 'ventilate') {
             const isVentReq = action === 'ventilate';
-            const curVentOn = !!(S.telemetry.climate1cr && S.telemetry.climate1cr.active && S.telemetry.climate1cr.mode === 'vent_only');
+            const c1Cur = (S.telemetry && S.telemetry.climate1cr) || {};
+            if (isVentReq && c1Cur.active && c1Cur.mode === 'engine_1cr') {
+                const msg = '🔥 Động cơ 1CR đang nổ làm mát cabin sẵn rồi — bấm "Tắt 1CR" nếu bạn muốn dừng.';
+                tell(msg, 'go');
+                return { ok: true, verified: true, mode: 'engine_1cr', message: msg };
+            }
+            const curVentOn = !!(c1Cur.active && (c1Cur.mode === 'vent_only' || c1Cur.mode === 'auto_precond'));
             const wantOn = isVentReq ? !curVentOn : (action === 'start1cr');
+            if (wantOn && S.telemetry && S.telemetry.engineRunning) {
+                const runMsg = isVentReq
+                    ? 'Xe đang nổ máy sẵn — điều hoà chính đang chạy trực tiếp (Thông gió đỗ xe chỉ dùng khi đã tắt máy).'
+                    : 'Động cơ xe đang nổ máy sẵn rồi!';
+                tell(runMsg, isVentReq ? 'warn' : 'go');
+                return { ok: !isVentReq, verified: !isVentReq, message: runMsg, error: isVentReq ? runMsg : undefined };
+            }
             const preOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1800);
             const prepRep = await callWorker('prepare_1cr', { wantOn, ventOnly: isVentReq && wantOn, oapLive: (preOap && preOap.liveAfter) || null }, 4500);
             if (!prepRep || !prepRep.ok || !prepRep.result) {
                 const fallbackErr = (prepRep && prepRep.error) || 'Trợ thủ tín hiệu xe chưa sẵn sàng';
-                tell('1CR: ' + fallbackErr, 'warn');
+                tell((isVentReq ? 'Thông gió: ' : '1CR: ') + fallbackErr, 'warn');
                 return { ok: false, error: fallbackErr };
             }
             const prep = prepRep.result;
             let verdict = prep.verdict || { active: false, mode: 'off' };
             const trace = [];
 
-            if (wantOn && verdict.consentEnabled === false && Array.isArray(prep.consentCandidates)) {
+            if (wantOn && !isVentReq && verdict.consentEnabled === false && Array.isArray(prep.consentCandidates)) {
                 for (let ci = 0; ci < prep.consentCandidates.length; ci++) {
                     const cc = prep.consentCandidates[ci];
                     const oc = await callOapBridge(cc.iface, cc.kind, cc.name, cc.payload, cc.altPayload, 2500);
@@ -935,6 +970,7 @@ function createService(customCfg) {
 
                 let vRep = await callWorker('verify_1cr', {
                     waitMs: (oapRes && oapRes.liveAfter) ? 250 : 800,
+                    ventOnly: isVentReq,
                     oapLive: (oapRes && oapRes.liveAfter) || null,
                 }, 3500);
                 lastVerifyRes = vRep && vRep.result;
@@ -946,6 +982,7 @@ function createService(customCfg) {
                         const liveChk = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1600);
                         vRep = await callWorker('verify_1cr', {
                             waitMs: 550,
+                            ventOnly: isVentReq,
                             oapLive: (liveChk && liveChk.liveAfter) || null,
                         }, 3200);
                         lastVerifyRes = vRep && vRep.result;
@@ -977,16 +1014,18 @@ function createService(customCfg) {
                 const postOffOap = await callOapBridge('ClimateMaster', 'read_1cr_live', 'all', {}, undefined, 1600);
                 const offRep = await callWorker('verify_1cr', {
                     waitMs: 450,
+                    ventOnly: isVentReq,
                     oapLive: (postOffOap && postOffOap.liveAfter) || lastOapLive || null,
-                    lastAction: 'Tắt làm mát 1CR',
-                    lastResult: 'Đã tắt 1CR',
+                    lastAction: isVentReq ? 'Tắt quạt thông gió' : 'Tắt làm mát 1CR',
+                    lastResult: isVentReq ? 'Đã tắt quạt thông gió' : 'Đã tắt 1CR',
                 }, 3500);
                 if (offRep && offRep.result && offRep.result.verdict) verdict = offRep.result.verdict;
                 S.telemetry.climate1cr.active = !!verdict.active;
                 S.telemetry.climate1cr.mode = verdict.mode || 'off';
+                const stopLabel = isVentReq ? 'quạt thông gió cabin' : 'đề nổ / làm mát 1CR';
                 const stopMsg = verdict.active
-                    ? 'Đã gửi lệnh tắt 1CR nhưng hộp điều hoà vẫn báo đang chạy — hãy bấm thêm lần nữa.'
-                    : ('Đã tắt đề nổ / làm mát 1CR' + (hitLabel ? (' (' + hitLabel + ')') : '') + '.');
+                    ? ('Đã gửi lệnh tắt ' + stopLabel + ' nhưng hộp điều hoà vẫn báo đang chạy — hãy bấm thêm lần nữa.')
+                    : ('Đã tắt ' + stopLabel + (hitLabel ? (' (' + hitLabel + ')') : '') + '.');
                 tell(stopMsg, verdict.active ? 'warn' : 'go');
                 if (config.botToken && config.chatId) {
                     tg.sendMessage('⏹ ' + stopMsg, S.telemetry, config.valet.enabled).catch(() => {});
@@ -1001,7 +1040,10 @@ function createService(customCfg) {
                 let msgKind = 'go';
                 if (verdict.mode === 'engine_1cr') {
                     startMsg = '🔥 Đã đề nổ động cơ 1CR & bật điều hoà làm mát cabin (' + hitLabel + ')!';
-                } else if (verdict.mode === 'vent_only') {
+                } else if (verdict.mode === 'vent_only' || isVentReq) {
+                    if (isVentReq && verdict.mode === 'auto_precond') {
+                        S.telemetry.climate1cr.mode = 'vent_only';
+                    }
                     startMsg = '🌬️ Đã bật quạt thông gió tươi cabin không nổ máy (' + hitLabel + ')!';
                 } else {
                     msgKind = 'warn';
@@ -1009,6 +1051,7 @@ function createService(customCfg) {
                 }
                 await callWorker('verify_1cr', {
                     waitMs: 0,
+                    ventOnly: isVentReq,
                     lastAction: isVentReq ? 'Thông gió quạt cabin' : 'Kích nổ / Làm mát 1CR',
                     lastResult: startMsg.slice(0, 90),
                 }, 2000);
@@ -1016,31 +1059,39 @@ function createService(customCfg) {
                 if (config.botToken && config.chatId) {
                     tg.sendMessage(startMsg, S.telemetry, config.valet.enabled).catch(() => {});
                 }
-                return { ok: verdict.mode === 'engine_1cr' || isVentReq, verified: true, mode: verdict.mode, message: startMsg, detail: { method: hitLabel, verdict, trace } };
+                return { ok: verdict.mode === 'engine_1cr' || isVentReq, verified: true, mode: S.telemetry.climate1cr.mode, message: startMsg, detail: { method: hitLabel, verdict, trace } };
             }
 
-            const errText = (lastVerifyRes && lastVerifyRes.explanation) || CarLink.explain1crError(verdict, S.telemetry);
+            const errText = (lastVerifyRes && lastVerifyRes.explanation) ||
+                (isVentReq ? CarLink.explainVentError(verdict, S.telemetry) : CarLink.explain1crError(verdict, S.telemetry));
             await callWorker('verify_1cr', {
                 waitMs: 0,
-                lastAction: 'Kích nổ 1CR (Chưa bật)',
+                ventOnly: isVentReq,
+                lastAction: isVentReq ? 'Thông gió (Chưa bật)' : 'Kích nổ 1CR (Chưa bật)',
                 lastResult: errText.slice(0, 90),
             }, 2000);
-            tell('1CR chưa bật: ' + errText, 'warn');
+            tell((isVentReq ? 'Thông gió chưa bật: ' : '1CR chưa bật: ') + errText, 'warn');
             if (source === 'Telegram' && config.botToken && config.chatId) {
-                tg.sendMessage('⚠️ 1CR chưa bật: ' + errText, S.telemetry, config.valet.enabled).catch(() => {});
+                tg.sendMessage('⚠️ ' + (isVentReq ? 'Thông gió: ' : '1CR: ') + errText, S.telemetry, config.valet.enabled).catch(() => {});
             }
             return { ok: false, verified: false, error: errText, detail: { verdict, trace } };
         }
 
         if (action === 'timer_set' || action === 'timer_off') {
             const en = action === 'timer_set';
-            const h = Number(arg.hour) || 7, m = Number(arg.minute) || 30;
+            const h = Number(arg.hour !== undefined ? arg.hour : 7) | 0;
+            const m = Number(arg.minute !== undefined ? arg.minute : 30) | 0;
             const hhmm = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
-            if (en) config.dailyTimer = hhmm;
-            else config.autoSyncTimer = false;
+            config.timerEnabled = en;
+            if (en) {
+                config.dailyTimer = hhmm;
+                config.lastTimerFiredKey = '';
+            } else {
+                config.autoSyncTimer = false;
+            }
             saveConfig();
             const rep = await callWorker('schedule1cr', { hour: h, minute: m, enabled: en, userInitiated: true }, 6000);
-            let timerMethod = rep && rep.ok && rep.result ? rep.result.method : '';
+            let timerMethod = (rep && rep.ok && rep.result && rep.result.syncedBdc) ? rep.result.method : '';
             if (!timerMethod && rep && rep.result && Array.isArray(rep.result.timerCandidates)) {
                 const tc = rep.result.timerCandidates.slice(0, 4);
                 for (let ti = 0; ti < tc.length; ti++) {
@@ -1053,13 +1104,15 @@ function createService(customCfg) {
             }
             S.telemetry.climate1cr.timerText = en ? hhmm : 'Tắt';
             const plain = en
-                ? ('Đã đặt hẹn giờ nổ máy 1CR lúc ' + hhmm + (timerMethod ? (' (' + timerMethod + ')') : ' (đã lưu lịch)'))
+                ? (timerMethod
+                    ? ('✅ Đã đồng bộ giờ khởi hành ' + hhmm + ' vào xe (' + timerMethod + ') & đặt lịch tự kích trên MGU!')
+                    : ('⏰ Đã bật hẹn giờ ' + hhmm + ' trên Trợ thủ MGU (tự kích 1CR đúng giờ khi MGU còn thức / có hộp đánh thức). Lưu ý: "Kế hoạch khởi hành" gốc iDrive không mở cổng ghi cho app ngoài — nếu xe ngủ sâu 0W qua đêm chưa có cục đánh thức, hãy tích hẹn thêm trực tiếp trên màn Điều hoà xe.'))
                 : 'Đã tắt hẹn giờ nổ máy 1CR.';
             tell(plain, 'go');
             if (config.botToken && config.chatId) {
                 tg.sendMessage((en ? '⏰ ' : '❌ ') + plain, S.telemetry, config.valet.enabled).catch(() => {});
             }
-            return { ok: true, message: plain, detail: rep && rep.result };
+            return { ok: true, syncedBdc: !!timerMethod, message: plain, detail: rep && rep.result };
         }
 
         if (action === 'valet_toggle' || action === 'valet_set') {
@@ -1206,16 +1259,25 @@ function createService(customCfg) {
             }
             const name = String(arg.name || 'Điểm đến từ MyBMW').trim().slice(0, 80);
             const address = String(arg.address || '').trim().slice(0, 140);
-            config.destination = { name, address, lat, lon, sentAt: Date.now() };
+            const navRep = await callWorker('send_nav_dest', { lat, lon, name, address }, 4500).catch(() => null);
+            const navSynced = !!(navRep && navRep.ok && navRep.result && navRep.result.ok);
+            const navMethod = navSynced ? String(navRep.result.method || '') : '';
+            config.destination = { name, address, lat, lon, navSynced, navMethod, sentAt: Date.now() };
             saveConfig();
             let distNote = '';
             if (S.telemetry && S.telemetry.pos) {
                 const dKm = CarLink.haversineKm(S.telemetry.pos.lat, S.telemetry.pos.lon, lat, lon);
                 distNote = ' (cách xe ' + dKm.toFixed(1) + ' km)';
             }
-            const msg = '📍 Đã nhận điểm đến trên xe: ' + name + distNote;
+            const gmapsUrl = 'https://www.google.com/maps/dir/?api=1&destination=' + lat + ',' + lon;
+            if (config.botToken && config.chatId) {
+                tg.sendMessage('📍 Điểm đến đã gửi xe: ' + name + distNote + (address ? ('\n' + address) : '') + '\n🧭 Chỉ đường (CarPlay / Google Maps): ' + gmapsUrl, S.telemetry, config.valet.enabled).catch(() => {});
+            }
+            const msg = navSynced
+                ? ('🧭 Đã đẩy "' + name + '"' + distNote + ' vào Dẫn đường BMW iDrive (' + navMethod + ')!')
+                : ('📍 Đã ghim "' + name + '"' + distNote + ' lên màn hình MyBMW & 1CR trên xe! (Bấm "Mở dẫn đường CarPlay / Google Maps" trên thẻ điểm đến để chạy dẫn đường ngay).');
             tell(msg, 'go');
-            return { ok: true, message: msg, detail: config.destination };
+            return { ok: true, navSynced, message: msg, detail: config.destination };
         }
 
         if (action === 'clear_destination') {
@@ -1274,6 +1336,7 @@ function createService(customCfg) {
             tgLastOkAt: tg.lastOkAt,
             tgError: tg.lastError,
             parkSnapshot: config.parkSnapshot,
+            timerEnabled: !!config.timerEnabled,
             autoSyncTimer: config.autoSyncTimer,
             dailyTimer: config.dailyTimer,
             valet: config.valet,
@@ -1291,6 +1354,38 @@ function createService(customCfg) {
             messageKind: S.messageKind,
         };
         try { writeAtomic(path.join(C.run, 'status.json'), JSON.stringify(payload), 0o644); } catch (e) {}
+    }
+
+    let lastTimerCheckAt = 0;
+    function checkScheduledTimer() {
+        const now = Date.now();
+        if (now - lastTimerCheckAt < 10000) return;
+        lastTimerCheckAt = now;
+        if (!config.timerEnabled || !/^\d{2}:\d{2}$/.test(config.dailyTimer || '')) return;
+        const tp = config.dailyTimer.split(':');
+        const targetMin = (Number(tp[0]) | 0) * 60 + (Number(tp[1]) | 0);
+        const tzMin = typeof config.tzOffsetMin === 'number' ? config.tzOffsetMin : 420;
+        const wall = new Date(realNow() + tzMin * 60000);
+        const pad2 = (n) => (n < 10 ? '0' : '') + n;
+        const ymd = wall.getUTCFullYear() + '-' + pad2(wall.getUTCMonth() + 1) + '-' + pad2(wall.getUTCDate());
+        const curMin = wall.getUTCHours() * 60 + wall.getUTCMinutes();
+        const fireKey = ymd + '@' + config.dailyTimer;
+        if (config.lastTimerFiredKey === fireKey) return;
+        if (curMin < targetMin || curMin > targetMin + 2) return;
+
+        config.lastTimerFiredKey = fireKey;
+        if (!config.autoSyncTimer) {
+            config.timerEnabled = false;
+            if (S.telemetry && S.telemetry.climate1cr) S.telemetry.climate1cr.timerText = 'Tắt';
+        }
+        saveConfig();
+        if (S.telemetry && (S.telemetry.engineRunning || (S.telemetry.climate1cr && S.telemetry.climate1cr.active))) {
+            return;
+        }
+        log('scheduled MGU timer firing start1cr at ' + config.dailyTimer + ' (' + ymd + ')');
+        executeAction('start1cr', {}, 'Hẹn giờ ' + config.dailyTimer)
+            .then(() => syncCloudState(true))
+            .catch(() => {});
     }
 
     function pollAppCommands() {
@@ -1549,6 +1644,7 @@ function createService(customCfg) {
 
         const tickTimer = setInterval(() => {
             try { pollAppCommands(); } catch (e) {}
+            try { checkScheduledTimer(); } catch (e) {}
             writeStatus();
             tg.pollOnce();
             cloud.pollCommandsOnce();
@@ -1593,7 +1689,7 @@ function createService(customCfg) {
         };
     }
 
-    return { S, tg, start, executeAction, onWorkerEvent, writeStatus, handleHttp };
+    return { S, tg, start, executeAction, onWorkerEvent, writeStatus, handleHttp, checkScheduledTimer, getConfig: () => config };
 }
 
 if (require.main === module) {

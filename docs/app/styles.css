@@ -689,6 +689,20 @@ input[type="text"], input[type="number"], input[type="time"], textarea {
   background: #090e1a;
 }
 
+#mapBox .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(185deg) brightness(0.9) contrast(0.95) saturate(0.84);
+}
+
+#mapBox .leaflet-control-attribution {
+  background: rgba(8, 12, 22, 0.78) !important;
+  color: #94a3b8 !important;
+  font-size: 9.5px !important;
+}
+
+#mapBox .leaflet-control-attribution a {
+  color: #38bdf8 !important;
+}
+
 /* Bottom Navigation Bar */
 .bottom-nav {
   position: fixed;

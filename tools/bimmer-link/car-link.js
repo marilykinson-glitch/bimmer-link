@@ -129,18 +129,31 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 /* ---------------- Catalog Introspection (`db.datatypes`) & 1CR Payload Synthesis ---------------- */
 
-const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|standfunktion|stationary|precond|parkheat|parkclim|remotestart|independent|departure|zeitschalt|timeswitch|\.lsc\.|\.rcn\./i;
+const CLIMATE_IFACE_RE = /climate|climatis|climatiz|aircond|hvac|heating|ventilat|thermal|auxiliary|standheiz|standklima|standfunktion|stationary|precond|parkheat|parkclim|remotestart|independent|departure|abfahrt|timer|zeitvorwahl|zeitschalt|zeitplan|timeswitch|\.lsc\.|\.rcn\./i;
 const NON_CLIMATE_IFACE_RE = /^de\.bmw\.(dass\.parking|parking|infotainment\.(video|navigation|media|audio|tuner|speech|map))\./i;
-const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|standfunktion|parkheat|parkklima|parkclim|airCondition(?:ing)?ParkFunctions|parkingFunctions(?:On|RES)|parkFunction|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departure.*timer|abfahrt|einschaltzeit|switchontime|zeitvorwahl|zeitschalt|timeswitch|timer.*park|park.*timer/i;
-const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
+const CLIMATE_MEMBER_HINT_RE = /standheiz|standklima|standlueft|standfunktion|parkheat|parkklima|parkclim|airCondition(?:ing)?ParkFunctions|parkingFunctions(?:On|RES)|parkFunction|precond|remotestart|remote.*engine|engine.*start.*clim|auxiliary.*clim|aux.*heat|aux.*vent|independent.*vent|independent.*clim|stationary.*clim|climatis.*now|climatiz.*now|climate.*now|direct.*oper|sofort|departurePlan|departureTime|departureSchedule|departure.*timer|abfahrt|einschaltzeit|switchontime|zeitvorwahl|zeitschalt|zeitplan|timeswitch|timerList|timerSlot|weeklyTimer|standTimer|preconditioningTimer|climatisationTimer|climatizationTimer|timer.*park|park.*timer/i;
+const BODY_IFACE_RE = /(^|\.)(Door|Window|Lock|CentralLock|Tailgate|Trunk|Bonnet|Hood|Flap|Body|Kombi|Vehicle|CDS|Fuel|Tank)/i;
 const NON_1CR_MEMBER_RE = /steeringwheel|lenkrad|seatheat|seatclim|seatvent|seatAuto|sitzheiz|sitzklima|armSupport|massage|fragrance|scent|ionis|ioniz|aura|acFond|climateFond|2Tier|3Tier|rearClimate|rearWindow|heckscheib|defrost|stratification|surfaceHeating|airDistribution|airBlow|airQuality|sync|functionECO|climateEco|climateSystemOn|intelligentPassenger|telephone|swipe|residualHeat|restwaerme|acSpecialFunction|extendedClimateFunctionalities/i;
+
+function fieldAttrFlags(fm) {
+    if (!fm || typeof fm !== 'object') return { getter: false, setter: false, notifier: false };
+    const hasExplicit = fm.getter !== undefined || fm.setter !== undefined || fm.notifier !== undefined || fm.dataRef !== undefined;
+    if (!hasExplicit) return { getter: true, setter: false, notifier: true };
+    const isPresent = (x) => x === true || (!!x && typeof x === 'object');
+    return {
+        getter: fm.getter === false ? false : isPresent(fm.getter),
+        setter: fm.setter === false ? false : isPresent(fm.setter),
+        notifier: fm.notifier === false ? false : isPresent(fm.notifier),
+    };
+}
 
 /** Classify a Climate / 1CR field or method into semantic roles for automatic invocation. */
 function classifyClimateMember(ifaceName, memberName, kind, meta) {
     if (NON_CLIMATE_IFACE_RE.test(ifaceName)) return [];
     const full = ifaceName + '.' + memberName;
     const roles = [];
-    const writable = kind === 'method' || !!(meta && meta.setter);
+    const flags = fieldAttrFlags(meta);
+    const writable = kind === 'method' || flags.setter;
     if (NON_1CR_MEMBER_RE.test(full)) {
         if (/status|state|active|on|mode/i.test(memberName) && !writable) roles.push('state_read');
         return roles;
@@ -467,18 +480,19 @@ function discoverClimateCatalog(db) {
         };
         fkeys.sort().forEach((fname) => {
             const fm = fields[fname] || {};
+            const flg = fieldAttrFlags(fm);
             const roles = classifyClimateMember(ifaceName, fname, 'field', fm);
             const isLsc = /\.lsc\./i.test(ifaceName);
             if (!ifaceMatches && !isLsc && !roles.length && !CLIMATE_MEMBER_HINT_RE.test(fname)) return;
             const ftype = extractTypeRef(db, iv, fm, 0);
             item.fields.push({
                 name: fname,
-                getter: fm.getter !== false,
-                setter: !!fm.setter,
-                notifier: fm.notifier !== false,
+                getter: flg.getter,
+                setter: flg.setter,
+                notifier: flg.notifier,
                 type: typeof ftype === 'string' ? ftype : null,
                 typeDef: resolveTypeDef(db, iv, ftype, 0),
-                roles: roles.length ? roles : (isLsc && !fm.setter ? ['lsc_read'] : roles),
+                roles: roles.length ? roles : (isLsc && !flg.setter ? ['lsc_read'] : roles),
             });
         });
         mkeys.sort().forEach((mname) => {
@@ -805,6 +819,22 @@ function explain1crError(verdict, telState) {
     return 'Hộp IHKA/BDC giữ trạng thái AUS (chưa kích hoạt). Hãy chắc chắn xe đã khoá từ bên ngoài (chìa ở ngoài xe) và đã có FSC 1CR trong DME/BDC.';
 }
 
+function explainVentError(verdict, telState) {
+    const v = verdict || {};
+    const t = telState || {};
+    if (t.engineRunning) {
+        return 'Xe đang nổ máy sẵn — điều hoà chính đang chạy trực tiếp (Thông gió đỗ xe chỉ dùng khi đã tắt máy).';
+    }
+    const rc = String(v.remoteControlStatus || '');
+    if (rc === 'BATTERIE') {
+        return 'Điện áp ắc quy 12V thấp (BATTERIE) — BMW tạm ngắt quạt thông gió đỗ xe để giữ điện đề máy.';
+    }
+    if (v.consentEnabled === true && (t.locked === true || !v.dwaDisarmed)) {
+        return 'Trên xe có Option 1CR đang tích chọn "Khởi động máy từ xa": khi xe đã khoá ngoài, BMW gộp làm mát vào nút "Đề nổ 1CR" (nổ máy chạy lốc lạnh); quạt gió tươi không nổ máy chỉ bật khi ngồi trong xe tắt máy ("Khởi động ngay").';
+    }
+    return 'Hộp điều hoà IHKA giữ trạng thái tắt (AUS) — hãy kiểm tra xe đã tắt máy hoàn toàn và bình 12V đủ điện.';
+}
+
 /**
  * Build prioritized, non-destructive candidate calls for `start1cr` / `stop1cr` across SP15 (`Climate2`) & SP18 (`ClimateMaster`).
  */
@@ -896,6 +926,14 @@ function build1crOrderedCandidates(climateCatalog, liveMap, wantOn, opts) {
                         hasLiveProvider: isLive,
                         payload: buildDirectPayload(f, true, sm, false, { mode: 'vent_only' }),
                         altPayload: buildDirectPayload(f, true, sm, true, { mode: 'vent_only' }),
+                    });
+                }
+                if (hasAuto && opts.allowUnlockedAutoVent) {
+                    bucket.push({
+                        iface: d.iface, kind: 'setter', name: f.name, stage: 'vent_cabin_auto',
+                        hasLiveProvider: isLive,
+                        payload: buildDirectPayload(f, true, sm, false, { mode: 'auto_1cr' }),
+                        altPayload: buildDirectPayload(f, true, sm, true, { mode: 'auto_1cr' }),
                     });
                 }
                 return;
@@ -1222,6 +1260,9 @@ function decodeWireVal(val, sc) {
         }
         return val;
     }
+    if (/^array$/i.test(tp) && sc.e && Array.isArray(val)) {
+        return val.map((item) => decodeWireVal(item, sc.e));
+    }
     if (/^struct$/i.test(tp) && Array.isArray(sc.e) && typeof val === 'object' && !Array.isArray(val)) {
         const out = {};
         const keys = Object.keys(val);
@@ -1302,14 +1343,43 @@ async function runWorker() {
 
     async function openDynamicProxies(ifaceName, attrMap, methods, broadcasts, maxInst) {
         if (!db || !gen || !someip || !db.interfaces || !db.interfaces[ifaceName]) return { list: [], cfg: null };
-        const spec = { instances: '*' };
-        if (attrMap && Object.keys(attrMap).length) spec.attributes = attrMap;
-        if (methods && methods.length) spec.methods = methods;
-        if (broadcasts && broadcasts.length) spec.broadcasts = broadcasts;
-        const proxies = {};
-        proxies[ifaceName] = spec;
-        const generated = gen.generate(db, { proxies, services: {} });
-        const cfg = generated && generated[ifaceName];
+        const buildCfg = (am, ml, bl) => {
+            const spec = { instances: '*' };
+            if (am && Object.keys(am).length) spec.attributes = am;
+            if (ml && ml.length) spec.methods = ml;
+            if (bl && bl.length) spec.broadcasts = bl;
+            const proxies = {};
+            proxies[ifaceName] = spec;
+            const generated = gen.generate(db, { proxies, services: {} });
+            return generated && generated[ifaceName];
+        };
+        let cfg = null;
+        try {
+            cfg = buildCfg(attrMap, methods, broadcasts);
+        } catch (e) {
+            // One ungeneratable field/method must never spoil the rest of the interface (as seen on G30 Vehicle/ADAS)
+            const cleanAttrs = {};
+            Object.keys(attrMap || {}).forEach((fn) => {
+                const want = attrMap[fn];
+                const tries = want === 'rs' ? ['rs', 's', 'r'] : [want];
+                for (let ti = 0; ti < tries.length; ti++) {
+                    try {
+                        const sub = {};
+                        sub[fn] = tries[ti];
+                        if (buildCfg(sub, [], [])) { cleanAttrs[fn] = tries[ti]; break; }
+                    } catch (e2) {}
+                }
+            });
+            const cleanMethods = (methods || []).filter((mn) => {
+                try { return !!buildCfg({}, [mn], []); } catch (e3) { return false; }
+            });
+            const cleanBroadcasts = (broadcasts || []).filter((bn) => {
+                try { return !!buildCfg({}, [], [bn]); } catch (e4) { return false; }
+            });
+            if (Object.keys(cleanAttrs).length || cleanMethods.length || cleanBroadcasts.length) {
+                try { cfg = buildCfg(cleanAttrs, cleanMethods, cleanBroadcasts); } catch (e5) { cfg = null; }
+            }
+        }
         if (!cfg) return { list: [], cfg: null };
         const insts = Object.keys(cfg.instances || { '1': 1 }).slice(0, maxInst || 3);
         const list = [];
@@ -1378,14 +1448,21 @@ async function runWorker() {
         }
 
         // 2 & 3. Unified single-proxy-per-interface Core + Body / Fuel / Range / Odometer / Door / Lock watchers
+        const kombiCcPollers = [];
+        let carTzMin = null;
         const coreMap = {
             'de.bmw.infotainment.vehicle.CDS': {
-                fields: ['statusEngineSpeed2', 'statusEngineTemperature'],
+                fields: ['statusEngineSpeed2', 'statusEngineTemperature', 'statusEngineStatus'],
                 onField: (f, v) => {
                     if (!v) return;
                     if (f === 'statusEngineSpeed2' && v.actualValueRPMEngineCrankshaft !== undefined && v.actualValueRPMEngineCrankshaft !== 65535) {
                         const rpm = v.actualValueRPMEngineCrankshaft * 0.25;
                         pushPatch({ rpm: rpm < 400 ? 0 : Math.round(rpm) });
+                    } else if (f === 'statusEngineStatus' && v.statusEngineRunDrive !== undefined) {
+                        const st = v.statusEngineRunDrive;
+                        if ((st === 'MOTOR_AUS' || st === 0) && (tracker.state.rpm || 0) >= 400) {
+                            pushPatch({ rpm: 0 });
+                        }
                     } else if (f === 'statusEngineTemperature') {
                         const patch = {};
                         if (v.temperatureEngineDrive !== undefined && v.temperatureEngineDrive < 250 && v.temperatureEngineDrive !== 48) {
@@ -1395,6 +1472,36 @@ async function runWorker() {
                             patch.oilC = v.temperatureEngineOilDrive - 48;
                         }
                         if (Object.keys(patch).length) pushPatch(patch);
+                    }
+                },
+            },
+            'de.bmw.infotainment.KombiIF': {
+                fields: ['statusRangeTankStatus', 'statusTimeDate', 'statusShowTimeDate'],
+                onField: (f, v) => {
+                    if (!v || typeof v !== 'object') return;
+                    if (f === 'statusRangeTankStatus') {
+                        const patch = {};
+                        const odo = Number(v.mileageKilometre);
+                        const rng = Number(v.range);
+                        const tankL = Number(v.fluidLevelFuelTank);
+                        if (isFinite(odo) && odo > 0 && odo < 16777215) patch.odometerKm = Math.round(odo);
+                        if (isFinite(rng) && rng >= 5 && rng < 4095) { patch.rangeKm = Math.round(rng); patch.rangeEstimated = false; }
+                        if (isFinite(tankL) && tankL > 0 && tankL < 250) patch.fuelLiters = +tankL.toFixed(1);
+                        if (Object.keys(patch).length) pushPatch(patch);
+                    } else if (f === 'statusTimeDate') {
+                        const raw = Number(v.statusTimeZonesOffset);
+                        if (isFinite(raw) && raw >= 0 && raw <= 104) {
+                            carTzMin = (raw - 32) * 15;
+                            emit({ ev: 'car_clock', tzMin: carTzMin });
+                        }
+                    } else if (f === 'statusShowTimeDate') {
+                        const yr = Number(v.displayDateYear), mo = Number(v.displayDateMonth), dy = Number(v.displayDateDay);
+                        const hr = Number(v.displayHour), mi = Number(v.displayMinute), sc = Number(v.displaySecond || 0);
+                        if (yr >= 2024 && yr <= 2099 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 && hr >= 0 && hr <= 23 && mi >= 0 && mi <= 59) {
+                            const tz = carTzMin !== null ? carTzMin : 420;
+                            const utcMs = Date.UTC(yr, mo - 1, dy, hr, mi, sc) - tz * 60000;
+                            emit({ ev: 'car_clock', utcMs, tzMin: carTzMin });
+                        }
                     }
                 },
             },
@@ -1458,6 +1565,9 @@ async function runWorker() {
                 onField: (f, v) => {
                     ccTracker.feedBasicList(v);
                     ccTracker.applyToState(pushPatch, tracker.state);
+                    if (ccTracker.hasUnresolvedActiveIds()) {
+                        kombiCcPollers.forEach((fn) => { try { fn(); } catch (e) {} });
+                    }
                 },
             },
             'de.bmw.infotainment.KombiInterface_2': {
@@ -1474,9 +1584,9 @@ async function runWorker() {
             },
         };
 
-        const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|\.lsc\.|steeringwheel|cameraproxy|xview)/i;
-        const BODY_FIELD_RE = /(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|door|doors|tuer|tueren|flap|flaps|klappe|klappen|window|fenster|centralLock|lockState|verriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|tyrePressure|tirePressure|pressureTyre)/i;
-        const BODY_SKIP_FIELD_RE = /(dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
+        const BODY_SKIP_IFACE_RE = /(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|\.lsc\.|steeringwheel|cameraproxy|xview|tasu)/i;
+        const BODY_FIELD_RE = /(?:(^|status|position|_)(tank|fuel|kraftstoff|fuellstand|range|drivingRange|displayRange|combustionRange|cruisingRange|remainingRange|residualRange|tankRange|totalRange|electricRange|reichweite|kilometerstand|odometer|totalDistance|outsideTemp|exteriorTemp|ambientTemp|window|fenster|tyrePressure|tirePressure|pressureTyre))|(door|doors|tuer|tueren|flap|flaps|klappe|klappen|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|tailgate|trunk|bootLid|heckklappe|kofferraum|gepaeckraum|bonnet|hood|motorhaube|frontklappe|haube|checkControl|parkingFunctionIncident)/i;
+        const BODY_SKIP_FIELD_RE = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
         const targetIfaces = {};
         Object.keys(coreMap).forEach((k) => { targetIfaces[k] = true; });
         allIfaces.forEach((k) => {
@@ -1499,28 +1609,29 @@ async function runWorker() {
             const coreWant = cs ? cs.fields.filter((f) => !!iv.fields[f]) : [];
             const merged = {};
             coreWant.concat(bodyWant).forEach((fname) => {
-                const fm = iv.fields[fname] || {};
-                merged[fname] = (fm.getter !== false ? 'r' : '') + (fm.notifier !== false ? 's' : '') || 'r';
+                const flg = fieldAttrFlags(iv.fields[fname]);
+                merged[fname] = (flg.getter ? 'r' : '') + (flg.notifier ? 's' : '') || 's';
             });
             const mergedKeys = Object.keys(merged);
             if (!mergedKeys.length) continue;
             try {
-                let opened = await openWildcardProxies(name, 3);
-                if (!opened.list.length) opened = await openDynamicProxies(name, merged, [], [], 3);
+                let opened = await openDynamicProxies(name, merged, [], [], 3);
+                if (!opened.list.length) opened = await openWildcardProxies(name, 3);
                 if (!opened.list.length) continue;
                 const cfgFields = (opened.cfg && opened.cfg.fields) || {};
                 opened.list.forEach((instItem, instIdx) => {
                     const px = instItem.proxy;
                     mergedKeys.forEach((fname) => {
-                        const fm = iv.fields[fname] || {};
-                        const cf = cfgFields[fname] || {};
-                        const canGet = cf.getter !== undefined ? !!cf.getter : (fm.getter !== false);
-                        const canSub = (cf.event !== undefined || cf.notifier !== undefined) ? !!(cf.event || cf.notifier) : (fm.notifier !== false);
+                        const cf = cfgFields[fname];
+                        if (opened.cfg && opened.cfg.fields && !cf) return;
+                        const flg = fieldAttrFlags(iv.fields[fname]);
+                        const canGet = cf && cf.getter !== undefined ? !!cf.getter : flg.getter;
+                        const canSub = cf && (cf.event !== undefined || cf.notifier !== undefined) ? !!(cf.event || cf.notifier) : flg.notifier;
                         const isCore = cs && cs.fields.indexOf(fname) >= 0;
                         const isBody = bodyWant.indexOf(fname) >= 0;
                         const handler = (rawVal) => {
                             if (rawVal === undefined || rawVal === null) return;
-                            const val = cf.schema ? decodeWireVal(rawVal, cf.schema) : rawVal;
+                            const val = (cf && cf.schema) ? decodeWireVal(rawVal, cf.schema) : rawVal;
                             bodyLive[name + '.' + fname] = val;
                             if (isCore) cs.onField(fname, val);
                             if (isBody) interpretBodyField(name, fname, val, pushPatch, tracker.state);
@@ -1528,8 +1639,14 @@ async function runWorker() {
                         if (canSub) { try { px.subscribe({ name: fname, onReceive: handler }); } catch (e) {} }
                         if (canGet) {
                             try { px.getValue(fname, 2500).then(handler).catch(() => {}); } catch (e) {}
-                            if (instIdx === 0 && (isBody || /\.TPMS$|CheckControl|KombiInterface/i.test(name))) {
+                            if (instIdx === 0 && (isBody || /\.TPMS$|CheckControl|KombiInterface|KombiIF/i.test(name))) {
                                 bodyPollers.push(() => { try { px.getValue(fname, 1600).then(handler).catch(() => {}); } catch (e) {} });
+                            }
+                            if (instIdx === 0 && (/^(basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) || /centralLock|verriegel/i.test(fname))) {
+                                fastSecurityPollers.push(() => { try { px.getValue(fname, 1200).then(handler).catch(() => {}); } catch (e) {} });
+                            }
+                            if (instIdx === 0 && /KombiInterface_2$/i.test(name) && fname === 'ccList') {
+                                kombiCcPollers.push(() => { try { px.getValue('ccList', 1500).then(handler).catch(() => {}); } catch (e) {} });
                             }
                         }
                     });
@@ -1960,7 +2077,8 @@ async function runWorker() {
             const ventOnly = !!params.ventOnly;
             const roleKey = wantOn ? 'start' : 'stop';
             const verdict = await refreshLive1crVerdict(params.oapLive);
-            const built = build1crOrderedCandidates(climateCatalog, climateLive, wantOn, { ventOnly });
+            const allowUnlockedAutoVent = !!(ventOnly && wantOn && (tracker.state.locked === false || verdict.dwaDisarmed));
+            const built = build1crOrderedCandidates(climateCatalog, climateLive, wantOn, { ventOnly, allowUnlockedAutoVent });
             const rawPin = (!ventOnly && savedProfile) ? savedProfile[roleKey] : null;
             const isLegacyBadPin = wantOn && rawPin && rawPin.payload &&
                 rawPin.payload.operationParkAirConditioning === 'STANDKLIMATISIERUNG_EIN' &&
@@ -1981,10 +2099,11 @@ async function runWorker() {
             if (params.lastAction) tracker.state.climate1cr.lastAction = String(params.lastAction);
             if (params.lastResult) tracker.state.climate1cr.lastResult = String(params.lastResult);
             if (params.lastAction || params.lastResult) pushPatch({});
+            const isVent = !!params.ventOnly;
             return {
                 ok: true,
                 verdict,
-                explanation: verdict.active ? '' : explain1crError(verdict, tracker.state),
+                explanation: verdict.active ? '' : (isVent ? explainVentError(verdict, tracker.state) : explain1crError(verdict, tracker.state)),
             };
         }
 
@@ -2135,9 +2254,11 @@ async function runWorker() {
                 tracker.state.climate1cr.timerText = en ? hhmm : 'Tắt';
             }
             tracker.state.climate1cr.lastAction = (en ? 'Đặt hẹn giờ 1CR ' : 'Huỷ hẹn giờ 1CR ') + hhmm;
-            tracker.state.climate1cr.lastResult = succeeded ? ('Đã lưu vào BDC/IHKA qua ' + succeeded) : 'Đã lưu lịch chờ đồng bộ xuống xe';
+            tracker.state.climate1cr.lastResult = en
+                ? (succeeded ? ('Đã đồng bộ BDC/IHKA qua ' + succeeded) : ('Hẹn tự kích MGU lúc ' + hhmm))
+                : 'Đã tắt hẹn giờ 1CR';
             pushPatch({});
-            return { ok: !!succeeded, method: succeeded || 'queued', trace, timerCandidates };
+            return { ok: !!succeeded, syncedBdc: !!succeeded, method: succeeded || '', trace, timerCandidates };
         }
 
         return { ok: false, error: 'unknown 1CR action: ' + action };
@@ -2389,6 +2510,37 @@ async function runWorker() {
                 } else if (fname === 'cbsDataServiceList') {
                     const cbs = parseKombiCbsList(val);
                     if (cbs) pushPatch({ cbsList: cbs });
+                } else if (fname === 'statusRangeTankStatus' && val && typeof val === 'object') {
+                    const patch = {};
+                    const odo = Number(val.mileageKilometre);
+                    const rng = Number(val.range);
+                    const tankL = Number(val.fluidLevelFuelTank);
+                    if (isFinite(odo) && odo > 0 && odo < 16777215) patch.odometerKm = Math.round(odo);
+                    if (isFinite(rng) && rng >= 5 && rng < 4095) { patch.rangeKm = Math.round(rng); patch.rangeEstimated = false; }
+                    if (isFinite(tankL) && tankL > 0 && tankL < 250) patch.fuelLiters = +tankL.toFixed(1);
+                    if (Object.keys(patch).length) pushPatch(patch);
+                } else if (fname === 'statusTimeDate' && val && typeof val === 'object') {
+                    const raw = Number(val.statusTimeZonesOffset);
+                    if (isFinite(raw) && raw >= 0 && raw <= 104) {
+                        carTzMin = (raw - 32) * 15;
+                        emit({ ev: 'car_clock', tzMin: carTzMin });
+                    }
+                } else if (fname === 'statusShowTimeDate' && val && typeof val === 'object') {
+                    const yr = Number(val.displayDateYear), mo = Number(val.displayDateMonth), dy = Number(val.displayDateDay);
+                    const hr = Number(val.displayHour), mi = Number(val.displayMinute), sc = Number(val.displaySecond || 0);
+                    if (yr >= 2024 && yr <= 2099 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 && hr >= 0 && hr <= 23 && mi >= 0 && mi <= 59) {
+                        const tz = carTzMin !== null ? carTzMin : 420;
+                        const utcMs = Date.UTC(yr, mo - 1, dy, hr, mi, sc) - tz * 60000;
+                        emit({ ev: 'car_clock', utcMs, tzMin: carTzMin });
+                    }
+                } else if ((fname === 'currentLocation' || fname === 'rawPositionData') && val && typeof val === 'object') {
+                    const c = extractCoords(val, 0);
+                    if (c) {
+                        const pl = fname === 'currentLocation' ? extractPlaceText(val) : { street: '', district: '', city: '' };
+                        if (!(fname === 'rawPositionData' && tracker.state.pos && tracker.state.pos.source === 'nav' && (Date.now() - tracker.state.pos.at < 60000))) {
+                            pushPatch({ pos: { lat: c.lat, lon: c.lon, street: pl.street, district: pl.district, city: pl.city, source: fname === 'currentLocation' ? 'nav' : 'gnss', at: Date.now() } });
+                        }
+                    }
                 } else if (/^status(Target)?Tyre(Pressure|Temperature)$/i.test(fname)) {
                     interpretTpmsField(fname, val, carUnits, pushPatch, tracker.state);
                 }
@@ -2464,6 +2616,10 @@ async function runWorker() {
                 },
                 state: tracker.state,
             });
+        } else if (cmd.op === 'send_nav_dest') {
+            const p = cmd.params || {};
+            const navRes = await trySendNavigationDestination(db, gen, someip, nativeTick, p.lat, p.lon, p.name, p.address);
+            emit({ ev: 'reply', reqId, ok: !!navRes.ok, result: navRes, state: tracker.state });
         } else if (cmd.op === 'scan_health') {
             const report = await scanVehicleHealth();
             emit({ ev: 'reply', reqId, ok: true, result: report, state: tracker.state });
@@ -2625,14 +2781,26 @@ function interpretBodyField(iface, fname, val, pushPatch, curState) {
         return;
     }
 
-    if (/centralLock|lockState|^statusLock|zentralverriegelung|verriegelung/i.test(fname) &&
+    if (/centralLock|doorLock|lockState|lockStatus|^statusLock|zentralverriegelung|verriegelung/i.test(fname) &&
         !/ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|available|bootLid|trunk|tailgate|tank|charge/i.test(fname)) {
         const s = JSON.stringify(val).toUpperCase();
-        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) {
-            pushPatch({ locked: true });
+        if (/(^|_|")(LOCKED|SECURED|VERRIEGELT|GESICHERT|ZENTRAL_VERRIEGELT|ZENTRALVERRIEGELT)(_|$|")/.test(s) && !/UNLOCKED|ENTRIEGELT/.test(s)) {
+            pushPatch({ locked: true, _centralLockLocked: true });
         } else if (/(^|_|")(UNLOCKED|ENTRIEGELT)(_|$|")/.test(s) && !/LOCKED|VERRIEGELT/.test(s)) {
-            if (!curState.dwaArmed) pushPatch({ locked: false });
+            const patch = { _centralLockLocked: false };
+            if (!curState.dwaArmed) patch.locked = false;
+            pushPatch(patch);
         }
+        return;
+    }
+
+    if (/parkingFunctionIncident/i.test(fname)) {
+        const s = JSON.stringify(val).toUpperCase();
+        const patch = {};
+        if (/ABORTED_HOOD_OPEN/.test(s)) patch.hoodOpen = true;
+        if (/ABORTED_TRUNK_OPEN|PLEASE_CLOSE_TRUNK/.test(s)) patch.trunkOpen = true;
+        if (/ABORTED_DOORS_OPEN/.test(s) && !(curState.doorsOpen && curState.doorsOpen.length)) patch.doorsOpen = ['Cửa xe'];
+        if (Object.keys(patch).length) pushPatch(patch);
         return;
     }
 
@@ -2829,12 +2997,26 @@ function interpretTpmsField(fname, val, units, pushPatch, curState) {
     interpretLscField(fname, val, pushPatch, curState, u);
 }
 
+function normViCheckText(s) {
+    return String(s || '')
+        .normalize ? String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').toLowerCase()
+        : String(s || '').toLowerCase();
+}
+
 /** Stateful tracker combining CheckControlMaster.basicList + KombiInterface_2.ccList / newCCMessage. */
 class CheckControlTracker {
     constructor() {
         this.active = {};    // id -> { ecu, reason }
         this.names = {};     // id -> { name, color }
         this.sawList = false;
+    }
+
+    hasUnresolvedActiveIds() {
+        const ids = Object.keys(this.active);
+        for (let i = 0; i < ids.length; i++) {
+            if (!this.names[ids[i]] || !this.names[ids[i]].name) return true;
+        }
+        return false;
     }
 
     _walk(o, fn, depth) {
@@ -2888,6 +3070,7 @@ class CheckControlTracker {
             const id = ids[i];
             const meta = this.names[id] || {};
             const nm = meta.name || '';
+            const nNorm = normViCheckText(nm);
             const col = meta.color || '';
             const sev = (col === 'RED' || col === '1') ? 'crit' : ((col === 'YELLOW' || col === 'ORANGE' || col === '2' || col === '4') ? 'warn' : 'info');
             list.push({
@@ -2897,12 +3080,12 @@ class CheckControlTracker {
                 ecu: this.active[id].ecu,
             });
             if (nm) {
-                if (/ca-pô|ca pô|capo|nắp máy|bonnet|engine hood|\bhood\b|frontklappe|motorhaube/i.test(nm)) {
+                if (/ca[- ]?po|nap may|m[o?]\s*n[a?]p\s*ca|bonnet|engine hood|\bhood\b|frontklappe|motorhaube/i.test(nNorm)) {
                     ccHood = true;
-                } else if (/cốp|khoang hành lý|cửa hậu|cửa sau mở|tailgate|boot lid|\bboot open\b|\btrunk\b|heckklappe|gepaeckraum/i.test(nm)) {
+                } else if (/\bcop\b|c[o?]p\s*(sau|xe|mo)|khoang hanh ly|cua hau|cua sau mo|tailgate|boot lid|\bboot open\b|\btrunk\b|heckklappe|gepaeckraum/i.test(nNorm)) {
                     ccTrunk = true;
-                } else if (/cửa.*(mở|chưa đóng)|mở cửa|door open|front door|rear door|driver.*door|passenger.*door|tür offen|tuer offen|fahrertür|beifahrertür/i.test(nm) &&
-                    !/ca-pô|ca pô|capo|cốp|sổ trời|kính|xăng|sạc/i.test(nm)) {
+                } else if ((/cua.*(mo|chua dong)|mo cua|m[o?]\s*c[u?]a|c[u?]a\s*(tai|phu|truoc|sau|lai|hanh khach)|door open|front door|rear door|driver.*door|passenger.*door|tuer offen|fahrertuer|beifahrertuer/i.test(nNorm)) &&
+                    !/ca[- ]?po|cop|so troi|kinh|xang|sac/i.test(nNorm)) {
                     ccDoors.push(nm);
                 }
             }
@@ -3064,7 +3247,11 @@ function interpretLscField(fname, val, pushPatch, curState, units) {
         } else if (arm === 'DWA_ENTSCHAERFT' || val.statusDWAArming === 0) {
             if (curState._sawDwaArmed) {
                 patch.dwaArmed = false;
-                patch.locked = false;
+                // Only transition `locked = false` on the unlock edge (when DWA was previously armed -> disarmed)
+                // so locking doors while sitting inside the cabin (where BMW keeps DWA disarmed) is never overwritten!
+                if (curState.dwaArmed === true && !curState._centralLockLocked) {
+                    patch.locked = false;
+                }
             }
         }
         const cyc = val.statusAlarmArmingCycle;
@@ -3210,16 +3397,18 @@ function discoverRemoteBodyCatalog(db) {
         const methods = [];
         Object.keys(iv.fields || {}).forEach((fn) => {
             const fm = iv.fields[fn] || {};
-            if (!fm.setter) return;
+            const flg = fieldAttrFlags(fm);
+            if (!flg.setter) return;
             const roles = classifyBodyCmdMember(ifn, fn);
             if (!roles.length) return;
+            const ftype = extractTypeRef(db, iv, fm, 0);
             fields.push({
                 name: fn,
-                getter: !!fm.getter,
+                getter: flg.getter,
                 setter: true,
-                notifier: !!fm.notifier,
-                type: fm.type || fm.dataRef || null,
-                typeDef: resolveTypeDef(db, fm.type || fm.dataRef),
+                notifier: flg.notifier,
+                type: typeof ftype === 'string' ? ftype : null,
+                typeDef: resolveTypeDef(db, iv, ftype, 0),
                 roles,
             });
         });
@@ -3227,14 +3416,9 @@ function discoverRemoteBodyCatalog(db) {
             const mm = iv.methods[mn] || {};
             const roles = classifyBodyCmdMember(ifn, mn);
             if (!roles.length) return;
-            const inList = Array.isArray(mm.in) ? mm.in : [];
             methods.push({
                 name: mn,
-                inArgs: inList.map((a) => ({
-                    name: a && a.name,
-                    type: a && (a.type || a.dataRef),
-                    typeDef: resolveTypeDef(db, a && (a.type || a.dataRef)),
-                })),
+                inArgs: parseMethodInArgs(db, iv, mm),
                 roles,
             });
         });
@@ -3243,6 +3427,88 @@ function discoverRemoteBodyCatalog(db) {
         }
     });
     return { interfaces: out };
+}
+
+function buildNavArgValue(meta, lat, lon, name, address, depth) {
+    if (!meta || (depth || 0) > 5) return undefined;
+    const k = String(meta.name || '');
+    const td = meta.typeDef;
+    const tpStr = String((meta.type || '') + ' ' + ((td && td.name) || '') + ' ' + ((td && td.kind) || ''));
+    if (/lat(itude)?$/i.test(k)) {
+        return /Int32|Int64/i.test(tpStr) ? Math.round(lat * 1e7) : lat;
+    }
+    if (/lon(gitude)?$/i.test(k)) {
+        return /Int32|Int64/i.test(tpStr) ? Math.round(lon * 1e7) : lon;
+    }
+    if (/coordinatesValid|isValid|valid/i.test(k)) return true;
+    if (/^(name|title|label|locationName|orthography|text)$/i.test(k)) return String(name || 'Điểm đến');
+    if (/address|street|description/i.test(k) && (!td || td.kind === 'primitive')) return String(address || name || '');
+    if (td && td.kind === 'struct' && Array.isArray(td.fields)) {
+        const o = {};
+        td.fields.forEach((f) => {
+            if (f && f.name) {
+                const sub = buildNavArgValue(f, lat, lon, name, address, (depth || 0) + 1);
+                if (sub !== undefined) o[f.name] = sub;
+            }
+        });
+        return o;
+    }
+    if (td && td.kind === 'enum' && Array.isArray(td.values) && td.values.length) {
+        return td.values[0];
+    }
+    if (/bool/i.test(tpStr)) return false;
+    if (/Int|UInt|Float|Double/i.test(tpStr)) return 0;
+    if (/String/i.test(tpStr)) return '';
+    return undefined;
+}
+
+async function trySendNavigationDestination(db, gen, someip, nativeTick, lat, lon, name, address) {
+    if (!db || !gen || !someip || !validCoords(lat, lon)) {
+        return { ok: false, reason: 'no_someip' };
+    }
+    const ifs = db.interfaces || {};
+    const navMethodRe = /^(startGuidance|setDestination|addDestination|navigateTo|sendToCar|importDestination|startNavigation|requestGuidance)$/i;
+    const navHintRe = /(startGuidance|setDestination|addDestination|destinationInput|sendToCar|importDestination)/i;
+    const cands = [];
+    Object.keys(ifs).sort().forEach((ifn) => {
+        if (!/navigation/i.test(ifn) || /\.oap\./i.test(ifn)) return;
+        const iv = ifs[ifn] || {};
+        Object.keys(iv.methods || {}).forEach((mn) => {
+            if (navMethodRe.test(mn) || navHintRe.test(mn)) {
+                cands.push({ iface: ifn, iv, method: mn, mm: iv.methods[mn] });
+            }
+        });
+    });
+    if (!cands.length) {
+        return { ok: false, reason: 'no_nav_method_in_catalog' };
+    }
+    const tried = [];
+    for (let i = 0; i < cands.length && i < 6; i++) {
+        const c = cands[i];
+        try {
+            const proxies = {};
+            proxies[c.iface] = { instances: '*', methods: [c.method] };
+            const generated = gen.generate(db, { proxies, services: {} });
+            const cfg = generated && generated[c.iface];
+            if (!cfg) continue;
+            const cm = (cfg.methods && cfg.methods[c.method]) || c.mm;
+            const inArgs = parseMethodInArgs(db, c.iv, cm);
+            const payload = {};
+            inArgs.forEach((a) => {
+                if (a && a.name) {
+                    const v = buildNavArgValue(a, lat, lon, name, address, 0);
+                    if (v !== undefined) payload[a.name] = v;
+                }
+            });
+            const inst = Object.keys(cfg.instances || { '1': 1 })[0] || '1';
+            const px = await nativeTick(() => within(someip.buildProxy(cfg, String(inst)).then((p) => p.init().then(() => p)), 3500, c.iface));
+            const resp = await nativeTick(() => within(px.callMethod(c.method, payload, 2800), 3200, c.method));
+            return { ok: true, method: c.iface.split('.').pop() + '.' + c.method, response: resp || null };
+        } catch (e) {
+            tried.push(c.iface.split('.').pop() + '.' + c.method + ': ' + e.message);
+        }
+    }
+    return { ok: false, reason: 'rejected', tried };
 }
 
 function pickBodyRoleEnum(td, role, numericEnum) {
@@ -3330,6 +3596,9 @@ module.exports = {
     build1crOrderedCandidates,
     evaluate1crVerdict,
     explain1crError,
+    explainVentError,
+    fieldAttrFlags,
+    normViCheckText,
     buildTimerPayload,
     interpretClimateField,
     interpretBodyField,

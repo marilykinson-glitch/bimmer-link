@@ -159,7 +159,7 @@ function draw(cv, G, t, v, act) {
         : (c1.mode === 'vent_only'
             ? 'Quạt cabin đang chạy'
             : (c1Active ? 'AC đỗ xe (Chưa nổ)' : (c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn ' + c1.timerText) : 'Sẵn sàng kích hoạt')));
-    const timerStr = c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn BDC: ' + c1.timerText) : 'Hẹn giờ: Tắt';
+    const timerStr = c1.timerText && c1.timerText !== 'Tắt' ? ('Hẹn nổ: ' + c1.timerText) : 'Hẹn giờ: Tắt';
     infoCard(cv, G, t, rx, cy, cw, ch, {
         key: 'blCard1cr',
         title: 'Đề nổ từ xa 1CR',
@@ -180,7 +180,8 @@ function draw(cv, G, t, v, act) {
     const fuelBat = 'Xăng: ' + (tel.fuelPct != null ? tel.fuelPct + '%' : '--') +
         (tel.rangeKm != null ? (' (' + tel.rangeKm + ' km)') : '') +
         ' · Bình: ' + (tel.battery12v != null ? (tel.battery12v + 'V') : 'OK');
-    const hasOpen = (tel.doorsOpen && tel.doorsOpen.length) || (tel.windowsOpen && tel.windowsOpen.length) || tel.trunkOpen || tel.hoodOpen || tel.locked === false;
+    const parkedUnlocked = tel.locked === false && !tel.engineRunning && (tel.condition == null || tel.condition < 7);
+    const hasOpen = (tel.doorsOpen && tel.doorsOpen.length) || (tel.windowsOpen && tel.windowsOpen.length) || tel.trunkOpen || tel.hoodOpen || parkedUnlocked;
     const dst = v.destination;
     const tireSummary = (tel.tires && tel.tires.fl != null)
         ? ('Lốp: ' + tel.tires.fl + '/' + tel.tires.fr + ' bar')

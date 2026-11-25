@@ -338,14 +338,14 @@ def manifest_for(spec):
             entry = '*'
         proxies[iface] = entry
     if spec.get('autoClimateSignals') and unit_ifaces is not None:
-        pat = re.compile(r'(climate|klimat|aircond|precond|standheiz|standklima|auxiliary)', re.I)
+        pat = re.compile(r'(climate|klimat|aircond|precond|standheiz|standklima|auxiliary|departure|timer|zeit|abfahrt|lsc|rcn)', re.I)
         for name, meta in sorted(unit_ifaces.items()):
             if name in proxies or '.oap.' in name:
                 continue
             if pat.search(name) and isinstance(meta, dict) and meta.get('instances'):
                 proxies[name] = '*'
     if spec.get('autoVehicleSignals') and unit_ifaces is not None:
-        vpat = re.compile(r'(door|tuer|flap|klappe|bonnet|hood|tailgate|trunk|centrallock|doorlock|verriegel|checkcontrol|kombiinterface|tpms|lscdatasource|exteriorlight|horn|remotecontrol|rcn)', re.I)
+        vpat = re.compile(r'(door|tuer|flap|klappe|bonnet|hood|tailgate|trunk|centrallock|doorlock|verriegel|checkcontrol|kombiinterface|kombiif|tpms|lscdatasource|exteriorlight|horn|remotecontrol|rcn|\.body\.)', re.I)
         skip = re.compile(r'(\.oap\.|infotainment\.(video|audio|media|tuner|navigation|map|speech|browser|personalization|dataprivacy|climate)|steeringwheel|cameraproxy|xview)', re.I)
         added = 0
         for name, meta in sorted(unit_ifaces.items()):
@@ -354,7 +354,7 @@ def manifest_for(spec):
             if vpat.search(name) and isinstance(meta, dict) and meta.get('instances'):
                 proxies[name] = '*'
                 added += 1
-                if added >= 20:
+                if added >= 32:
                     break
     return {'proxies': proxies, 'services': PLATFORM_SERVICES}
 

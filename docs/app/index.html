@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="styles.css?v=0.6.4">
+<link rel="stylesheet" href="styles.css?v=0.6.5">
 <title>MyBMW</title>
 </head>
 <body>
@@ -155,7 +155,7 @@
             <path d="M9 2h6"/>
           </svg>
         </button>
-        <div class="act-label" id="lblTimer">Hẹn giờ BDC</div>
+        <div class="act-label" id="lblTimer">Hẹn giờ 1CR</div>
       </div>
     </div>
 
@@ -214,11 +214,13 @@
     <!-- Timer Quick Card (collapsible) -->
     <div id="timerSheet" class="glass-card hidden">
       <div class="card-head">
-        <span>⏰ Hẹn giờ khởi hành 1CR (Hộp BDC/IHKA)</span>
+        <span>⏰ Hẹn giờ khởi hành 1CR &amp; Giải thích chế độ</span>
         <span style="cursor:pointer;color:var(--dim)" onclick="toggleEl('timerSheet')">Đóng</span>
       </div>
-      <div style="font-size:12.5px;color:var(--dim);margin-bottom:8px">
-        Lưu trực tiếp xuống hộp BDC/IHKA của xe — tới giờ tự thức dậy đề nổ máy làm mát cabin kể cả khi đầu MGU đã tắt điện ngủ 0W.
+      <div style="font-size:12px;color:var(--dim);margin-bottom:8px;line-height:1.45">
+        • <b>Đề nổ 1CR:</b> Nổ động cơ thật chạy lốc lạnh A/C sâu (yêu cầu tắt máy &amp; đã khoá xe từ bên ngoài).<br>
+        • <b>Thông gió:</b> Chỉ quay quạt gió tươi cabin bằng bình 12V khi tắt máy, <i>không nổ động cơ</i>.<br>
+        • <b>Hẹn giờ:</b> Tự kích 1CR đúng giờ trên MGU (và đồng bộ cổng hẹn SOME/IP nếu có). Nếu để xe ngủ 0W qua đêm chưa gắn cục đánh thức OBD-ATM2, hãy tích thêm giờ trong mục <i>Kế hoạch khởi hành</i> trên màn Điều hoà xe.
       </div>
       <div class="btn-row">
         <input type="time" id="timerInput" value="07:30" style="flex:1">
@@ -226,7 +228,7 @@
         <button class="btn" onclick="cancelTimer()">Tắt hẹn</button>
       </div>
       <div class="switch-row" style="margin-top:6px">
-        <span>Tự động nạp lại giờ này mỗi lần tắt máy</span>
+        <span>Lặp lại mỗi ngày / tự nạp lại khi tắt máy</span>
         <input type="checkbox" id="chkAutoSync" onchange="saveTimerPrefs()">
       </div>
     </div>
@@ -356,7 +358,10 @@
           <div style="font-size:12.5px;font-weight:700;color:#e0f2fe" id="sentDestTitle">--</div>
           <div style="font-size:11px;color:var(--dim);margin-top:2px" id="sentDestSub">--</div>
         </div>
-        <button type="button" class="mini-refresh" onclick="clearCarDestination()">✕ Xoá</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button type="button" class="mini-refresh" onclick="openSentDestinationMaps()">🧭 Dẫn đường</button>
+          <button type="button" class="mini-refresh" onclick="clearCarDestination()">✕ Xoá</button>
+        </div>
       </div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:8px;line-height:1.4">
         Nhập tên địa điểm / địa chỉ hoặc dán toạ độ Google Maps để ghim trực tiếp lên màn hình iDrive 7 của xe:
@@ -591,6 +596,6 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="app.js?v=0.6.4"></script>
+<script src="app.js?v=0.6.5"></script>
 </body>
 </html>

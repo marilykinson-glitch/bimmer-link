@@ -134,6 +134,8 @@ def check_full_mgu_build_and_real_kit_render(app_ver):
             assert man_j['proxies'].get('de.bmw.infotainment.climate.Climate2') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.climate.climatemaster.ClimateMaster') == '*'
             assert man_j['proxies'].get('de.bmw.infotainment.lsc.LSCDataSink') == '*'
+            assert 'statusRangeTankStatus' in man_j['proxies'].get('de.bmw.infotainment.KombiIF', {}).get('attributes', {})
+            assert 'currentLocation' in man_j['proxies'].get('de.bmw.infotainment.navigation.positioning.Positioning', {}).get('attributes', {})
 
         cloud_src = open(os.path.join(ROOT, 'tools/bimmer-link/cloud.js'), encoding='utf-8').read()
         m_chunk = re.search(r'const CHUNK_BYTES\s*=\s*(\d+);', cloud_src)
@@ -984,6 +986,98 @@ def check_car_link_logic_in_jxa():
     if (ckmState.locked !== true) {{
       throw new Error('centralLockingCKM corrupted locked state: ' + JSON.stringify(ckmState));
     }}
+
+    // Test 11 (v0.6.5): Array wire enum decode, fieldAttrFlags, lost-glyph CheckControl, interior lock stability, Vent vs 1CR
+    var arrSchema = {{
+      t: 'Struct',
+      e: [{{
+        n: 'basicList',
+        t: 'Array',
+        e: {{
+          t: 'Struct',
+          e: [
+            {{ n: 'ccmId', t: 'UInt16' }},
+            {{ n: 'activeState', t: 'Enum', e: {{ AKTIV: 0, INAKTIV: 1 }} }}
+          ]
+        }}
+      }}]
+    }};
+    var decArr = C.decodeWireVal({{ basicList: [{{ ccmId: 215, activeState: 0 }}] }}, arrSchema);
+    if (!decArr || !decArr.basicList || decArr.basicList[0].activeState !== 'AKTIV') {{
+      throw new Error('decodeWireVal failed to recurse into Array of Structs: ' + JSON.stringify(decArr));
+    }}
+
+    var faNoGetter = C.fieldAttrFlags({{ dataRef: 'SomeType', notifier: {{ id: 32770 }} }});
+    var faWithGetter = C.fieldAttrFlags({{ getter: true, notifier: true }});
+    if (faNoGetter.getter !== false || faNoGetter.notifier !== true || faNoGetter.setter !== false) {{
+      throw new Error('fieldAttrFlags must NOT assume getter=true when getter is undefined: ' + JSON.stringify(faNoGetter));
+    }}
+    if (faWithGetter.getter !== true || faWithGetter.notifier !== true) {{
+      throw new Error('fieldAttrFlags getter=true mismatch: ' + JSON.stringify(faWithGetter));
+    }}
+
+    var ccV65 = new C.CheckControlTracker();
+    var ccSt65 = new C.TelemetryTracker().state;
+    ccV65.feedBasicList(decArr);
+    if (!ccV65.hasUnresolvedActiveIds()) {{
+      throw new Error('Expected hasUnresolvedActiveIds() === true before ccList names arrive');
+    }}
+    ccV65.feedCcNames({{
+      ccList: [
+        {{ cCIdentifer: 215, cCShortName: 'M? n?p ca-p?', cCColor: 'RED' }},
+        {{ cCIdentifer: 216, cCShortName: 'Mở cửa trước trái', cCColor: 'YELLOW' }},
+        {{ cCIdentifer: 217, cCShortName: 'Mở cốp sau', cCColor: 'YELLOW' }}
+      ]
+    }});
+    ccV65.feedBasicList({{
+      basicList: [
+        {{ ccmId: 215, activeState: 'AKTIV' }},
+        {{ ccmId: 216, activeState: 'AKTIV' }},
+        {{ ccmId: 217, activeState: 'AKTIV' }}
+      ]
+    }});
+    if (ccV65.hasUnresolvedActiveIds()) {{
+      throw new Error('Expected hasUnresolvedActiveIds() === false after ccList names arrive');
+    }}
+    ccV65.applyToState(function(p) {{ Object.assign(ccSt65, p); }}, ccSt65);
+    if (ccSt65.hoodOpen !== true || ccSt65.trunkOpen !== true || ccSt65.doorsOpen.indexOf('Mở cửa trước trái') < 0) {{
+      throw new Error('v0.6.5 CheckControl closure detection failed: ' + JSON.stringify(ccSt65));
+    }}
+    ccV65.feedBasicList({{ basicList: [] }});
+    ccV65.applyToState(function(p) {{ Object.assign(ccSt65, p); }}, ccSt65);
+    if (ccSt65.hoodOpen !== false || ccSt65.trunkOpen !== false || ccSt65.doorsOpen.length !== 0) {{
+      throw new Error('v0.6.5 CheckControl closure clear failed: ' + JSON.stringify(ccSt65));
+    }}
+
+    // Interior lock while sitting inside (DWA stays DWA_ENTSCHAERFT on 4.5s polls) MUST keep locked=true!
+    var inCab = new C.TelemetryTracker();
+    inCab.state._sawDwaArmed = true;
+    inCab.state.dwaArmed = false;
+    inCab.state.locked = false;
+    C.interpretBodyField('de.bmw.infotainment.vehicle.Vehicle', 'centralLockingStatus', {{ statusCentralLocking: 'VERRIEGELT' }}, function(p) {{ inCab.update(p, 6000000); }}, inCab.state);
+    if (inCab.state.locked !== true || inCab.state._centralLockLocked !== true) {{
+      throw new Error('Interior centralLock VERRIEGELT must set locked=true: ' + JSON.stringify(inCab.state));
+    }}
+    C.interpretLscField('dWAStatus', {{ statusDWAArming: 'DWA_ENTSCHAERFT', statusDWAAlarmReason: 'KEIN_ALARM' }}, function(p) {{ inCab.update(p, 6004500); }}, inCab.state);
+    if (inCab.state.locked !== true) {{
+      throw new Error('4.5s DWA_ENTSCHAERFT poll overwrote interior locked=true!');
+    }}
+    C.interpretBodyField('de.bmw.infotainment.vehicle.Vehicle', 'centralLockingStatus', {{ statusCentralLocking: 'ENTRIEGELT' }}, function(p) {{ inCab.update(p, 6009000); }}, inCab.state);
+    if (inCab.state.locked !== false || inCab.state._centralLockLocked !== false) {{
+      throw new Error('Interior centralLock ENTRIEGELT must clear locked=false: ' + JSON.stringify(inCab.state));
+    }}
+
+    // Vent error vs 1CR error + unlocked cabin auto-vent fallback
+    var ventErrMsg = C.explainVentError({{ remoteErr: 'AUS', consentEnabled: true }}, {{ rpm: 0 }});
+    if (ventErrMsg.indexOf('FSC 1CR') >= 0 || ventErrMsg.indexOf('quạt gió') < 0) {{
+      throw new Error('explainVentError must explain ventilation instead of FSC 1CR: ' + ventErrMsg);
+    }}
+    var cabVentPlan = C.build1crOrderedCandidates(rcCat, liveIdle, true, {{ ventOnly: true, allowUnlockedAutoVent: true }});
+    if (cabVentPlan.candidates[0].stage !== 'vent_only' ||
+        !cabVentPlan.candidates.some(function(x){{ return x.stage === 'vent_cabin_auto'; }}) ||
+        cabVentPlan.candidates.some(function(x){{ return x.payload && x.payload.operationRemoteStart === 'REMOTE_ENGINE_START_EIN'; }})) {{
+      throw new Error('allowUnlockedAutoVent plan mismatch: ' + JSON.stringify(cabVentPlan.candidates));
+    }}
     'ALL_JXA_LOGIC_TESTS_PASSED';
     """
     out = run_jxa(harness)
@@ -1000,6 +1094,8 @@ def check_pwa_and_manifest_filtering():
     app_js = open(os.path.join(ROOT, 'docs/app/app.js'), encoding='utf-8').read()
     assert 'validateHeroDataUrl' in app_js and 'srcBright < 80' in app_js and 'mqttBuildPublish' in app_js and 'selectCamView' in app_js and 'ensureSnapCrops' in app_js
     assert 'ans === 0' in app_js and 'renderCheckControlAlerts' in app_js and 'kombiCbsBox' in app_js
+    assert 'tile.openstreetmap.org' in app_js and 'cartocdn' not in app_js, 'Leaflet map must use OSM tiles instead of API-key-locked Carto tiles'
+    assert 'photon.komoot.io/api/' in app_js and 'photon.komoot.io/reverse' in app_js and 'openSentDestinationMaps' in app_js
 
     # Verify HTML IDs, JS handlers & CSS overflow-proof grid rules
     html_src = open(os.path.join(ROOT, 'docs/app/index.html'), encoding='utf-8').read()
@@ -1289,6 +1385,57 @@ def check_pwa_and_manifest_filtering():
         """)
         parsed_proc = json.loads(proc_check)
         assert parsed_proc['id'] == 'bimmer_link2' and parsed_proc['uid'] == 5099 and parsed_proc['fromProc'] is True, f"VietMap cwd UID failed: {parsed_proc}"
+
+        # v0.6.5: Verify scheduled MGU vehicle-clock timer (`car_clock` -> `checkScheduledTimer`) & `ventilate` engineRunning guard!
+        car_src_for_bl = open(os.path.join(ROOT, 'tools/bimmer-link/car-link.js'), encoding='utf-8').read()
+        sched_check = run_jxa(f"""
+        var carMod = {{ exports: {{}} }};
+        new Function('require', 'module', 'exports', '__dirname', '__filename', 'process', {json.dumps(car_src_for_bl)})(
+          function() {{ return {{}}; }}, carMod, carMod.exports, '/', '/car-link.js', {{ env: {{}}, argv: [], on: function(){{}} }}
+        );
+        var files = {{ '/state/config.json': JSON.stringify({{ timerEnabled: true, autoSyncTimer: true, dailyTimer: '07:30', tzOffsetMin: 420 }}) }};
+        var dirs = {{ '/': true, '/state': true, '/run': true }};
+        var fs = {{
+          existsSync: function(p) {{ return !!(dirs[p] || files[p] !== undefined); }},
+          readFileSync: function(p) {{ if (files[p] === undefined) throw new Error('no ' + p); return files[p]; }},
+          writeFileSync: function(p, v) {{ files[p] = String(v); }},
+          renameSync: function(a, b) {{ files[b] = files[a]; delete files[a]; }},
+          mkdirSync: function(p) {{ dirs[p] = true; }},
+          readdirSync: function() {{ return []; }},
+          chmodSync: function() {{}},
+          chownSync: function() {{}},
+          statSync: function() {{ return {{ uid: 0, gid: 0 }}; }}
+        }};
+        var path = {{
+          join: function() {{ return Array.prototype.slice.call(arguments).join('/').replace(/[/]+/g, '/'); }},
+          dirname: function(p) {{ return p.split('/').slice(0, -1).join('/') || '/'; }}
+        }};
+        var req = function(n) {{
+          if (n === 'fs') return fs;
+          if (n === 'path') return path;
+          if (n === 'crypto') return {{ randomBytes: function() {{ return {{ readUInt16BE: function() {{ return 4321; }} }}; }} }};
+          if (n === './car-link') return carMod.exports;
+          if (n === './telegram') return {{ TelegramController: function() {{ this.lastOkAt = 0; this.lastError = ''; this.sendMessage = function() {{ return Promise.resolve(); }}; }}, formatStatusCaption: function() {{ return ''; }} }};
+          if (n === './cloud') return {{ loadOrCreateIdentity: function() {{ return {{ pairCode: 'ABCD' }}; }}, CloudBridge: function() {{ this.isOnline = function() {{ return true; }}; this.pairingUrl = function() {{ return ''; }}; this.publishState = function() {{ return Promise.resolve(); }}; this.stop = function() {{}}; this.lastOkAt = 1; }} }};
+          if (n === './car-hero') return {{ scanFactoryVehicle: function() {{ return {{ png: null, meta: {{}} }}; }} }};
+          return {{ options: function() {{ return {{}}; }} }};
+        }};
+        var blMod = {{ exports: {{}} }};
+        new Function('require', 'module', 'exports', '__dirname', 'process', {json.dumps(bl_src)})(
+          req, blMod, blMod.exports, '/tmp', {{ env: {{}}, pid: 1, getuid: function() {{ return 0; }}, argv: ['node', 'x', 'lib'], stdout: {{ write: function(){{}} }} }}
+        );
+        var svc = blMod.exports.createService({{ state: '/state', run: '/run', oap: '/oap', proc: '/proc', noServer: true, noWorker: true, noCloud: true }});
+        svc.onWorkerEvent({{ ev: 'car_clock', utcMs: Date.UTC(2026, 10, 26, 0, 30, 10), tzMin: 420 }});
+        svc.checkScheduledTimer();
+        var cfgAfter = svc.getConfig();
+        svc.S.workerUp = true;
+        svc.S.telemetry.engineRunning = true;
+        svc.executeAction('ventilate', {{}}, 'App');
+        JSON.stringify({{ fireKey: cfgAfter.lastTimerFiredKey, msg: svc.S.message, kind: svc.S.messageKind }});
+        """)
+        sc_res = json.loads(sched_check)
+        assert sc_res['fireKey'] == '2026-11-26@07:30', f"Scheduled MGU timer did not fire at 07:30 UTC+7: {sc_res}"
+        assert sc_res['kind'] == 'warn' and 'đang nổ máy' in sc_res['msg'], f"Ventilate guard failed: {sc_res}"
 
         # Verify CarHero F90LCI M5 CS (TrimL gold wheels/grille in vehicle2D_small beating TrimA in vehicle2D_big + F90->F90LCI heal)
         hero_src = open(os.path.join(ROOT, 'tools/bimmer-link/car-hero.js'), encoding='utf-8').read()

@@ -254,6 +254,9 @@ mgu.run({
                 }
                 return val;
             }
+            if (/^array$/i.test(tp) && sc.e && Array.isArray(val)) {
+                return val.map((item) => decodeWireBySchema(item, sc.e));
+            }
             if (/^struct$/i.test(tp) && Array.isArray(sc.e) && typeof val === 'object' && !Array.isArray(val)) {
                 const out = {};
                 const keys = Object.keys(val);
@@ -275,27 +278,83 @@ mgu.run({
             oapBodyFlushTimer = setTimeout(() => {
                 oapBodyFlushTimer = null;
                 writeAppFile('oap-body.json', { seq: ++oapBodySeq, at: Date.now(), fields: oapBodyLive });
-            }, 220);
+            }, 180);
+        }
+
+        function recordOapField(ifn, fname, rawVal) {
+            if (rawVal === undefined || rawVal === null) return;
+            let decoded = rawVal;
+            try {
+                const cfg = signals && signals.loadConfig ? signals.loadConfig(ifn) : null;
+                const fSc = cfg && cfg.fields && cfg.fields[fname] && cfg.fields[fname].schema;
+                if (fSc) decoded = decodeWireBySchema(rawVal, fSc);
+            } catch (e) {}
+            oapBodyLive[ifn + '.' + fname] = decoded;
+            scheduleOapBodyFlush();
+        }
+
+        // Direct verified OAP subscriptions matching mgu_diagnostics, car_vitals & service on G30 iDrive 7
+        if (signals && signals.watch && signals.hasNative && signals.hasNative()) {
+            let kombi2Sub = null;
+            signals.watch('de.bmw.infotainment.KombiInterface_2', '1', {
+                ccList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'ccList', v),
+                newCCMessage: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'newCCMessage', v),
+                cbsDataServiceList: (v) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'cbsDataServiceList', v),
+            }, log, { pollMs: 12000 }).then((s) => { kombi2Sub = s; }).catch(() => {});
+
+            signals.watch('de.bmw.infotainment.checkcontrol.CheckControlMaster', '1', {
+                basicList: (v) => {
+                    recordOapField('de.bmw.infotainment.checkcontrol.CheckControlMaster', 'basicList', v);
+                    if (kombi2Sub && kombi2Sub.proxy) {
+                        oapGet(kombi2Sub.proxy, 'ccList', 1500)
+                            .then((cc) => recordOapField('de.bmw.infotainment.KombiInterface_2', 'ccList', cc))
+                            .catch(() => {});
+                    }
+                },
+            }, log, { pollMs: 4500 }).catch(() => {});
+
+            signals.watch('de.bmw.infotainment.KombiIF', '1', {
+                statusRangeTankStatus: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusRangeTankStatus', v),
+                statusShowTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusShowTimeDate', v),
+                statusTimeDate: (v) => recordOapField('de.bmw.infotainment.KombiIF', 'statusTimeDate', v),
+            }, log, { pollMs: 10000 }).catch(() => {});
+
+            signals.watch('de.bmw.infotainment.lsc.LSCDataSink', '1', {
+                dWAStatus: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'dWAStatus', v),
+                positionWindowRegulatorDRD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorDRD', v),
+                positionWindowRegulatorPSD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorPSD', v),
+                positionWindowRegulatorDRDR: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorDRDR', v),
+                positionWindowRegulatorPSDR: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionWindowRegulatorPSDR', v),
+                positionSHD: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'positionSHD', v),
+                statusExtendedControlsTrunk: (v) => recordOapField('de.bmw.infotainment.lsc.LSCDataSink', 'statusExtendedControlsTrunk', v),
+            }, log, { pollMs: 5000 }).catch(() => {});
+
+            signals.watch('de.bmw.infotainment.vehicle.TPMS', '1', {
+                statusTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyrePressure', v),
+                statusTargetTyrePressure: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTargetTyrePressure', v),
+                statusTyreTemperature: (v) => recordOapField('de.bmw.infotainment.vehicle.TPMS', 'statusTyreTemperature', v),
+            }, log, { pollMs: 12000 }).catch(() => {});
         }
 
         async function startOapBodyWatchers() {
             if (!signals || !signals.hasNative || !signals.hasNative()) return;
             const dirs = [
-                path.resolve(__dirname, '..', 'someipInterfaces'),
                 path.resolve(__dirname, '..', '..', 'someipInterfaces'),
+                path.resolve(__dirname, '..', '..', '..', 'someipInterfaces'),
+                path.resolve(__dirname, '..', 'someipInterfaces'),
                 path.resolve(__dirname, 'someipdefs'),
             ];
             let files = [], chosenDir = '';
             for (let d = 0; d < dirs.length; d++) {
                 try {
-                    const list = fs.readdirSync(dirs[d]).filter((f) => /\.json$/i.test(f));
+                    const list = fs.readdirSync(dirs[d]).filter((f) => /\.json$/i.test(f) && !/^acl\.json$/i.test(f));
                     if (list.length) { files = list; chosenDir = dirs[d]; break; }
                 } catch (e) {}
             }
             if (!files.length) return;
 
-            const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager)(\.|$)/i;
-            const wantFieldRe = /(basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|lockState|^statusLock|verriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition)/i;
+            const skipIfaceRe = /(^|\.)(hmi|oap|oapcontroller|cameraproxy|xview|climate|steeringwheel|personalization|dataprivacy|lifecycle|provisioning|nodestatemanager|tasu)(\.|$)/i;
+            const wantFieldRe = /(basicList|ccList|newCCMessage|cbsDataServiceList|cbsDataSBA|statusRangeTankStatus|statusShowTimeDate|statusTimeDate|statusTyrePressure|statusTyreTemperature|statusNewCurrentUnitsStatusExt|ExteriorTemperature|currentLocation|rawPositionData|door|tuer|flap|klappe|bonnet|hood|motorhaube|haube|tailgate|trunk|bootLid|heckklappe|kofferraum|centralLock|doorLock|lockState|lockStatus|statusLock|verriegel|zentralverriegel|checkControl|pressureTyre|tyrePressure|tirePressure|positionWindow|positionSHD|dWAStatus|mileageRange|^range$|dataRangeDisplay|fuelSupply|VehicleCondition|parkingFunctionIncident)/i;
             const skipFieldRe = /(ckm|keyMemory|setting|config|quittier|autoLock|verriegelnBei|dynamicRange|speedRange|scaleRange|freqRange|audio|exhaust|abgas|radiator|kuehler|jalousie|airFlap|climate|tankFlap|charge|charging|lade|mirror|spiegel|handle|griff|light|licht|heating)/i;
             const pollTargets = [];
 
@@ -309,7 +368,8 @@ mgu.run({
                 const matched = Object.keys(fieldsObj).filter((fn) => wantFieldRe.test(fn) && !skipFieldRe.test(fn));
                 if (!matched.length) continue;
 
-                const list = await getOapInstances(stem);
+                let list = await getOapInstances(ifn);
+                if (!list.length && ifn !== stem) list = await getOapInstances(stem);
                 if (!list.length) continue;
 
                 for (let li = 0; li < list.length; li++) {
@@ -328,7 +388,7 @@ mgu.run({
                         }
                         if (fMeta.getter) {
                             oapGet(px, fname, 1800).then(onVal).catch(() => {});
-                            if (li === 0) pollTargets.push({ px, fname, onVal, fast: /^(dWAStatus|centralLock|lockState|statusLock)/i.test(fname) });
+                            if (li === 0) pollTargets.push({ px, fname, onVal, fast: /^(dWAStatus|basicList|centralLock|doorLock|lockState|lockStatus|statusLock)/i.test(fname) });
                         }
                     }
                 }
