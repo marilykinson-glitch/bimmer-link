@@ -28,8 +28,9 @@ const CarLink = require('./car-link');
 const Cloud = require('./cloud');
 const CarHero = require('./car-hero');
 const Cam360 = require('./cam360');
+const AaWifi = require('./aa-wifi');
 
-const VERSION = '0.6.8';
+const VERSION = '0.6.9';
 const FW_TAG = 'bimmer-link';
 const APP_RE = /^bimmer_link\d*$/;
 
@@ -49,6 +50,8 @@ const CFG = {
     tgBaseUrl: env('BL_TG_BASE', ''),
     noCloud: env('BL_NO_CLOUD', '') === '1',
     relayHost: env('BL_RELAY_HOST', ''),
+    uplinkRun: env('BL_UPLINK_RUN', '/run/mgu-uplink'),
+    noAaWifi: env('BL_NO_AA_WIFI', '') === '1',
 };
 
 const LOGS = [];
@@ -394,7 +397,20 @@ function createService(customCfg) {
         upOpts,
         getConfig: () => config,
         log,
-        onAction: (act, arg) => executeAction(act, arg, 'Telegram'),
+        onAction: (act, arg) => {
+            aaWifi.notifyRemoteActivity();
+            return executeAction(act, arg, 'Telegram');
+        },
+    });
+
+    const aaWifi = new AaWifi.AaWifiCoordinator({
+        stateDir: path.join(C.state, 'state'),
+        uplinkRun: C.uplinkRun,
+        procDir: C.proc,
+        disabled: !!C.noAaWifi,
+        getTelemetry: () => S.telemetry,
+        isValetEnabled: () => !!(config && config.valet && config.valet.enabled),
+        log,
     });
 
     const identity = Cloud.loadOrCreateIdentity(path.join(C.state, 'cloud-identity.json'));
@@ -455,6 +471,7 @@ function createService(customCfg) {
         enabled: !C.noCloud,
         log,
         onCommand: async (cmdObj) => {
+            aaWifi.notifyRemoteActivity();
             const c = String(cmdObj.cmd || '');
             const a = cmdObj.arg || {};
             if (!cmdObj.queueIfAsleep && cmdObj.at) syncClock(Number(cmdObj.at));
@@ -670,13 +687,16 @@ function createService(customCfg) {
                 syncCloudState(true);
             }
             checkValetViolations();
+            aaWifi.tick();
             writeStatus();
             syncCloudState(false);
         } else if (msg.ev === 'parked') {
             if (msg.state) S.telemetry = msg.state;
+            aaWifi.notifyParked();
             onCarParked(msg.trip || null);
         } else if (msg.ev === 'dwa_alarm') {
             if (msg.state) S.telemetry = msg.state;
+            aaWifi.notifyRemoteActivity();
             onDwaAlarmTriggered(msg.reason || 'DWA');
         } else if (msg.ev === 'reply' && msg.reqId && S.pendingReqs[msg.reqId]) {
             const cb = S.pendingReqs[msg.reqId];
@@ -754,6 +774,7 @@ function createService(customCfg) {
     }
 
     async function onCarParked(trip) {
+        aaWifi.notifyParked();
         if (trip && trip.distanceKm >= 0.1) {
             trips.unshift(trip);
             if (trips.length > 20) trips.length = 20;
@@ -1350,6 +1371,7 @@ function createService(customCfg) {
             trips: trips.slice(0, 6),
             wantCamUntil: S.wantCamUntil || 0,
             oapReq: S.oapReq || null,
+            wifiGuard: aaWifi.summary(),
             message: S.message,
             messageKind: S.messageKind,
         };
@@ -1618,6 +1640,7 @@ function createService(customCfg) {
 
     function start() {
         try { Up.pickUid(upOpts); } catch (e) {}
+        aaWifi.start();
         startWorker();
 
         if (!C.noServer) {
@@ -1675,12 +1698,14 @@ function createService(customCfg) {
             S,
             tg,
             cloud,
+            aaWifi,
             getConfig: () => config,
             executeAction,
             onWorkerEvent,
             stop: () => {
                 tg.stopped = true;
                 cloud.stop();
+                aaWifi.stop();
                 clearInterval(tickTimer);
                 clearInterval(fwTimer);
                 if (S.server) { try { S.server.close(); } catch (e) {} }
@@ -1689,7 +1714,7 @@ function createService(customCfg) {
         };
     }
 
-    return { S, tg, start, executeAction, onWorkerEvent, writeStatus, handleHttp, checkScheduledTimer, getConfig: () => config };
+    return { S, tg, aaWifi, start, executeAction, onWorkerEvent, writeStatus, handleHttp, checkScheduledTimer, getConfig: () => config };
 }
 
 if (require.main === module) {

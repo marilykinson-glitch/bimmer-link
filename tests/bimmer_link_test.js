@@ -13,6 +13,7 @@ const CarLink = require('../tools/bimmer-link/car-link');
 const Snap = require('../tools/bimmer-link/snapshot');
 const Tg = require('../tools/bimmer-link/telegram');
 const Up = require('../tools/bimmer-link/uplink');
+const AaWifi = require('../tools/bimmer-link/aa-wifi');
 const Svc = require('../tools/bimmer-link/bimmer-link');
 const UI = require('../apps/bimmer_link/ui');
 const { Canvas } = require('../kit/runtime/canvas');
@@ -186,6 +187,9 @@ async function runTests() {
         messageKind: 'go',
     }, {});
     assert(cv.png().length > 5000, 'in-car UI canvas renders valid PNG');
+    assert.strictEqual(AaWifi.isAndroidAaSsid('Xiaomi 15 Ultra', []), true, 'recognizes Xiaomi 15 Ultra');
+    assert.strictEqual(AaWifi.isAndroidAaSsid('Drag0n’s iPhone', []), false, 'ignores iPhone hotspot');
+    assert(svc.aaWifi && typeof svc.aaWifi.summary === 'function', 'aaWifi wired into service');
 
     running.stop();
     mockTg.close();

@@ -25,6 +25,7 @@ JS_FILES = [
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
     'tools/bimmer-link/uplink.js',
+    'tools/bimmer-link/aa-wifi.js',
     'scripts/make_icon.js',
     'scripts/check_node8.js',
 ]
@@ -1661,6 +1662,7 @@ def check_pwa_and_manifest_filtering():
 
         # v0.6.5: Verify scheduled MGU vehicle-clock timer (`car_clock` -> `checkScheduledTimer`) & `ventilate` engineRunning guard!
         car_src_for_bl = open(os.path.join(ROOT, 'tools/bimmer-link/car-link.js'), encoding='utf-8').read()
+        aa_src_for_bl = open(os.path.join(ROOT, 'tools/bimmer-link/aa-wifi.js'), encoding='utf-8').read()
         sched_check = run_jxa(f"""
         var carMod = {{ exports: {{}} }};
         new Function('require', 'module', 'exports', '__dirname', '__filename', 'process', {json.dumps(car_src_for_bl)})(
@@ -1683,11 +1685,17 @@ def check_pwa_and_manifest_filtering():
           join: function() {{ return Array.prototype.slice.call(arguments).join('/').replace(/[/]+/g, '/'); }},
           dirname: function(p) {{ return p.split('/').slice(0, -1).join('/') || '/'; }}
         }};
+        var aaMod = {{ exports: {{}} }};
+        new Function('require', 'module', 'exports', '__dirname', '__filename', 'process', {json.dumps(aa_src_for_bl)})(
+          function(n) {{ if (n === 'fs') return fs; if (n === 'path') return path; return {{}}; }},
+          aaMod, aaMod.exports, '/', '/aa-wifi.js', {{ env: {{}}, pid: 1, getuid: function(){{ return 0; }} }}
+        );
         var req = function(n) {{
           if (n === 'fs') return fs;
           if (n === 'path') return path;
           if (n === 'crypto') return {{ randomBytes: function() {{ return {{ readUInt16BE: function() {{ return 4321; }} }}; }} }};
           if (n === './car-link') return carMod.exports;
+          if (n === './aa-wifi') return aaMod.exports;
           if (n === './telegram') return {{ TelegramController: function() {{ this.lastOkAt = 0; this.lastError = ''; this.sendMessage = function() {{ return Promise.resolve(); }}; }}, formatStatusCaption: function() {{ return ''; }} }};
           if (n === './cloud') return {{ loadOrCreateIdentity: function() {{ return {{ pairCode: 'ABCD' }}; }}, CloudBridge: function() {{ this.isOnline = function() {{ return true; }}; this.pairingUrl = function() {{ return ''; }}; this.publishState = function() {{ return Promise.resolve(); }}; this.stop = function() {{}}; this.lastOkAt = 1; }} }};
           if (n === './car-hero') return {{ scanFactoryVehicle: function() {{ return {{ png: null, meta: {{}} }}; }} }};
@@ -1795,10 +1803,404 @@ def check_pwa_and_manifest_filtering():
     print('[OK] PWA client syntax, black-canvas guard, and OAP SOME/IP catalog filtering verified')
 
 
+def check_aa_wifi_coordinator_in_jxa():
+    aa_src = open(os.path.join(ROOT, 'tools/bimmer-link/aa-wifi.js'), encoding='utf-8').read()
+    jxa = f"""
+    function SyncPromise(fn) {{
+      var val, err, isErr = false;
+      fn(function(v) {{ val = v; }}, function(e) {{ err = e; isErr = true; }});
+      this._v = val; this._e = err; this._isErr = isErr;
+    }}
+    SyncPromise.resolve = function(v) {{
+      return (v && typeof v.then === 'function') ? v : new SyncPromise(function(res) {{ res(v); }});
+    }};
+    SyncPromise.prototype.then = function(onOk, onErr) {{
+      try {{
+        if (this._isErr) {{
+          if (onErr) return SyncPromise.resolve(onErr(this._e));
+          return this;
+        }}
+        return onOk ? SyncPromise.resolve(onOk(this._v)) : this;
+      }} catch (e) {{
+        return new SyncPromise(function(_, rej) {{ rej(e); }});
+      }}
+    }};
+    SyncPromise.prototype.catch = function(onErr) {{ return this.then(null, onErr); }};
+
+    var files = {{}};
+    var dirs = {{
+      '/': true, '/state': true, '/uplink': true, '/proc': true, '/proc/net': true,
+      '/sys': true, '/sys/class': true, '/sys/class/rfkill': true, '/sys/class/rfkill/rfkill0': true,
+      '/sys/class/net': true, '/sys/class/net/wlan0': true,
+      '/var/opt/devlink-wifi': true, '/etc/systemd/system/mgu-uplink.service.d': true,
+      '/etc/systemd/system': true, '/etc/systemd/system/multi-user.target.wants': true,
+      '/dev/shm/waze-on-cluster': true
+    }};
+    var mtimes = {{}};
+    var nowMs = 1700000000000;
+
+    function norm(p) {{ return String(p).replace(/[/]+/g, '/').replace(/\\/$/, '') || '/'; }}
+    var fs = {{
+      existsSync: function(p) {{ p = norm(p); return !!(dirs[p] || files[p] !== undefined); }},
+      readFileSync: function(p) {{ p = norm(p); if (files[p] === undefined) throw new Error('ENOENT ' + p); return files[p]; }},
+      writeFileSync: function(p, v) {{ p = norm(p); files[p] = String(v); mtimes[p] = nowMs; }},
+      renameSync: function(a, b) {{ a = norm(a); b = norm(b); files[b] = files[a]; mtimes[b] = nowMs; delete files[a]; }},
+      unlinkSync: function(p) {{ p = norm(p); delete files[p]; }},
+      mkdirSync: function(p) {{ dirs[norm(p)] = true; }},
+      rmdirSync: function(p) {{
+        p = norm(p);
+        var prefix = p + '/';
+        for (var k in files) if (k.indexOf(prefix) === 0) throw new Error('ENOTEMPTY');
+        delete dirs[p];
+      }},
+      readdirSync: function(p) {{
+        p = norm(p);
+        var prefix = p === '/' ? '/' : (p + '/');
+        var seen = {{}}, out = [];
+        for (var k in files) {{
+          if (k.indexOf(prefix) === 0) {{
+            var seg = k.slice(prefix.length).split('/')[0];
+            if (seg && !seen[seg]) {{ seen[seg] = true; out.push(seg); }}
+          }}
+        }}
+        for (var d in dirs) {{
+          if (d !== p && d.indexOf(prefix) === 0) {{
+            var dseg = d.slice(prefix.length).split('/')[0];
+            if (dseg && !seen[dseg]) {{ seen[dseg] = true; out.push(dseg); }}
+          }}
+        }}
+        return out;
+      }},
+      openSync: function(p, flags) {{
+        p = norm(p);
+        if (flags === 'wx' && files[p] !== undefined) {{
+          var e = new Error('EEXIST'); e.code = 'EEXIST'; throw e;
+        }}
+        files[p] = '';
+        mtimes[p] = nowMs;
+        return p;
+      }},
+      writeSync: function(fd, s) {{ files[fd] = (files[fd] || '') + String(s); }},
+      closeSync: function() {{}},
+      statSync: function(p) {{
+        p = norm(p);
+        if (files[p] === undefined && !dirs[p]) throw new Error('ENOENT ' + p);
+        var mt = mtimes[p] || nowMs;
+        return {{ mtime: {{ getTime: function() {{ return mt; }} }} }};
+      }}
+    }};
+    var path = {{
+      join: function() {{ return norm(Array.prototype.slice.call(arguments).join('/')); }},
+      dirname: function(p) {{ p = norm(p); var i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }}
+    }};
+    var aaMod = {{ exports: {{}} }};
+    new Function('require', 'module', 'exports', '__dirname', '__filename', 'process', 'Promise', {json.dumps(aa_src)})(
+      function(n) {{ if (n === 'fs') return fs; if (n === 'path') return path; return {{}}; }},
+      aaMod, aaMod.exports, '/', '/aa-wifi.js', {{ env: {{}}, pid: 777, getuid: function() {{ return 0; }} }}, SyncPromise
+    );
+    var A = aaMod.exports;
+
+    function setTcp(aaConnected, cpConnected, loopbackOnly) {{
+      var rows = ['  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'];
+      if (loopbackOnly) {{
+        rows.push('   0: 0100007F:1388 0100007F:C350 01 00000000:00000000 00:00000000 00000000 13006        0 100');
+      }}
+      if (aaConnected) {{
+        rows.push('   1: 61DE10AC:14E0 69DE10AC:D9AA 01 00000000:00000000 00:00000000 00000000 13006        0 101');
+      }}
+      if (cpConnected) {{
+        rows.push('   2: 61DE10AC:1B58 6ADE10AC:C111 01 00000000:00000000 00:00000000 00000000 13002        0 102');
+      }}
+      files['/proc/net/tcp'] = rows.join('\\n') + '\\n';
+      files['/proc/net/tcp6'] = '  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid\\n';
+    }}
+
+    function setUplink(wifiEnabled, link, ssid, nets, saved, errStr) {{
+      files['/uplink/status.json'] = JSON.stringify({{
+        state: link === 'online' ? 'online' : 'searching',
+        wifi: {{
+          enabled: wifiEnabled,
+          link: link,
+          ssid: ssid || '',
+          signal: -45,
+          networks: nets || [],
+          saved: saved || ['Drag0n’s iPhone', 'Xiaomi 15 Ultra'],
+          error: errStr || null
+        }}
+      }});
+    }}
+
+    var ctlCalls = [];
+    var execCalls = [];
+    var telem = {{ condition: 5, engineRunning: false, rpm: 0, locked: false, dwaArmed: false, doorsOpen: ['Cửa Tài'], climate1cr: {{ active: false }} }};
+    var valetOn = false;
+
+    setTcp(false, false, true);
+    files['/proc/net/dev'] = 'Inter-|   Receive\\n  p2p-wlan0-0: 1000 10 0 0 0 0 0 0 500 5\\n';
+    files['/proc/net/arp'] = 'IP address       HW type     Flags       HW address            Mask     Device\\n';
+    setUplink(true, 'online', 'Xiaomi 15 Ultra', [{{ ssid: 'Xiaomi 15 Ultra', signal: -45, saved: true, current: true }}]);
+    files['/uplink/lease.json'] = JSON.stringify({{ interface: 'wlan0', ip: '10.51.97.110', prefix: 24, router: '10.51.97.229', leaseSeconds: 3599 }});
+
+    var coord = new A.AaWifiCoordinator({{
+      stateDir: '/state',
+      uplinkRun: '/uplink',
+      procDir: '/proc',
+      sysDir: '/sys',
+      legacyDir: '/var/opt/devlink-wifi',
+      legacyDropIn: '/etc/systemd/system/mgu-uplink.service.d/20-devlink-wait-car-wifi.conf',
+      legacyWifilogUnit: '/etc/systemd/system/devlink-wifilog.service',
+      legacyWifilogWant: '/etc/systemd/system/multi-user.target.wants/devlink-wifilog.service',
+      deployLockFile: '/var/opt/mgu-deploy/lock',
+      wocRemountLock: '/dev/shm/waze-on-cluster/remount.lock',
+      getTelemetry: function() {{ return telem; }},
+      isValetEnabled: function() {{ return valetOn; }},
+      now: function() {{ return nowMs; }},
+      getuid: function() {{ return 0; }},
+      sendCtl: function(p) {{
+        ctlCalls.push({{ at: nowMs, op: p.op, on: p.on }});
+        if (p.op === 'wifi-enable') {{
+          if (!p.on) setUplink(false, 'off', '', [], []);
+          else setUplink(true, 'online', 'Xiaomi 15 Ultra', [{{ ssid: 'Xiaomi 15 Ultra', signal: -45, saved: true, current: true }}]);
+        }}
+        return SyncPromise.resolve({{ ok: true }});
+      }},
+      execCmd: function(bin, args) {{
+        execCalls.push(bin + ' ' + args.join(' '));
+        if (bin === 'mount' && args.indexOf('remount,rw') >= 0) {{
+          files['/proc/mounts'] = '/dev/mmcblk0p7 / ext4 rw,noatime 0 0\\n';
+        }} else if (bin === 'mount' && args.indexOf('remount,ro') >= 0) {{
+          files['/proc/mounts'] = '/dev/mmcblk0p7 / ext4 ro,noatime 0 0\\n';
+        }}
+        return SyncPromise.resolve({{ ok: true, code: 0, stdout: '', stderr: '' }});
+      }}
+    }});
+
+    // SCENARIO 1: In-car reboot / entry with Xiaomi 15 Ultra (loopback 13006 ignored) -> yields immediately!
+    coord.tick();
+    if (ctlCalls.length !== 1 || ctlCalls[0].on !== false || !coord.pausedByUs) {{
+      throw new Error('Scenario 1a failed: expected wifi-enable(false), got ' + JSON.stringify(ctlCalls));
+    }}
+    var guardDisk = JSON.parse(files['/state/wifi-guard.json']);
+    if (guardDisk.pausedByUs !== true) throw new Error('Scenario 1b: guard state not persisted');
+
+    // Brief transient AA TCP blip at +2s (rpm=0) MUST NOT abort yield prematurely!
+    nowMs += 2000;
+    setTcp(true, false, false);
+    coord.tick();
+    if (!coord.pausedByUs) throw new Error('Scenario 1c: restored too early before 4.5s settle');
+    nowMs += 500;
+    setTcp(false, false, false);
+    coord.tick();
+    if (!coord.pausedByUs) throw new Error('Scenario 1d: transient handshake blip aborted yield!');
+
+    // AA establishes at +3s, stays up -> settles at +7.6s -> restores wifi-enable(true)!
+    nowMs += 500;
+    setTcp(true, false, false);
+    coord.tick();
+    nowMs += 3000;
+    coord.tick();
+    if (!coord.pausedByUs) throw new Error('Scenario 1e: restored at 3.0s < 4.5s');
+    nowMs += 1600;
+    coord.tick();
+    if (coord.pausedByUs || ctlCalls.length !== 2 || ctlCalls[1].on !== true) {{
+      throw new Error('Scenario 1f: expected wifi-enable(true) after 4.6s settle, got ' + JSON.stringify(ctlCalls));
+    }}
+
+    // SCENARIO 2: Engine shutdown + Park Snapshot + AA disconnect -> ZERO Wi-Fi pause!
+    nowMs += 60000;
+    telem.condition = 12;
+    telem.engineRunning = false;
+    telem.rpm = 0;
+    coord.notifyParked();
+    setTcp(false, false, false);
+    coord.tick();
+    nowMs += 5000;
+    coord.tick();
+    if (ctlCalls.length !== 2) throw new Error('Scenario 2: Park Snapshot must NEVER pause Wi-Fi!');
+
+    // SCENARIO 3: Parked & locked outside -> Remote 1CR start -> Valet -> Owner 1CR takeover!
+    telem.condition = 2;
+    telem.locked = true;
+    telem.dwaArmed = true;
+    telem.doorsOpen = [];
+    nowMs += 70000;
+    coord.tick();
+    nowMs += 16000;
+    coord.tick();
+    if (coord.yieldedThisCycle !== false) throw new Error('Scenario 3a: yieldedThisCycle should reset after 15s locked outside');
+
+    telem.condition = 3;
+    telem.climate1cr = {{ active: true }};
+    nowMs += 2000;
+    coord.tick();
+    if (ctlCalls.length !== 2) throw new Error('Scenario 3b: Remote 1CR start must NEVER pause Wi-Fi!');
+
+    valetOn = true;
+    telem.condition = 10;
+    telem.locked = false;
+    telem.dwaArmed = false;
+    telem.climate1cr = {{ active: false }};
+    nowMs += 2000;
+    coord.tick();
+    if (ctlCalls.length !== 2) throw new Error('Scenario 3c: Valet mode must NEVER pause Wi-Fi!');
+    valetOn = false;
+
+    telem.condition = 3;
+    telem.locked = true;
+    telem.climate1cr = {{ active: true }};
+    nowMs += 2000;
+    coord.tick();
+    nowMs += 16000;
+    coord.tick();
+    telem.locked = false;
+    telem.dwaArmed = false;
+    telem.climate1cr = {{ active: false }};
+    telem.doorsOpen = ['Cửa Tài'];
+    telem.condition = 5;
+    nowMs += 1000;
+    coord.tick();
+    if (ctlCalls.length !== 3 || ctlCalls[2].on !== false) {{
+      throw new Error('Scenario 3d: 1CR owner takeover should yield Wi-Fi for AA');
+    }}
+
+    // SCENARIO 5: AA disabled on phone + active P2P ARP extends 22s -> 30s, then restores & latches!
+    files['/proc/net/arp'] = 'IP address       HW type     Flags       HW address            Mask     Device\\n172.16.222.105   0x1         0x2         ba:11:c2:12:90:7b     *        wlan_bridge\\n';
+    nowMs += 10000; coord.tick();
+    nowMs += 10000; coord.tick();
+    nowMs += 3000;  coord.tick();
+    if (!coord.pausedByUs) throw new Error('Scenario 5a: active P2P ARP handshake should extend yield past 22s');
+    nowMs += 8000;
+    coord.tick();
+    if (coord.pausedByUs || ctlCalls.length !== 4 || ctlCalls[3].on !== true) {{
+      throw new Error('Scenario 5b: hard 30s timeout must restore Wi-Fi');
+    }}
+    files['/proc/net/arp'] = 'IP address       HW type     Flags       HW address            Mask     Device\\n';
+    nowMs += 5000;
+    coord.tick();
+    if (ctlCalls.length !== 4) throw new Error('Scenario 5c: must NOT loop after timeout!');
+
+    // SCENARIO 5d: Verify `/proc/uptime` CLOCK_BOOTTIME immunity to BMW MGU `2023 -> 2026` wall-clock jump!
+    files['/proc/uptime'] = '14.25 28.50\\n';
+    if (A.readBootTimeMs('/proc') !== 14250) throw new Error('Scenario 5d: readBootTimeMs failed');
+
+    // SCENARIO 4: Sleep gap -> Wake WITHOUT Android phone (using iPhone, 4G Router, + unsaved Redmi on street) -> ZERO pause!
+    nowMs += 25000;
+    setUplink(true, 'online', 'Drag0n’s iPhone', [
+      {{ ssid: 'Drag0n’s iPhone', signal: -42, saved: true, current: true }},
+      {{ ssid: 'Viettel_4G_Box', signal: -50, saved: true, current: false }},
+      {{ ssid: 'Redmi Note 13', signal: -60, saved: false, current: false }}
+    ], ['Drag0n’s iPhone', 'Viettel_4G_Box', 'Xiaomi 15 Ultra']);
+    files['/uplink/lease.json'] = JSON.stringify({{ interface: 'wlan0', ip: '172.20.10.4', prefix: 28, router: '172.20.10.1', leaseSeconds: 86000 }});
+    coord.tick();
+    if (ctlCalls.length !== 4) {{
+      throw new Error('Scenario 4: iPhone / 4G router / unsaved stranger Redmi must NEVER pause Wi-Fi!');
+    }}
+
+    // SCENARIO 6: Manual Wi-Fi off in MGU Store (`enabled: false` while `!pausedByUs`) -> NEVER touched!
+    setUplink(false, 'off', '', [], ['Xiaomi 15 Ultra']);
+    nowMs += 2000;
+    coord.tick();
+    if (ctlCalls.length !== 4) throw new Error('Scenario 6: manual Wi-Fi off must never be overridden');
+
+    // SCENARIO 7: Crash / power-cut recovery (`pausedByUs: true` persisted in `wifi-guard.json`) -> immediately restores!
+    files['/state/wifi-guard.json'] = JSON.stringify({{ pausedByUs: true, pausedAt: nowMs - 5000, learnedAaSsids: [] }});
+    var recoveredCoord = new A.AaWifiCoordinator({{
+      stateDir: '/state', uplinkRun: '/uplink', procDir: '/proc', sysDir: '/sys',
+      getTelemetry: function() {{ return telem; }},
+      now: function() {{ return nowMs; }},
+      sendCtl: function(p) {{ ctlCalls.push({{ at: nowMs, op: p.op, on: p.on }}); return SyncPromise.resolve({{ ok: true }}); }}
+    }});
+    recoveredCoord.tick();
+    if (recoveredCoord.pausedByUs || ctlCalls.length !== 5 || ctlCalls[4].on !== true) {{
+      throw new Error('Scenario 7: crash recovery failed to restore Wi-Fi');
+    }}
+
+    // SCENARIO 8: Custom-named Android hotspot auto-learning (`"Bimmer_Ultra"` with Android DHCP `10.51.97.229/24`, 3599s)
+    setTcp(true, false, false);
+    setUplink(true, 'online', 'Bimmer_Ultra', [{{ ssid: 'Bimmer_Ultra', signal: -48, saved: true, current: true }}], ['Bimmer_Ultra']);
+    files['/uplink/lease.json'] = JSON.stringify({{ interface: 'wlan0', ip: '10.51.97.110', prefix: 24, router: '10.51.97.229', leaseSeconds: 3599 }});
+    nowMs += 2000;
+    coord.tick();
+    if (coord.learnedAaSsids.indexOf('Bimmer_Ultra') < 0) {{
+      throw new Error('Scenario 8a: failed to auto-learn custom Android hotspot SSID');
+    }}
+    setUplink(true, 'online', 'Home_Fiber', [{{ ssid: 'Home_Fiber', signal: -45, saved: true, current: true }}], ['Home_Fiber']);
+    files['/uplink/lease.json'] = JSON.stringify({{ interface: 'wlan0', ip: '192.168.1.55', prefix: 24, router: '192.168.1.1', leaseSeconds: 86400 }});
+    nowMs += 2000;
+    coord.tick();
+    if (coord.learnedAaSsids.indexOf('Home_Fiber') >= 0) {{
+      throw new Error('Scenario 8b: home router 192.168.1.1 must NOT be learned as Android phone!');
+    }}
+
+    // SCENARIO 9: Option 3 ConnMan `"the car's Wi-Fi is off"` auto-rescue + 2-attempt cap!
+    setTcp(false, false, false);
+    files['/sys/class/rfkill/rfkill0/type'] = 'wlan\\n';
+    files['/sys/class/rfkill/rfkill0/soft'] = '1\\n';
+    files['/sys/class/net/wlan0/operstate'] = 'down\\n';
+    setUplink(true, 'unavailable', '', [], ['Xiaomi 15 Ultra'], "the car's Wi-Fi is off");
+    nowMs += 2000;
+    coord.tick();
+    nowMs += 12500;
+    coord.tick();
+    if (files['/sys/class/rfkill/rfkill0/soft'] !== '0\\n' || execCalls.length < 3) {{
+      throw new Error('Scenario 9a: ConnMan rescue did not unblock rfkill / call dbus-send / ip link up: ' + JSON.stringify(execCalls));
+    }}
+    var rescuesAfter1 = coord.connmanRescues;
+    for (var ri = 0; ri < 14; ri++) {{
+      nowMs += 10000;
+      coord.tick();
+    }}
+    if (rescuesAfter1 !== 1 || coord.connmanRescues !== 2) {{
+      throw new Error('Scenario 9b: ConnMan rescue rate-limit failed: ' + coord.connmanRescues);
+    }}
+
+    // SCENARIO 10: Legacy `wait-car-wifi.sh` instant neutralization + safe `/` rw->unlink->ro cleanup!
+    files['/var/opt/devlink-wifi/wait-car-wifi.sh'] = '#!/bin/sh\\nsleep 90\\n';
+    files['/var/opt/devlink-wifi/boot-20261122.log'] = 'old log';
+    files['/etc/systemd/system/mgu-uplink.service.d/20-devlink-wait-car-wifi.conf'] = '[Service]\\nExecStartPre=/var/opt/devlink-wifi/wait-car-wifi.sh\\n';
+    files['/etc/systemd/system/devlink-wifilog.service'] = '[Service]\\nExecStart=/bin/sh\\n';
+    files['/etc/systemd/system/multi-user.target.wants/devlink-wifilog.service'] = 'symlink';
+    files['/proc/mounts'] = '/dev/mmcblk0p7 / ext4 ro,noatime 0 0\\n';
+
+    var neutralized = coord.neutralizeLegacyWaitScript();
+    if (!neutralized || files['/var/opt/devlink-wifi/wait-car-wifi.sh'] !== '#!/bin/sh\\nexit 0\\n') {{
+      throw new Error('Scenario 10a: wait-car-wifi.sh was not neutralized immediately');
+    }}
+    files['/proc/mounts'] = '/dev/mmcblk0p7 / ext4 rw,noatime 0 0\\n';
+    var skipRes = coord.cleanupLegacyDropIn()._v;
+    if (!skipRes || skipRes.cleaned !== false || skipRes.reason !== 'root_not_ro') {{
+      throw new Error('Scenario 10b: expected skip when / is already rw, got ' + JSON.stringify(skipRes));
+    }}
+    files['/proc/mounts'] = '/dev/mmcblk0p7 / ext4 ro,noatime 0 0\\n';
+    var cleanRes = coord.cleanupLegacyDropIn()._v;
+    if (!cleanRes || !cleanRes.cleaned || !cleanRes.roRestored) {{
+      throw new Error('Scenario 10c: cleanupLegacyDropIn failed: ' + JSON.stringify(cleanRes));
+    }}
+    if (files['/etc/systemd/system/mgu-uplink.service.d/20-devlink-wait-car-wifi.conf'] !== undefined) {{
+      throw new Error('Scenario 10d: legacy drop-in still exists');
+    }}
+    if (files['/proc/mounts'].indexOf(' ro,') < 0) {{
+      throw new Error('Scenario 10e: root filesystem was not restored to ro!');
+    }}
+    if (files['/dev/shm/waze-on-cluster/remount.lock'] !== undefined) {{
+      throw new Error('Scenario 10f: remount.lock was not released!');
+    }}
+    if (dirs['/var/opt/devlink-wifi'] !== undefined) {{
+      throw new Error('Scenario 10g: /var/opt/devlink-wifi was not cleaned up!');
+    }}
+
+    'AA_WIFI_ALL_10_SCENARIOS_OK';
+    """
+    out = run_jxa(jxa)
+    assert out == 'AA_WIFI_ALL_10_SCENARIOS_OK', f'Unexpected aa-wifi test output: {out}'
+    print('[OK] aa-wifi.js verified across all 10 scenarios (in-car boot, Park Snapshot, 1CR/Valet, iPhone/router, timeout, ConnMan rescue, legacy cleanup)')
+
+
 if __name__ == '__main__':
     ver = check_manifests()
     check_js_syntax_and_node8()
     check_pwa_and_manifest_filtering()
     check_full_mgu_build_and_real_kit_render(ver)
     check_car_link_logic_in_jxa()
+    check_aa_wifi_coordinator_in_jxa()
     print('=== ALL VERIFICATION CHECKS PASSED ===')

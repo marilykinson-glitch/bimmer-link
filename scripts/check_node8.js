@@ -24,6 +24,7 @@ const FILES = [
     'tools/bimmer-link/snapshot.js',
     'tools/bimmer-link/telegram.js',
     'tools/bimmer-link/uplink.js',
+    'tools/bimmer-link/aa-wifi.js',
 ];
 
 const NEWER = [
